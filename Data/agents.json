@@ -1,0 +1,246 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "cursor",
+      "name": {
+        "en": "Cursor",
+        "zh-Hans": "Cursor"
+      },
+      "kind": "app",
+      "match": [
+        {
+          "bundleNames": [
+            "Cursor.app"
+          ]
+        },
+        {
+          "executableNames": [
+            "cursor-agent"
+          ]
+        },
+        {
+          "executableNames": [
+            "node",
+            "bun",
+            "deno"
+          ],
+          "argvBasenames": [
+            "cursor-agent"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "claude-desktop",
+      "name": {
+        "en": "Claude (desktop app)",
+        "zh-Hans": "Claude 桌面版"
+      },
+      "kind": "app",
+      "match": [
+        {
+          "bundleNames": [
+            "Claude.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "chatgpt-desktop",
+      "name": {
+        "en": "ChatGPT (desktop app)",
+        "zh-Hans": "ChatGPT 桌面版"
+      },
+      "kind": "app",
+      "match": [
+        {
+          "bundleNames": [
+            "ChatGPT.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "claude-code",
+      "name": {
+        "en": "Claude Code",
+        "zh-Hans": "Claude Code"
+      },
+      "kind": "cli",
+      "match": [
+        {
+          "executableGlobs": [
+            "**/.local/share/claude/versions/*",
+            "**/Caskroom/claude-code/**"
+          ]
+        },
+        {
+          "executableNames": [
+            "node",
+            "bun",
+            "deno"
+          ],
+          "argvContains": [
+            "@anthropic-ai/claude-code"
+          ]
+        },
+        {
+          "executableNames": [
+            "node",
+            "bun",
+            "deno"
+          ],
+          "argvBasenames": [
+            "claude"
+          ]
+        },
+        {
+          "argv0Names": [
+            "claude"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "codex",
+      "name": {
+        "en": "Codex CLI",
+        "zh-Hans": "Codex CLI"
+      },
+      "kind": "cli",
+      "match": [
+        {
+          "executableNames": [
+            "codex",
+            "codex-aarch64-apple-darwin",
+            "codex-x86_64-apple-darwin"
+          ]
+        },
+        {
+          "executableNames": [
+            "node",
+            "bun",
+            "deno"
+          ],
+          "argvContains": [
+            "@openai/codex"
+          ]
+        },
+        {
+          "executableNames": [
+            "node",
+            "bun",
+            "deno"
+          ],
+          "argvBasenames": [
+            "codex"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gemini-cli",
+      "name": {
+        "en": "Gemini CLI",
+        "zh-Hans": "Gemini CLI"
+      },
+      "kind": "cli",
+      "match": [
+        {
+          "executableNames": [
+            "node",
+            "bun",
+            "deno"
+          ],
+          "argvContains": [
+            "@google/gemini-cli"
+          ]
+        },
+        {
+          "executableNames": [
+            "node",
+            "bun",
+            "deno"
+          ],
+          "argvBasenames": [
+            "gemini"
+          ]
+        },
+        {
+          "executableNames": [
+            "gemini"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "opencode",
+      "name": {
+        "en": "opencode",
+        "zh-Hans": "opencode"
+      },
+      "kind": "cli",
+      "match": [
+        {
+          "executableNames": [
+            "opencode"
+          ]
+        },
+        {
+          "executableNames": [
+            "node",
+            "bun",
+            "deno"
+          ],
+          "argvContains": [
+            "opencode-ai"
+          ]
+        },
+        {
+          "executableNames": [
+            "node",
+            "bun",
+            "deno"
+          ],
+          "argvBasenames": [
+            "opencode"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "aider",
+      "name": {
+        "en": "aider",
+        "zh-Hans": "aider"
+      },
+      "kind": "cli",
+      "match": [
+        {
+          "executableGlobs": [
+            "**/python*",
+            "**/Python"
+          ],
+          "argvBasenames": [
+            "aider"
+          ]
+        },
+        {
+          "executableGlobs": [
+            "**/python*",
+            "**/Python"
+          ],
+          "argvContains": [
+            "aider.main"
+          ]
+        },
+        {
+          "executableNames": [
+            "aider"
+          ]
+        }
+      ]
+    }
+  ]
+}

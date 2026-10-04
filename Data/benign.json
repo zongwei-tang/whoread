@@ -1,0 +1,212 @@
+{
+  "version": 1,
+  "services": [
+    {
+      "id": "spotlight",
+      "group": "spotlight",
+      "name": {
+        "en": "Spotlight",
+        "zh-Hans": "聚焦（Spotlight）"
+      },
+      "identity": {
+        "executables": [
+          "/System/**/mds",
+          "/System/**/mds_stores",
+          "/System/**/mdworker",
+          "/System/**/mdworker_shared",
+          "/System/**/mdsync",
+          "/System/**/mdbulkimport",
+          "/System/**/corespotlightd",
+          "/System/**/Spotlight",
+          "/System/**/spotlightknowledged",
+          "/usr/libexec/**/mds",
+          "/usr/libexec/**/mds_stores",
+          "/usr/libexec/**/mdworker",
+          "/usr/libexec/**/mdworker_shared",
+          "/usr/libexec/**/mdsync",
+          "/usr/libexec/**/mdbulkimport",
+          "/usr/libexec/**/corespotlightd",
+          "/usr/libexec/**/Spotlight",
+          "/usr/libexec/**/spotlightknowledged",
+          "/usr/sbin/**/mds",
+          "/usr/sbin/**/mds_stores",
+          "/usr/sbin/**/mdworker",
+          "/usr/sbin/**/mdworker_shared",
+          "/usr/sbin/**/mdsync",
+          "/usr/sbin/**/mdbulkimport",
+          "/usr/sbin/**/corespotlightd",
+          "/usr/sbin/**/Spotlight",
+          "/usr/sbin/**/spotlightknowledged",
+          "/Library/Apple/**/mds",
+          "/Library/Apple/**/mds_stores",
+          "/Library/Apple/**/mdworker",
+          "/Library/Apple/**/mdworker_shared",
+          "/Library/Apple/**/mdsync",
+          "/Library/Apple/**/mdbulkimport",
+          "/Library/Apple/**/corespotlightd",
+          "/Library/Apple/**/Spotlight",
+          "/Library/Apple/**/spotlightknowledged"
+        ],
+        "platformBinary": true
+      }
+    },
+    {
+      "id": "timemachine",
+      "group": "timemachine",
+      "name": {
+        "en": "Time Machine",
+        "zh-Hans": "时间机器"
+      },
+      "identity": {
+        "executables": [
+          "/System/**/backupd",
+          "/System/**/backupd-helper",
+          "/System/**/TMHelperAgent",
+          "/usr/libexec/**/backupd",
+          "/usr/libexec/**/backupd-helper",
+          "/usr/libexec/**/TMHelperAgent",
+          "/usr/sbin/**/backupd",
+          "/usr/sbin/**/backupd-helper",
+          "/usr/sbin/**/TMHelperAgent",
+          "/Library/Apple/**/backupd",
+          "/Library/Apple/**/backupd-helper",
+          "/Library/Apple/**/TMHelperAgent"
+        ],
+        "platformBinary": true
+      }
+    },
+    {
+      "id": "icloud",
+      "group": "icloud",
+      "name": {
+        "en": "iCloud & File Provider",
+        "zh-Hans": "iCloud 与 File Provider"
+      },
+      "identity": {
+        "executables": [
+          "/System/**/bird",
+          "/System/**/cloudd",
+          "/System/**/fileproviderd",
+          "/System/**/FileProvider",
+          "/System/**/com.apple.CloudDocs.iCloudDriveFileProvider",
+          "/System/**/CloudDocsFileProvider",
+          "/System/**/iCloudDriveFileProvider",
+          "/usr/libexec/**/bird",
+          "/usr/libexec/**/cloudd",
+          "/usr/libexec/**/fileproviderd",
+          "/usr/libexec/**/FileProvider",
+          "/usr/libexec/**/com.apple.CloudDocs.iCloudDriveFileProvider",
+          "/usr/libexec/**/CloudDocsFileProvider",
+          "/usr/libexec/**/iCloudDriveFileProvider",
+          "/usr/sbin/**/bird",
+          "/usr/sbin/**/cloudd",
+          "/usr/sbin/**/fileproviderd",
+          "/usr/sbin/**/FileProvider",
+          "/usr/sbin/**/com.apple.CloudDocs.iCloudDriveFileProvider",
+          "/usr/sbin/**/CloudDocsFileProvider",
+          "/usr/sbin/**/iCloudDriveFileProvider",
+          "/Library/Apple/**/bird",
+          "/Library/Apple/**/cloudd",
+          "/Library/Apple/**/fileproviderd",
+          "/Library/Apple/**/FileProvider",
+          "/Library/Apple/**/com.apple.CloudDocs.iCloudDriveFileProvider",
+          "/Library/Apple/**/CloudDocsFileProvider",
+          "/Library/Apple/**/iCloudDriveFileProvider"
+        ],
+        "platformBinary": true
+      }
+    },
+    {
+      "id": "quicklook",
+      "group": "quicklook",
+      "name": {
+        "en": "Quick Look",
+        "zh-Hans": "快速查看（Quick Look）"
+      },
+      "identity": {
+        "executables": [
+          "/System/**/com.apple.quicklook.ThumbnailsAgent",
+          "/System/**/QuickLookUIService",
+          "/System/**/quicklookd",
+          "/System/**/ExternalQuickLookSatellite*",
+          "/System/**/QuickLookSatellite*",
+          "/System/**/ThumbnailExtension*",
+          "/usr/libexec/**/com.apple.quicklook.ThumbnailsAgent",
+          "/usr/libexec/**/QuickLookUIService",
+          "/usr/libexec/**/quicklookd",
+          "/usr/libexec/**/ExternalQuickLookSatellite*",
+          "/usr/libexec/**/QuickLookSatellite*",
+          "/usr/libexec/**/ThumbnailExtension*",
+          "/usr/sbin/**/com.apple.quicklook.ThumbnailsAgent",
+          "/usr/sbin/**/QuickLookUIService",
+          "/usr/sbin/**/quicklookd",
+          "/usr/sbin/**/ExternalQuickLookSatellite*",
+          "/usr/sbin/**/QuickLookSatellite*",
+          "/usr/sbin/**/ThumbnailExtension*",
+          "/Library/Apple/**/com.apple.quicklook.ThumbnailsAgent",
+          "/Library/Apple/**/QuickLookUIService",
+          "/Library/Apple/**/quicklookd",
+          "/Library/Apple/**/ExternalQuickLookSatellite*",
+          "/Library/Apple/**/QuickLookSatellite*",
+          "/Library/Apple/**/ThumbnailExtension*"
+        ],
+        "platformBinary": true
+      }
+    },
+    {
+      "id": "xprotect",
+      "group": "xprotect",
+      "name": {
+        "en": "XProtect",
+        "zh-Hans": "XProtect"
+      },
+      "identity": {
+        "executables": [
+          "/Library/Apple/System/Library/CoreServices/XProtect.app/**",
+          "/System/**/XprotectService",
+          "/System/**/XProtectPluginService",
+          "/usr/libexec/XProtect*",
+          "/System/**/MRT"
+        ],
+        "platformBinary": true
+      }
+    },
+    {
+      "id": "fsevents",
+      "group": "system",
+      "name": {
+        "en": "File system services",
+        "zh-Hans": "文件系统服务"
+      },
+      "identity": {
+        "executables": [
+          "/System/**/fseventsd",
+          "/System/**/revisiond",
+          "/System/**/filecoordinationd",
+          "/System/**/diskarbitrationd",
+          "/System/**/deleted",
+          "/System/**/cachedeleted",
+          "/usr/libexec/**/fseventsd",
+          "/usr/libexec/**/revisiond",
+          "/usr/libexec/**/filecoordinationd",
+          "/usr/libexec/**/diskarbitrationd",
+          "/usr/libexec/**/deleted",
+          "/usr/libexec/**/cachedeleted",
+          "/usr/sbin/**/fseventsd",
+          "/usr/sbin/**/revisiond",
+          "/usr/sbin/**/filecoordinationd",
+          "/usr/sbin/**/diskarbitrationd",
+          "/usr/sbin/**/deleted",
+          "/usr/sbin/**/cachedeleted",
+          "/Library/Apple/**/fseventsd",
+          "/Library/Apple/**/revisiond",
+          "/Library/Apple/**/filecoordinationd",
+          "/Library/Apple/**/diskarbitrationd",
+          "/Library/Apple/**/deleted",
+          "/Library/Apple/**/cachedeleted"
+        ],
+        "platformBinary": true
+      }
+    }
+  ]
+}
