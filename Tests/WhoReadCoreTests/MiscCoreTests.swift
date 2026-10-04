@@ -120,23 +120,94 @@ final class FormatterAndExportTests: XCTestCase {
 }
 
 final class ArgvRedactorTests: XCTestCase {
+    let R = ArgvRedactor.placeholder
+
+    func r(_ argv: [String]) -> [String] { ArgvRedactor.redact(argv, maxArgs: 32, maxLength: 1000)! }
+
     func testRedaction() {
         XCTAssertEqual(ArgvRedactor.redact(["curl", "-H", "Authorization: Bearer x", "https://api"]),
-                       ["curl", "-H", "‹redacted›", "https://api"])
+                       ["curl", "-H", "Authorization: \(R)", "https://api"])
         XCTAssertEqual(ArgvRedactor.redact(["tool", "--password=hunter2", "API_KEY=abc", "--verbose"]),
-                       ["tool", "--password=‹redacted›", "API_KEY=‹redacted›", "--verbose"])
-        XCTAssertEqual(ArgvRedactor.redact(["aws", "AKIAIOSFODNN7EXAMPLE"]), ["aws", "‹redacted›"])
-        XCTAssertEqual(ArgvRedactor.redact(["x", "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]), ["x", "‹redacted›"])
-        XCTAssertEqual(ArgvRedactor.redact(["x", "Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb7d"]), ["x", "‹redacted›"])
+                       ["tool", "--password=\(R)", "API_KEY=\(R)", "--verbose"])
+        XCTAssertEqual(ArgvRedactor.redact(["aws", "AKIAIOSFODNN7EXAMPLE"]), ["aws", R])
+        XCTAssertEqual(ArgvRedactor.redact(["x", "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]), ["x", R])
+        XCTAssertEqual(ArgvRedactor.redact(["x", "Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb7d"]), ["x", R])
         // Paths and ordinary words survive.
         XCTAssertEqual(ArgvRedactor.redact(["cat", "/Users/alice/.ssh/id_ed25519"]), ["cat", "/Users/alice/.ssh/id_ed25519"])
         XCTAssertEqual(ArgvRedactor.redact(["git", "commit", "-m", "fix authentication bug"]), ["git", "commit", "-m", "fix authentication bug"])
+        XCTAssertEqual(r(["git", "commit", "-m", "update password reset flow"]), ["git", "commit", "-m", "update password reset flow"])
         // argv[0] is never redacted; long argv is capped.
         let long = ["prog"] + (1...20).map { "a\($0)" }
-        let r = ArgvRedactor.redact(long)!
-        XCTAssertEqual(r.count, 9)
-        XCTAssertEqual(r.last, "…(+13)")
+        let capped = ArgvRedactor.redact(long)!
+        XCTAssertEqual(capped.count, 9)
+        XCTAssertEqual(capped.last, "…(+13)")
         XCTAssertNil(ArgvRedactor.redact(nil as [String]?))
+    }
+
+    func testURLCredentialsAndQueryTokens() {
+        XCTAssertEqual(r(["git", "clone", "https://x-access-token:ghs_16C7e42F292c6912E7710c838347Ae178B4a@github.com/o/r.git"]),
+                       ["git", "clone", "https://x-access-token:\(R)@github.com/o/r.git"])
+        XCTAssertEqual(r(["git", "push", "https://alice:hunter2pass@gitlab.example.com/o/r.git"]),
+                       ["git", "push", "https://alice:\(R)@gitlab.example.com/o/r.git"])
+        XCTAssertEqual(r(["curl", "https://api.example.com/cb?state=1&access_token=abcdEFGH1234"]),
+                       ["curl", "https://api.example.com/cb?state=1&access_token=\(R)"])
+        // A URL path containing "token" is not a key=value secret.
+        XCTAssertEqual(r(["curl", "https://example.com/token/list?page=2"]), ["curl", "https://example.com/token/list?page=2"])
+        XCTAssertEqual(r(["git", "clone", "https://github.com/o/r.git"]), ["git", "clone", "https://github.com/o/r.git"])
+    }
+
+    func testFlagValueFormsAndToolSpecificFlags() {
+        XCTAssertEqual(r(["gpg", "--batch", "--passphrase=hunter2", "-d", "f"]), ["gpg", "--batch", "--passphrase=\(R)", "-d", "f"])
+        XCTAssertEqual(r(["tool", "--pass=hunter2", "--key=hunter2"]), ["tool", "--pass=\(R)", "--key=\(R)"])
+        XCTAssertEqual(r(["curl", "--user=alice:hunter2", "-ualice:hunter2", "--proxy-user", "u:hunter2"]),
+                       ["curl", "--user=alice:\(R)", "-ualice:\(R)", "--proxy-user", "u:\(R)"])
+        XCTAssertEqual(r(["sshpass", "-p", "hunter2", "ssh", "alice@host"]), ["sshpass", "-p", R, "ssh", "alice@host"])
+        XCTAssertEqual(r(["mysql", "-uroot", "-pS3cretPass", "db"]), ["mysql", "-uroot", "-p\(R)", "db"])
+        XCTAssertEqual(r(["redis-cli", "-a", "hunter2", "ping"]), ["redis-cli", "-a", R, "ping"])
+        XCTAssertEqual(r(["openssl", "enc", "-pass", "pass:hunter2", "-passin", "env:PW"]),
+                       ["openssl", "enc", "-pass", "pass:\(R)", "-passin", "env:PW"])
+        XCTAssertEqual(r(["security", "add-generic-password", "-a", "me", "-s", "svc", "-w", "hunter2"]),
+                       ["security", "add-generic-password", "-a", "me", "-s", "svc", "-w", R])
+        XCTAssertEqual(r(["aws", "configure", "set", "aws_secret_access_key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"]),
+                       ["aws", "configure", "set", "aws_secret_access_key", R])
+        XCTAssertEqual(r(["npm", "config", "set", "//registry.npmjs.org/:_authToken", "abc123"]),
+                       ["npm", "config", "set", "//registry.npmjs.org/:_authToken", R])
+        XCTAssertEqual(r(["kubectl", "create", "secret", "generic", "x", "--from-literal=password=xyz"]),
+                       ["kubectl", "create", "secret", "generic", "x", "--from-literal=password=\(R)"])
+        XCTAssertEqual(r(["sudo", "curl", "-u", "a:b", "https://x"]), ["sudo", "curl", "-u", "a:\(R)", "https://x"])
+        XCTAssertEqual(r(["docker", "login", "-u", "me", "-p", "hunter2", "registry.example.com"]),
+                       ["docker", "login", "-u", "me", "-p", R, "registry.example.com"])
+        // AWS secret keys contain '/', relative paths survive the entropy check.
+        XCTAssertEqual(r(["x", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"]), ["x", R])
+        XCTAssertEqual(r(["x", "src/components/HeaderNavigationBar2/index"]), ["x", "src/components/HeaderNavigationBar2/index"])
+    }
+
+    func testCommandLinesAsOneArgument() {
+        XCTAssertEqual(r(["/bin/zsh", "-c", "curl -u admin:hunter2 https://x"]), ["/bin/zsh", "-c", "curl -u admin:\(R) https://x"])
+        XCTAssertEqual(r(["/bin/zsh", "-c", "git clone https://oauth2:glpat-AbCdEf1234567890xyz@gitlab.com/x.git"]),
+                       ["/bin/zsh", "-c", "git clone https://oauth2:\(R)@gitlab.com/x.git"])
+        XCTAssertEqual(r(["/bin/zsh", "-c", "mysql --password hunter2 -e 'select 1'"]),
+                       ["/bin/zsh", "-c", "mysql --password \(R) -e 'select 1'"])
+        XCTAssertEqual(r(["/bin/zsh", "-c", "cd /tmp && export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789 && gh repo list"]),
+                       ["/bin/zsh", "-c", "cd /tmp && export GITHUB_TOKEN=\(R) && gh repo list"])
+        XCTAssertEqual(r(["/bin/zsh", "-c", "cd /tmp; curl -u a:b https://x"]), ["/bin/zsh", "-c", "cd /tmp; curl -u a:\(R) https://x"])
+        XCTAssertEqual(r(["/bin/bash", "-c", "curl -H \"Authorization: Bearer abc.def\" -H 'Accept: application/json' https://x"]),
+                       ["/bin/bash", "-c", "curl -H \"Authorization: \(R)\" -H 'Accept: application/json' https://x"])
+        XCTAssertEqual(r(["/bin/zsh", "-c", "bash -c \"curl -u a:b https://x\""]), ["/bin/zsh", "-c", "bash -c \"curl -u a:\(R) https://x\""])
+        XCTAssertEqual(r(["/bin/zsh", "-c", "cat ~/.ssh/id_ed25519 | pbcopy"]), ["/bin/zsh", "-c", "cat ~/.ssh/id_ed25519 | pbcopy"])
+    }
+
+    func testCurlOnlyFlagsAndPathsKept() {
+        XCTAssertEqual(r(["cat", "-b", "/Users/alice/.ssh/id_ed25519"]), ["cat", "-b", "/Users/alice/.ssh/id_ed25519"])
+        XCTAssertEqual(r(["cat", "-u", "/Users/alice/.ssh/id_ed25519"]), ["cat", "-u", "/Users/alice/.ssh/id_ed25519"])
+        XCTAssertEqual(r(["cp", "-H", "/Users/alice/.ssh/id_ed25519", "/Volumes/USB/"]), ["cp", "-H", "/Users/alice/.ssh/id_ed25519", "/Volumes/USB/"])
+        XCTAssertEqual(r(["sudo", "-H", "cat", "/Users/alice/.aws/credentials"]), ["sudo", "-H", "cat", "/Users/alice/.aws/credentials"])
+        XCTAssertEqual(r(["git", "commit", "--author=Alice <a@x>"]), ["git", "commit", "--author=Alice <a@x>"])
+        XCTAssertEqual(r(["gcloud", "--credential-file-override=/Users/alice/.config/gcloud/sa.json"]),
+                       ["gcloud", "--credential-file-override=/Users/alice/.config/gcloud/sa.json"])
+        XCTAssertEqual(r(["claude", "--session-id=1234"]), ["claude", "--session-id=1234"])
+        XCTAssertEqual(r(["curl", "--key", "/Users/alice/.ssh/client.key", "https://x"]), ["curl", "--key", "/Users/alice/.ssh/client.key", "https://x"])
+        XCTAssertEqual(r(["docker", "login", "--password-stdin", "registry.example.com"]), ["docker", "login", "--password-stdin", "registry.example.com"])
     }
 }
 

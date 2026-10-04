@@ -9,7 +9,8 @@ import WhoReadUIModel
 final class SystemExtensionManager: NSObject, OSSystemExtensionRequestDelegate {
     static let shared = SystemExtensionManager()
     /// Called when a request finishes or fails (uninstall flow).
-    var onFinish: (() -> Void)?
+    /// Called with true when the request succeeded (`.willCompleteAfterReboot` counts as success).
+    var onFinish: ((Bool) -> Void)?
 
     var extensionIdentifier: String {
         (Bundle.main.object(forInfoDictionaryKey: "WhoReadExtensionBundleID") as? String) ?? "com.example.whoread.extension"
@@ -39,15 +40,16 @@ final class SystemExtensionManager: NSObject, OSSystemExtensionRequestDelegate {
 
     nonisolated func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
         Task { @MainActor in
-            DaemonConnection.shared.onboarding.extensionState = result == .completed ? .done : .waiting
-            self.onFinish?()
+            // .willCompleteAfterReboot: the extension is not active until the next restart.
+            DaemonConnection.shared.onboarding.extensionState = result == .completed ? .done : .needsRestart
+            self.onFinish?(true)
         }
     }
 
     nonisolated func request(_ request: OSSystemExtensionRequest, didFailWithError error: any Error) {
         Task { @MainActor in
             DaemonConnection.shared.onboarding.extensionState = .failed(error.localizedDescription)
-            self.onFinish?()
+            self.onFinish?(false)
         }
     }
 }

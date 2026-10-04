@@ -25,6 +25,10 @@ brew install xcodegen
 cp Xcode/Local.xcconfig.example Xcode/Local.xcconfig   # set DEVELOPMENT_TEAM, BUNDLE_ID_PREFIX
 scripts/build.sh                      # generates Xcode/WhoRead.xcodeproj and builds all targets
 ```
+Products land in `build/DerivedData/Build/Products/Debug/`; the app embeds the CLI as
+`WhoRead.app/Contents/Helpers/whoread`. Without a team, `build.sh` signs ad hoc and drops all
+entitlements (restricted ones need a provisioning profile, so the binaries would not launch).
+Such an app runs against the dev daemon but cannot install the system extension.
 
 Regenerating data and fixtures:
 ```bash
@@ -62,12 +66,50 @@ Then:
    sudo launchctl kickstart -k system/com.whoread.daemon
    scripts/acceptance-m2.sh
    ```
+3. Owner apps are pinned to the team IDs `codesign -dv` reports for the apps installed here. The
+   daemon does this in memory at every start and after catalog changes (unresolved third-party
+   apps are not owners, so they alert). To see what it finds:
+   ```bash
+   sudo whoread catalog resolve-owners
+   ```
+   Nothing is written. After installing an owner app, restart the daemon
+   (`sudo launchctl kickstart -k system/com.whoread.daemon`).
 
-Logs: `/Library/Logs/WhoRead/whoreadd.log`. Remove with `sudo scripts/uninstall-dev-daemon.sh [--purge]`.
+Logs: `/Library/Logs/WhoRead/whoreadd.log`, root only (`sudo tail -f …`): it holds alert
+headlines and process chains of every user. Remove with
+`sudo scripts/uninstall-dev-daemon.sh [--purge]`.
+
+`install-dev-daemon.sh` refuses to run while the WhoRead system extension is active: only one
+daemon may use `/Library/Application Support/WhoRead`.
 
 If eslogger reports NOT_PERMITTED although whoreadd has FDA, also add `/usr/bin/eslogger` to Full
 Disk Access. Which process TCC treats as responsible for a LaunchDaemon's child is unverified
 (see RESEARCH.md).
+
+## M3: the signed app against the dev daemon (manual)
+
+The app may weaken protection (Settings, rules, Pause, Allow once / Always allow, Ignore, Mark
+read) only when the daemon recognises its code signature. The dev daemon does that only when it is
+given both requirements, and a client requirement also rejects the ad-hoc `swift build` CLI, so
+install the team-signed products of the same Xcode build:
+```bash
+scripts/build.sh                      # needs DEVELOPMENT_TEAM in Xcode/Local.xcconfig
+P="$PWD/build/DerivedData/Build/Products/Debug"
+TEAM=ABCDE12345 PREFIX=com.yourname   # the values from Xcode/Local.xcconfig
+sudo WHOREAD_BIN="$P" \
+  WHOREAD_CLIENT_REQUIREMENT="anchor apple generic and certificate leaf[subject.OU] = \"$TEAM\"" \
+  WHOREAD_APP_REQUIREMENT="identifier \"$PREFIX.whoread\" and anchor apple generic and certificate leaf[subject.OU] = \"$TEAM\"" \
+  scripts/install-dev-daemon.sh eslogger
+open "$P/WhoRead.app"
+```
+- The script checks that `$P/whoread` satisfies the client requirement and refuses
+  `WHOREAD_APP_REQUIREMENT` without `WHOREAD_CLIENT_REQUIREMENT` (it would have no effect).
+- It re-signs `whoreadd` ad hoc without entitlements for the eslogger source (the ES
+  entitlement of the Xcode build needs a provisioning profile). Full Disk Access is probably tied
+  to that signature (UNVERIFIED): if eslogger reports NOT_PERMITTED after a reinstall, grant it
+  again.
+- Without the requirements (or with an ad-hoc app), the app can read everything but every
+  weakening action is refused; use `sudo whoread …` for those.
 
 ## M4/M5: test VM with SIP disabled (manual)
 
@@ -111,10 +153,18 @@ Disk Access. Which process TCC treats as responsible for a LaunchDaemon's child 
 
 ## System extension in development (manual)
 
+- Uninstall the dev LaunchDaemon first (`sudo scripts/uninstall-dev-daemon.sh`), in the VM too
+  after M4/M5. Only one daemon may use `/Library/Application Support/WhoRead`; a second one
+  refuses to start.
 - The app must be launched from `/Applications`. Alternatively, run `systemextensionsctl developer
   on`, which third-party reports say needs SIP off on macOS 13+.
 - Approve the extension in System Settings → General → Login Items & Extensions, then give it
   Full Disk Access.
+- CLI: `sudo ln -sf /Applications/WhoRead.app/Contents/Helpers/whoread /usr/local/bin/whoread`.
+  The extension accepts only clients signed by your team.
+- Log: `/Library/Logs/WhoRead/extension.log` (root only).
+- An extension built without a team cannot pin its requirements to a team, so it drops them:
+  any local client may connect, no app is recognised, and weakening needs `sudo`.
 - `systemextensionsctl list` shows its state. `systemextensionsctl uninstall <team> <bundle>`
   needs SIP off.
 

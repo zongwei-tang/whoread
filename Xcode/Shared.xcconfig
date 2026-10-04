@@ -4,7 +4,9 @@ BUNDLE_ID_PREFIX = com.example
 DEVELOPMENT_TEAM =
 WHOREAD_EXTENSION_BUNDLE_ID = $(BUNDLE_ID_PREFIX).whoread.extension
 // Mach service the daemon / extension listens on. For a system extension Apple's man page says
-// the default is <teamID>.<bundleID>.xpc; we set it explicitly.
+// the default is <teamID>.<bundleID>.xpc; we set it explicitly. Without a team it starts with "."
+// (harmless: the extension publishes the name it got), and the team-pinned client/app
+// requirements in project.yml become `OU = ""`, which Extension/main.swift drops.
 WHOREAD_MACH_SERVICE = $(DEVELOPMENT_TEAM).$(WHOREAD_EXTENSION_BUNDLE_ID).xpc
 
 #include? "Local.xcconfig"

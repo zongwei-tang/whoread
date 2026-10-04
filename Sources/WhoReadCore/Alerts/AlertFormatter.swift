@@ -24,9 +24,14 @@ public struct AlertFormatter: Sendable {
         let app = alert.responsible.displayName
         let path = abbreviate(alert.firstPath)
         let category = categoryName(alert.categoryID)?.resolve(language) ?? alert.categoryID
-        let verbZH = alert.accesses.contains(.write) && !alert.accesses.contains(.read) ? "写入" : "读取"
-        let verbEN = alert.accesses.contains(.write) && !alert.accesses.contains(.read) ? "wrote" : "read"
-        let verbENBase = alert.accesses.contains(.write) && !alert.accesses.contains(.read) ? "write" : "read"
+        let both = alert.accesses.contains(.read) && alert.accesses.contains(.write)
+        let writeOnly = alert.accesses.contains(.write) && !alert.accesses.contains(.read)
+        let verbZH = both ? "读写" : writeOnly ? "写入" : "读取"
+        let verbEN = both ? "read and modified" : writeOnly ? "wrote" : "read"
+        let verbENBase = both ? "read and modify" : writeOnly ? "write" : "read"
+        let verbENing = both ? "reading and modifying" : writeOnly ? "writing" : "reading"
+        let firstZH = alert.firstTime ? "第一次" : ""
+        let firstEN = alert.firstTime ? " for the first time" : ""
         var text: String
         switch (language, alert.kind) {
         case (.zhHans, .firstAccess):
@@ -34,9 +39,9 @@ public struct AlertFormatter: Sendable {
         case (.en, .firstAccess):
             text = "\(app) \(verbEN) \(path) for the first time"
         case (.zhHans, .criticalNonOwner):
-            text = "\(app) \(verbZH)了 \(path)（\(category)，不是预期的访问者）"
+            text = "\(app) \(firstZH)\(verbZH)了 \(path)（\(category)，不是预期的访问者）"
         case (.en, .criticalNonOwner):
-            text = "\(app) \(verbEN) \(path) (\(category), not an expected owner)"
+            text = "\(app) \(verbEN) \(path)\(firstEN) (\(category), not an expected owner)"
         case (.zhHans, .ruleAlert):
             text = "\(app) \(verbZH)了 \(path)（规则提醒）"
         case (.en, .ruleAlert):
@@ -44,7 +49,7 @@ public struct AlertFormatter: Sendable {
         case (.zhHans, .wouldBlock):
             text = "规则将会拦截：\(app) \(verbZH) \(path)（当前为监控模式）"
         case (.en, .wouldBlock):
-            text = "A rule would block \(app) from \(verbENBase == "write" ? "writing" : "reading") \(path) (monitor mode)"
+            text = "A rule would block \(app) from \(verbENing) \(path) (monitor mode)"
         case (.zhHans, .blocked):
             text = "已拦截：\(app) 试图\(verbZH) \(path)"
         case (.en, .blocked):

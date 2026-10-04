@@ -133,25 +133,46 @@ public final class ProcessTree: @unchecked Sendable {
     public func prune(now: Date) -> Int {
         lock.lock(); defer { lock.unlock() }
         var removed = 0
-        var changed = true
-        while changed {
-            changed = false
-            for (id, node) in nodes {
-                guard let exited = node.exitedAt, now.timeIntervalSince(exited) > tombstoneTTL, node.childCount <= 0 else {
-                    continue
-                }
-                remove(id)
-                removed += 1
-                changed = true
-            }
+        func expired(_ n: ProcessNode) -> Bool {
+            guard let e = n.exitedAt else { return false }
+            return now.timeIntervalSince(e) > tombstoneTTL && n.childCount <= 0
+        }
+        // Worklist: removing a leaf tombstone may expire its parent. O(n), not O(n × depth), so a
+        // deep fork-and-exit chain cannot hold the lock the AUTH path needs.
+        var queue = nodes.values.filter(expired).map(\.id)
+        while let id = queue.popLast() {
+            guard let node = nodes[id] else { continue }
+            remove(id)
+            removed += 1
+            if let p = node.parentID, let parent = nodes[p], expired(parent) { queue.append(p) }
         }
         if nodes.count > maxNodes {
-            // Hard cap: drop the oldest exited nodes even if they still have children.
+            // Hard cap: evict childless tombstones first; exited ancestors are spliced out (their
+            // children re-linked to the grandparent) so no live chain is cut, and exited agents with
+            // live descendants are never evicted.
             let excess = nodes.count - maxNodes
-            let victims = nodes.values.filter { $0.exitedAt != nil }
-                .sorted { ($0.exitedAt ?? $0.lastSeen) < ($1.exitedAt ?? $1.lastSeen) }
+            let victims = nodes.values
+                .filter { $0.exitedAt != nil && !($0.agentID != nil && $0.childCount > 0) }
+                .sorted { a, b in
+                    let ka = a.childCount > 0 ? 1 : 0, kb = b.childCount > 0 ? 1 : 0
+                    if ka != kb { return ka < kb }
+                    return a.exitedAt! < b.exitedAt!
+                }
                 .prefix(excess)
+            var children: [UInt64: [UInt64]] = [:]
+            if victims.contains(where: { $0.childCount > 0 }) {
+                for (id, n) in nodes { if let p = n.parentID { children[p, default: []].append(id) } }
+            }
             for v in victims {
+                guard let current = nodes[v.id] else { continue }
+                for c in children[v.id] ?? [] where nodes[c]?.parentID == v.id {
+                    nodes[c]?.parentID = current.parentID
+                    if let gp = current.parentID {
+                        nodes[gp]?.childCount += 1
+                        children[gp, default: []].append(c)
+                    }
+                }
+                nodes[v.id]?.childCount = 0
                 remove(v.id)
                 removed += 1
             }
@@ -197,7 +218,9 @@ public final class ProcessTree: @unchecked Sendable {
         var out: [ProcessNode] = []
         var visited = Set<UInt64>()
         var current: UInt64? = id
-        while let c = current, let node = nodes[c], !visited.contains(c), out.count < maxDepth {
+        // No depth cap: `visited` guarantees termination, and capping would let 70 nested shells hide
+        // the agent at the top of the chain.
+        while let c = current, let node = nodes[c], !visited.contains(c) {
             visited.insert(c)
             out.append(node)
             current = node.parentID
@@ -322,7 +345,7 @@ public final class ProcessTree: @unchecked Sendable {
         // Refuse links that would create a cycle.
         var cursor: UInt64? = parent
         var steps = 0
-        while let c = cursor, steps < maxDepth {
+        while let c = cursor, steps <= nodes.count {
             if c == child { return }
             cursor = nodes[c]?.parentID
             steps += 1

@@ -6,9 +6,11 @@ import Foundation
 /// would dominate CPU; instead one Aho–Corasick pass over the raw bytes decides whether a line
 /// can possibly matter:
 /// - process lifecycle (`"exec":`, `"fork":`, `"exit":`) → always parse (the process tree needs them)
-/// - rename/clone/link/exchangedata → always parse (parents of sensitive dirs may be moved)
+/// - rename/clone/copyfile/link/exchangedata/create → always parse (split dir+name destinations;
+///   parents of sensitive dirs may be moved)
 /// - `close` with `"modified":false` → drop
-/// - anything containing a monitored prefix (ASCII case-insensitive, `/` or `\/` escaped) → parse
+/// - any JSON string starting with a monitored prefix, plain or under `/System/Volumes/Data`
+///   (ASCII case-insensitive, `/` or `\/` escaped) → parse
 /// - lines containing `\u` escapes → parse (non-ASCII paths may be escaped)
 ///
 /// False positives only cost a parse; false negatives would lose events, so every rule errs open.
@@ -63,7 +65,9 @@ public final class LinePrefilter: @unchecked Sendable {
             if !bytes.isEmpty { patterns.append((bytes, tag.rawValue)) }
         }
         for key in ["\"exec\":", "\"fork\":", "\"exit\":"] { add(key, .lifecycle) }
-        for key in ["\"rename\":", "\"clone\":", "\"link\":", "\"exchangedata\":"] { add(key, .multiPath) }
+        for key in ["\"rename\":", "\"clone\":", "\"copyfile\":", "\"link\":", "\"exchangedata\":", "\"create\":"] {
+            add(key, .multiPath)
+        }
         add("\"close\":", .close)
         add("\"modified\":false", .notModified)
         add("\"modified\": false", .notModified)
@@ -73,8 +77,19 @@ public final class LinePrefilter: @unchecked Sendable {
                 parseAll = true
                 continue
             }
-            add(p, .prefix)
-            if p.contains("/") { add(p.replacingOccurrences(of: "/", with: "\\/"), .prefix) }
+            if p == prefix {
+                // A whole path: anchor it to the start of a JSON string so that e.g. /Volumes does not
+                // match every /System/Volumes/… path (process executables included). The firmlinked
+                // spelling is added explicitly instead.
+                for v in [p] + PathNormalizer.defaultFirmlinkRoots.map({ $0 + p }) {
+                    add("\"" + v, .prefix)
+                    add("\"" + v.replacingOccurrences(of: "/", with: "\\/"), .prefix)
+                }
+            } else {
+                // An ASCII fragment of a non-ASCII prefix can start mid-string: keep it unanchored.
+                add(p, .prefix)
+                if p.contains("/") { add(p.replacingOccurrences(of: "/", with: "\\/"), .prefix) }
+            }
         }
         return (AhoCorasick(patterns: patterns), parseAll)
     }

@@ -61,7 +61,17 @@ public final class ReplaySource: EventSource, @unchecked Sendable {
                 if let g = LinePrefilter.globalSequence(line) { parser.noteSequence(g) }
                 return
             }
-            guard case .event(let e) = parser.parse(data: Data(line)) else { return }
+            let e: SourceEvent
+            switch parser.parse(data: Data(line)) {
+            case .event(let event):
+                e = event
+            case .malformed:
+                // Not a kernel drop: keep the sequence (harmless if the parser already noted it).
+                if let g = LinePrefilter.globalSequence(line) { parser.noteSequence(g) }
+                return
+            case .ignored:
+                return
+            }
             if realtime, let last = lastEventTime {
                 let gap = e.time.timeIntervalSince(last)
                 if gap > 0 { Thread.sleep(forTimeInterval: min(gap, 1)) }

@@ -1,20 +1,49 @@
 #!/bin/bash
 # Removes WhoRead: deactivates the system extension (macOS asks for confirmation), removes the
-# app, the dev LaunchDaemon if present, and — with --purge — all recorded data.
+# app, the `whoread` link, the dev LaunchDaemon if present, and — with --purge — all recorded data.
+# Nothing is removed unless the extension is really gone: an enforcing extension without its app
+# would leave no UI to turn it off.
 set -euo pipefail
 APP="/Applications/WhoRead.app"
-if [ -d "$APP" ]; then
-  echo "Deactivating the system extension (approve the prompt)…"
-  "$APP/Contents/MacOS/WhoRead" --uninstall-extension || true
+DATA="/Library/Application Support/WhoRead"
+KILL_SWITCH="$DATA/disable-enforcement"
+
+# "[activated enabled|waiting for user|disabled]" all count as installed (systemextensionsctl(8)).
+extension_id() { /usr/libexec/PlistBuddy -c 'Print :WhoReadExtensionBundleID' "$APP/Contents/Info.plist" 2>/dev/null; }
+extension_active() { systemextensionsctl list 2>/dev/null | grep -F "$1" | grep -q '\[activated'; }
+
+# Force enforcement off first, so nothing stays blocked whatever happens next.
+CREATED_KILL_SWITCH=""
+if [ -d "$DATA" ] && [ ! -e "$KILL_SWITCH" ]; then
+  sudo touch "$KILL_SWITCH" && CREATED_KILL_SWITCH=1
 fi
+pkill -x WhoRead 2>/dev/null || true
+
+if [ -d "$APP" ]; then
+  EXT="$(extension_id || true)"
+  if [ -n "$EXT" ] && extension_active "$EXT"; then
+    echo "Deactivating the system extension (approve the prompt)…"
+    if ! "$APP/Contents/MacOS/WhoRead" --uninstall-extension || extension_active "$EXT"; then
+      echo "Deactivation failed or was cancelled; $APP was kept so you can retry." >&2
+      [ -e "$KILL_SWITCH" ] && echo "Enforcement stays off while $KILL_SWITCH exists (sudo rm it to undo)." >&2
+      exit 1
+    fi
+  fi
+fi
+
 if [ -f /Library/LaunchDaemons/com.whoread.daemon.plist ]; then
   sudo launchctl bootout system /Library/LaunchDaemons/com.whoread.daemon.plist 2>/dev/null || true
   sudo rm -f /Library/LaunchDaemons/com.whoread.daemon.plist /usr/local/libexec/whoreadd /usr/local/bin/whoread
 fi
+# The release CLI is a link into the app (DISTRIBUTION.md §5); leave any other whoread alone.
+case "$(readlink /usr/local/bin/whoread 2>/dev/null || true)" in
+  "$APP"/*) sudo rm -f /usr/local/bin/whoread ;;
+esac
 sudo rm -rf "$APP"
 if [ "${1:-}" = "--purge" ]; then
-  sudo rm -rf "/Library/Application Support/WhoRead" /Library/Logs/WhoRead
+  sudo rm -rf "$DATA" /Library/Logs/WhoRead
   echo "WhoRead and its data removed."
 else
-  echo "WhoRead removed. History kept in /Library/Application Support/WhoRead (run with --purge to delete)."
+  [ -n "$CREATED_KILL_SWITCH" ] && sudo rm -f "$KILL_SWITCH"
+  echo "WhoRead removed. History kept in $DATA (run with --purge to delete)."
 fi

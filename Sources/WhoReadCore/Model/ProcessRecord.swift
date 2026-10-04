@@ -106,12 +106,20 @@ public enum BundlePath {
         var out: [String] = []
         var current = ""
         var sawFramework = false
-        for component in path.split(separator: "/") {
+        let components = path.split(separator: "/")
+        for (i, component) in components.enumerated() {
             current += current.isEmpty && !path.hasPrefix("/") ? String(component) : "/" + component
             let lower = component.lowercased()
             if lower.hasSuffix(".framework") && out.isEmpty { sawFramework = true }
             if component.count > 4 && lower.hasSuffix(".app") {
                 if out.isEmpty && sawFramework { continue }
+                // Xcode's toolchain (`Xcode.app/Contents/Developer/usr/bin/git`, python3…) plays the
+                // role of /Library/Developer/CommandLineTools: the shims in /usr/bin exec into it.
+                if out.isEmpty, i + 2 < components.count, components[i + 1].lowercased() == "contents",
+                   components[i + 2].lowercased() == "developer" {
+                    // Apps inside the developer dir (Simulator.app) are still found further down.
+                    continue
+                }
                 out.append(current)
             }
         }

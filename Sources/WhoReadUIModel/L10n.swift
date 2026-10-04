@@ -40,12 +40,27 @@ public enum L: String, CaseIterable, Sendable {
     // Onboarding
     case onbTitle, onbIntro, onbFDATitle, onbFDABody, onbFDAButton, onbExtTitle, onbExtBody, onbExtButton
     case onbExtApprove, onbDaemonTitle, onbDaemonBody, onbAllSet, onbWaiting, onbDone, onbFailedFormat, onbContinue
+    case onbOpenLoginItems, onbRestartRequired, openSetup
     // Notifications
-    case notifTitle, notifBlockedTitle
+    case notifTitle, notifBlockedTitle, notifEnforcementTrippedTitle, notifEnforcementTrippedBodyFormat, notifRuleNotBlockingTitle
+    // Enforcement inactive reasons and caveats
+    case reasonDisabledByUser, reasonKillSwitchFile, reasonLatencyTripped, reasonRulesFailedToLoad, reasonSourceCannotEnforce
+    case sourceCannotEnforceNote
+    // Rule editor
+    case ruleName, ruleSigningID, ruleTeamID, ruleNoTeamID, ruleProgramPath, ruleCdhash, ruleAgentsNote
+    case rulePathNotMonitored, ruleMonitorPath, ruleBlockAppFormat
+    case ruleErrCategory, ruleErrPath, ruleErrSigningID, ruleErrTeamID, ruleErrProgramPath, ruleErrCdhash, ruleErrApp
+    case tplBlockAgentsCritical, tplAlertAgentsHigh, tplDenyNonOwnerSSH
+    // Catalog editing (Settings → Monitored paths)
+    case setMonitoredPathsNote, catPathPlaceholder, catAddCategory, catNewCategoryName, catDeleteCategory, catPathsManaged
+    case catInvalidPath, catCustomName
+    // Event details
+    case detTitle, detProcess, detPID, detExecutable, detCdhash, detPlatformBinary, detArguments, detResponsible, detOtherPath
+    case yes, no, accessReadWrite
     // Operations
     case opOpen, opClose, opRename, opClone, opCopyfile, opLink, opUnlink, opTruncate, opExchangedata, opReaddir, opCreate
     // Errors
-    case errNotPermitted, errUnavailable
+    case errNotPermitted, errUnavailable, errVersionMismatchFormat, errDaemonFormat, errAdminFormat
 }
 
 public enum L10n {
@@ -218,9 +233,65 @@ public enum L10n {
         .onbDone: ("Done", "已完成"),
         .onbFailedFormat: ("Failed: %@", "失败：%@"),
         .onbContinue: ("Continue", "继续"),
+        .onbOpenLoginItems: ("Open Login Items & Extensions", "打开「登录项与扩展」"),
+        .onbRestartRequired: ("Restart your Mac to finish activating the extension.", "重启 Mac 以完成扩展激活。"),
+        .openSetup: ("Open setup…", "打开设置向导…"),
 
         .notifTitle: ("WhoRead", "WhoRead"),
         .notifBlockedTitle: ("WhoRead blocked an access", "WhoRead 拦截了一次访问"),
+        .notifEnforcementTrippedTitle: ("WhoRead turned enforcement off", "WhoRead 已关闭拦截"),
+        .notifEnforcementTrippedBodyFormat: ("The monitor answered too slowly (%@). Nothing is blocked until you turn enforcement back on.", "监控响应过慢（%@），在你重新开启拦截之前不会拦截任何访问。"),
+        .notifRuleNotBlockingTitle: ("Rule saved, but it does not block yet", "规则已保存，但暂时不会拦截"),
+
+        .reasonDisabledByUser: ("switched off", "开关已关闭"),
+        .reasonKillSwitchFile: ("kill-switch file present", "存在紧急关闭文件"),
+        .reasonLatencyTripped: ("turned off automatically: responses too slow", "响应过慢，已自动关闭"),
+        .reasonRulesFailedToLoad: ("rules failed to load", "规则加载失败"),
+        .reasonSourceCannotEnforce: ("this monitor cannot block (eslogger)", "当前监控方式无法拦截（eslogger）"),
+        .sourceCannotEnforceNote: ("This monitor (eslogger) cannot block: block rules only raise \"would block\" alerts.", "当前监控方式（eslogger）无法拦截：拦截规则只会产生「将被拦截」告警。"),
+
+        .ruleName: ("Name", "名称"),
+        .ruleSigningID: ("Signing ID", "Signing ID"),
+        .ruleTeamID: ("Team ID", "Team ID"),
+        .ruleNoTeamID: ("Apple or ad-hoc signed (no Team ID)", "Apple 或 ad-hoc 签名（没有 Team ID）"),
+        .ruleProgramPath: ("Program path", "程序路径"),
+        .ruleCdhash: ("cdhash (optional, 40 hex digits)", "cdhash（可选，40 位十六进制）"),
+        .ruleAgentsNote: ("None selected means any AI agent.", "不选表示任意 AI agent。"),
+        .rulePathNotMonitored: ("This path is not monitored, so the rule can never match.", "这个路径不在监控范围内，规则永远不会生效。"),
+        .ruleMonitorPath: ("Also monitor this path", "同时监控这个路径"),
+        .ruleBlockAppFormat: ("Block %@ from %@", "拦截 %@ 访问 %@"),
+        .ruleErrCategory: ("Choose a category.", "请选择类别。"),
+        .ruleErrPath: ("The path must start with / or ~/.", "路径必须以 / 或 ~/ 开头。"),
+        .ruleErrSigningID: ("Enter a signing ID.", "请填写 signing ID。"),
+        .ruleErrTeamID: ("Enter a Team ID, or mark the program as Apple or ad-hoc signed.", "请填写 Team ID，或勾选 Apple / ad-hoc 签名。"),
+        .ruleErrProgramPath: ("The program path must start with /.", "程序路径必须以 / 开头。"),
+        .ruleErrCdhash: ("A cdhash is 40 hexadecimal digits.", "cdhash 是 40 位十六进制数。"),
+        .ruleErrApp: ("Choose an app.", "请选择应用。"),
+        .tplBlockAgentsCritical: ("Block AI agents from reading critical files", "禁止 AI agent 读取严重级别的文件"),
+        .tplAlertAgentsHigh: ("Always alert when AI agents touch high-severity files", "AI agent 碰到高敏感文件时总是告警"),
+        .tplDenyNonOwnerSSH: ("Block non-owners from reading SSH keys", "禁止非 owner 进程读取 SSH 密钥"),
+
+        .setMonitoredPathsNote: ("Paths starting with ~/ apply to every home folder. Changes take effect immediately.", "以 ~/ 开头的路径适用于每个主目录。修改立即生效。"),
+        .catPathPlaceholder: ("/path or ~/path", "/路径 或 ~/路径"),
+        .catAddCategory: ("Add category", "添加类别"),
+        .catNewCategoryName: ("Category name", "类别名称"),
+        .catDeleteCategory: ("Delete category", "删除类别"),
+        .catPathsManaged: ("Folders come from Project roots below.", "目录来自下方的 Project roots。"),
+        .catInvalidPath: ("A path must start with / or ~/ and name a folder or file.", "路径必须以 / 或 ~/ 开头，并指向具体的目录或文件。"),
+        .catCustomName: ("Custom", "自定义"),
+
+        .detTitle: ("Access", "访问"),
+        .detProcess: ("Process", "进程"),
+        .detPID: ("PID", "PID"),
+        .detExecutable: ("Executable", "可执行文件"),
+        .detCdhash: ("cdhash", "cdhash"),
+        .detPlatformBinary: ("Apple platform binary", "Apple 平台程序"),
+        .detArguments: ("Arguments", "参数"),
+        .detResponsible: ("Charged to", "归属"),
+        .detOtherPath: ("Other path", "另一路径"),
+        .yes: ("Yes", "是"),
+        .no: ("No", "否"),
+        .accessReadWrite: ("Read + write", "读写"),
 
         .opOpen: ("open", "打开"),
         .opClose: ("modified", "修改"),
@@ -236,6 +307,9 @@ public enum L10n {
 
         .errNotPermitted: ("Not permitted. Changes that weaken protection need the WhoRead app or sudo.", "没有权限：削弱保护的修改需要 WhoRead 应用或 sudo。"),
         .errUnavailable: ("The WhoRead daemon is not running.", "WhoRead 守护进程没有运行。"),
+        .errVersionMismatchFormat: ("The WhoRead app and daemon versions differ (%@). Update or restart the daemon.", "WhoRead 应用与守护进程版本不一致（%@）。请更新或重启守护进程。"),
+        .errDaemonFormat: ("The daemon refused: %@", "守护进程拒绝了请求：%@"),
+        .errAdminFormat: ("Administrator action failed: %@", "管理员操作失败：%@"),
     ]
 
     public static func mode(_ m: DaemonMode, _ language: Language = current) -> String {
@@ -287,6 +361,45 @@ public enum L10n {
         case .app: return t(.kindApp, language)
         case .agent: return t(.kindAgent, language)
         case .binary: return t(.kindBinary, language)
+        }
+    }
+
+    public static func access(_ a: AccessSet, _ language: Language = current) -> String {
+        switch (a.contains(.read), a.contains(.write)) {
+        case (true, true): return t(.accessReadWrite, language)
+        case (false, true): return t(.accessWrite, language)
+        default: return t(.accessRead, language)
+        }
+    }
+
+    public static func inactiveReason(_ r: EnforcementState.InactiveReason, _ language: Language = current) -> String {
+        switch r {
+        case .disabledByUser: return t(.reasonDisabledByUser, language)
+        case .killSwitchFile: return t(.reasonKillSwitchFile, language)
+        case .latencyTripped: return t(.reasonLatencyTripped, language)
+        case .rulesFailedToLoad: return t(.reasonRulesFailedToLoad, language)
+        case .sourceCannotEnforce: return t(.reasonSourceCannotEnforce, language)
+        }
+    }
+
+    /// Localized name of a built-in rule template (`Rule.template`).
+    public static func templateName(_ template: String?, _ language: Language = current) -> String? {
+        switch template {
+        case "block-agents-critical": return t(.tplBlockAgentsCritical, language)
+        case "alert-agents-high": return t(.tplAlertAgentsHigh, language)
+        case "deny-nonowner-ssh": return t(.tplDenyNonOwnerSSH, language)
+        default: return nil
+        }
+    }
+
+    /// What to show for a failed request. Daemon messages are English; known codes get a
+    /// translated sentence.
+    public static func message(for e: IPCError, _ language: Language = current) -> String {
+        switch e.code {
+        case .notPermitted: return t(.errNotPermitted, language)
+        case .unavailable: return t(.errUnavailable, language)
+        case .versionMismatch: return f(.errVersionMismatchFormat, e.message, language: language)
+        default: return f(.errDaemonFormat, e.message, language: language)
         }
     }
 }

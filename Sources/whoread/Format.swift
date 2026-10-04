@@ -18,21 +18,28 @@ enum Format {
         return "\(s / 86400)d ago"
     }
 
-    /// "15m", "2h", "3d", "1w", RFC 3339, or "YYYY-MM-DD".
-    static func parseSince(_ s: String, now: Date = Date()) throws -> Date {
-        if let last = s.last, let n = Double(s.dropLast()) {
-            switch last {
-            case "s": return now.addingTimeInterval(-n)
-            case "m": return now.addingTimeInterval(-n * 60)
-            case "h": return now.addingTimeInterval(-n * 3600)
-            case "d": return now.addingTimeInterval(-n * 86400)
-            case "w": return now.addingTimeInterval(-n * 7 * 86400)
-            default: break
+    /// "15m", "2h", "3d", "1w"; "YYYY-MM-DD[ HH:MM[:SS]]" in local time (the zone `time` prints in,
+    /// so a timestamp copied from the output round-trips); or RFC 3339 with `Z` / `±hh:mm`.
+    static func parseSince(_ s: String, now: Date = Date(), timeZone: TimeZone = .current) throws -> Date {
+        let units: [Character: Double] = ["s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400]
+        if let last = s.last, let unit = units[last], let n = Double(s.dropLast()) {
+            // Bounded so "infd" or "1e300w" is a usage error, not a trap when the date is encoded.
+            guard n.isFinite, abs(n * unit) < 1e10 else { throw CLIError("time span out of range: \(s)") }
+            return now.addingTimeInterval(-n * unit)
+        }
+        let zoned = s.count > 19 && s.dropFirst(19).contains { "Zz+-".contains($0) }
+        if zoned {
+            if let d = RFC3339.parse(s) { return d }
+        } else {
+            var wall = s
+            if wall.count == 10 { wall += "T00:00:00" } else if wall.count == 16 { wall += ":00" }
+            // Parse the wall-clock time as if UTC, then shift by the zone's offset at that moment.
+            if let utc = RFC3339.parse(wall) {
+                let guess = utc.addingTimeInterval(-Double(timeZone.secondsFromGMT(for: utc)))
+                return utc.addingTimeInterval(-Double(timeZone.secondsFromGMT(for: guess)))
             }
         }
-        if let d = RFC3339.parse(s) { return d }
-        if s.count == 10, let d = RFC3339.parse(s + "T00:00:00Z") { return d }
-        throw CLIError("cannot parse time \"\(s)\" (use 15m, 2h, 3d, 1w, 2026-10-04 or RFC 3339)")
+        throw CLIError("cannot parse time \"\(s)\" (use 15m, 2h, 3d, 1w, 2026-10-04, \"2026-10-04 09:30\" or RFC 3339)")
     }
 
     static func pad(_ s: String, _ n: Int) -> String {

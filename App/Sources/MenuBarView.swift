@@ -1,6 +1,7 @@
 // NOT YET COMPILED (see WhoReadApp.swift).
 import SwiftUI
 import WhoReadCore
+import WhoReadIPC
 import WhoReadUIModel
 
 /// The menu bar popover: state, unread alerts, quick switches.
@@ -12,6 +13,9 @@ struct MenuBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
+            if let problem = model.versionProblem {
+                Text(L10n.f(.errVersionMismatchFormat, problem)).font(.caption).foregroundStyle(.red)
+            }
             Divider()
             if model.connected, let status = model.status {
                 quickToggles(status)
@@ -19,6 +23,10 @@ struct MenuBarView: View {
                 recentAlerts
             } else {
                 Text(L10n.t(.errUnavailable)).foregroundStyle(.secondary)
+                Button(L10n.t(.openSetup)) {
+                    NavigationState.shared.showOnboarding = true
+                    open(.live)
+                }
             }
             Divider()
             HStack {
@@ -29,6 +37,7 @@ struct MenuBarView: View {
         }
         .padding(12)
         .frame(width: 380)
+        .onAppear { NavigationState.shared.openMainWindow = { openWindow(id: "main") } }
     }
 
     private var header: some View {
@@ -54,12 +63,12 @@ struct MenuBarView: View {
             Toggle(L10n.t(.pauseMonitoring), isOn: Binding(
                 get: { status.monitoringPaused },
                 set: { connection.setPaused($0) }))
+            // Shows what is in effect: off after the kill-switch file or a latency trip.
             Toggle(L10n.t(.enforcement), isOn: Binding(
-                get: { status.enforcementEnabled },
+                get: { model.enforcementSwitchOn },
                 set: { connection.setEnforcement($0) }))
-            if status.enforcementEnabled && !status.enforcementActive {
-                Text(L10n.f(.enforcementInactiveFormat, status.enforcementInactiveReasons.map(\.rawValue).joined(separator: ", ")))
-                    .font(.caption).foregroundStyle(.orange)
+            if let inactive = model.enforcementInactiveText {
+                Text(inactive).font(.caption).foregroundStyle(.orange)
             }
             if status.enforcementActive {
                 Button(L10n.t(.killSwitchAdmin)) { connection.engageKillSwitchWithAdminRights() }

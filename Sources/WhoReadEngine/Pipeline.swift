@@ -46,11 +46,15 @@ public final class EventWriter: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private(set) var dropped: UInt64 = 0
     private(set) var lastError: String?
+    private var lastErrorReport = Date.distantPast
+    private let errorReportInterval: TimeInterval
+    /// Store errors, at most once per `errorReportInterval` (a full disk fails every flush).
     public var onError: ((Error) -> Void)?
 
-    public init(store: EventStore, maxPending: Int = 100_000) {
+    public init(store: EventStore, maxPending: Int = 100_000, errorReportInterval: TimeInterval = 10) {
         self.store = store
         self.maxPending = maxPending
+        self.errorReportInterval = errorReportInterval
     }
 
     public func start(interval: TimeInterval = 0.25) {
@@ -70,6 +74,10 @@ public final class EventWriter: @unchecked Sendable {
     public func enqueue(events: [AnalyzedEvent]) {
         lock.lock(); defer { lock.unlock() }
         pendingEvents.append(contentsOf: events)
+        trimLocked()
+    }
+
+    private func trimLocked() {
         if pendingEvents.count > maxPending {
             // Prefer keeping recent events; count what was lost.
             let excess = pendingEvents.count - maxPending
@@ -95,16 +103,35 @@ public final class EventWriter: @unchecked Sendable {
         pendingEvents.removeAll(keepingCapacity: true)
         pendingAlerts.removeAll(keepingCapacity: true)
         lock.unlock()
+        // The two writes fail independently. A failed one is put back and retried on the next tick
+        // (a failed transaction rolls back, so a retry cannot double-count summaries).
+        var failure: Error?
+        var failedEvents: [AnalyzedEvent] = []
+        var failedAlerts: [Alert] = []
         do {
             if !events.isEmpty { try store.insert(events) }
+        } catch {
+            failure = error
+            failedEvents = events
+        }
+        do {
             if !alerts.isEmpty { try store.upsert(alerts) }
         } catch {
-            lock.lock()
-            lastError = "\(error)"
-            dropped += UInt64(events.count)
-            lock.unlock()
-            onError?(error)
+            failure = error
+            failedAlerts = alerts
         }
+        guard let failure else { return }
+        let now = Date()
+        lock.lock()
+        lastError = "\(failure)"
+        pendingEvents.insert(contentsOf: failedEvents, at: 0)
+        trimLocked()
+        // A newer snapshot of the same alert queued meanwhile wins.
+        for a in failedAlerts where pendingAlerts[a.id] == nil { pendingAlerts[a.id] = a }
+        let report = now.timeIntervalSince(lastErrorReport) >= errorReportInterval
+        if report { lastErrorReport = now }
+        lock.unlock()
+        if report { onError?(failure) }
     }
 
     public var droppedCount: UInt64 {
@@ -119,6 +146,9 @@ public final class EventPipeline: EventSink, @unchecked Sendable {
     public let writer: EventWriter
     public let live: LiveBuffer
     private let lock = NSLock()
+    /// Spans id assignment (in the analyzer) and publication, so the live buffer and the writer get
+    /// file events in id order even when a source delivers from two queues (native NOTIFY + denials).
+    private let orderLock = NSLock()
     private var processed: UInt64 = 0
     private var lastEvent: Date?
     private var sourceState = SourceState()
@@ -133,18 +163,25 @@ public final class EventPipeline: EventSink, @unchecked Sendable {
     }
 
     public func receive(_ event: SourceEvent, context: RuleContext) {
-        if isPaused(), case .file = event {
-            // Paused: keep the process tree current, record nothing.
+        guard case .file = event else {
+            _ = analyzer.handle(event, context: context)
             return
         }
-        let out = analyzer.handle(event, context: context)
-        guard !out.events.isEmpty || !out.alerts.isEmpty else { return }
-        live.append(out.events)
-        writer.enqueue(events: out.events)
-        if !out.alerts.isEmpty {
-            writer.enqueue(alerts: out.alerts.map(\.alert))
-            if let onAlert { out.alerts.forEach(onAlert) }
+        if isPaused() {
+            // Paused: keep the process tree current and record nothing, except blocks. Enforcement is a
+            // separate switch and keeps denying; every denial must still be recorded and alerted.
+            guard case .decided(let d) = context, d.verdict == .deny else { return }
         }
+        orderLock.lock()
+        let out = analyzer.handle(event, context: context)
+        if !out.events.isEmpty {
+            live.append(out.events)
+            writer.enqueue(events: out.events)
+        }
+        if !out.alerts.isEmpty { writer.enqueue(alerts: out.alerts.map(\.alert)) }
+        orderLock.unlock()
+        guard !out.events.isEmpty || !out.alerts.isEmpty else { return }
+        if let onAlert { out.alerts.forEach(onAlert) }
         lock.lock()
         processed += UInt64(out.events.count)
         lastEvent = out.events.last?.time ?? lastEvent
@@ -178,6 +215,9 @@ public final class Enforcer: AuthDecider, @unchecked Sendable {
     }
 
     public func decide(_ activity: FileActivity) -> RuleDecision {
+        // Never block a directory listing, or a directory open (reported as readdir): it reveals names
+        // only, and denying it breaks ls, Finder and open panels. Depends on nothing, so cacheable.
+        if activity.operation == .readdir { return RuleDecision(verdict: .allow, reason: .neverBlock, cacheable: true) }
         guard state.isActive else { return RuleDecision(verdict: .allow, reason: .enforcementInactive) }
         let classified = analyzer.classify(activity)
         let targets = classified.filter(\.isSensitive).map(\.evaluationTarget)
@@ -187,6 +227,9 @@ public final class Enforcer: AuthDecider, @unchecked Sendable {
         return analyzer.rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: true, now: activity.time)
     }
 
+    /// NativeESSource calls this on the ES callback thread only for on-time responses (a ring store).
+    /// A missed deadline trips enforcement, which runs the EnforcementState observers on the calling
+    /// thread, so the source reports misses from a queue.
     public func recordResponse(micros: UInt64, missedDeadline: Bool) {
         latency.record(micros: micros, missedDeadline: missedDeadline)
         if missedDeadline { state.tripLatency("deadline missed") }

@@ -11,23 +11,35 @@ Usage: whoread <command> [options]
 Daemon queries (talk to whoreadd over XPC; --socket PATH for the dev socket):
   status                         daemon state, source, enforcement, counters
   events [filters]               recorded accesses (newest first)
-      --since 1h|2d|2026-10-04   --until …   --category ID (repeatable)   --app TEXT
-      --agent ID   --agents-only   --denied   --all (include folded system noise)   --limit N
+      --since 1h|2d|2026-10-04|"2026-10-04 09:30"   --until …   (no offset = local time)
+      --category ID (repeatable)   --app TEXT   --agent ID   --agents-only   --denied
+      --all (include folded system noise)   --limit N
   tail [--all]                   follow new events live
-  alerts [--unread] [--limit N]
-  alert <id> <allow-once|always-allow|block|keep-blocking|ignore>
-  read-all                       mark every alert read
+  alerts [--unread] [--since …] [--limit N]
+  alert <id> block               deny this app from now on (alert stays open without sudo)
+  alert <id> allow-once|always-allow|keep-blocking|ignore      needs sudo (or the WhoRead app)
+  read-all                       mark every alert read; needs sudo (or the WhoRead app)
   apps | files | agents          who touched what (Apps / Files / Agents tabs)
-  export --format json|jsonl|csv [--output FILE] [filters]
+  daily [--since …] [filters]    per-day totals for days past the detail window (detail-days)
+  export --format json|jsonl|csv [--output FILE] [filters]      all matching events, oldest first
+  export --aggregates --format json|jsonl|csv [--output FILE] [--since …]   per-day totals
   enforcement on|off|status      off needs sudo (or the WhoRead app)
   pause | resume                 pause needs sudo (or the WhoRead app)
   rules [list|templates|add --json-file F|enable ID|disable ID|enforce ID|dry-run ID|delete ID]
-  catalog [show|resolve-owners [--dry-run]|reset]
+  catalog [show [ID]|export [--output FILE]|resolve-owners]
+                                   resolve-owners: show the owner team/signing IDs codesign reports
+                                   for installed apps (the daemon applies them in memory at start)
+  catalog add-path|remove-path CATEGORY PATH        PATH starts with / or ~/
+  catalog add-category ID NAME_EN NAME_ZH medium|high|critical [--path PATH]...
+  catalog remove-category ID | set-severity ID SEVERITY | enable ID | disable ID
+  catalog import FILE | reset
   settings [show | set KEY VALUE]   keys: learning-days retention-days detail-days coalesce-minutes
                                        readdir on|off  project-root-add PATH  project-root-remove PATH
                                        notifications on|off  min-severity medium|high|critical
                                        latency-p99-ms N  language en|zh-Hans|system
   baseline [restart-learning]
+  Changes that can weaken protection (settings set, rule edits other than adding a deny or alert
+  rule, catalog changes, restart-learning) need sudo (or the WhoRead app).
 
 Local (no daemon):
   kill-switch engage|release|status [--path P]   creates/removes the disable-enforcement file (root)
@@ -72,6 +84,29 @@ func explain(_ e: IPCError) -> CLIError {
         return CLIError("cannot reach the WhoRead daemon: \(e.message)\n  Is whoreadd running? (sudo launchctl print system/com.whoread.daemon)", exitCode: 69)
     default:
         return CLIError("\(e.code.rawValue): \(e.message)")
+    }
+}
+
+/// One `.hello` before the first real request, so a whoread/daemon version skew is reported as
+/// such instead of as an undecodable request or reply.
+func handshake(_ c: IPCClient) throws {
+    func mismatch(_ detail: String) -> CLIError {
+        CLIError("whoread (IPC protocol \(whoReadIPCVersion)) and the running daemon do not match: \(detail)\n"
+                 + "  Use the whoread that ships with the installed WhoRead app, or restart the daemon after an update.",
+                 exitCode: 69)
+    }
+    let reply: IPCResponse
+    do {
+        reply = try c.send(.hello(clientVersion: whoReadIPCVersion))
+    } catch is DecodingError {
+        throw mismatch("unreadable reply")
+    }
+    switch reply {
+    case .hello(let v) where v == whoReadIPCVersion: return
+    case .hello(let v): throw mismatch("daemon speaks protocol \(v)")
+    case .error(let e) where e.code == .versionMismatch: throw mismatch(e.message)
+    case .error(let e): throw e
+    default: throw mismatch("unexpected reply")
     }
 }
 
@@ -157,26 +192,45 @@ func cmdStatus(_ c: IPCClient) throws {
                    s.latency.p99Micros, s.latency.maxMicros, s.latency.deadlineMisses))
     }
     if s.writerDropped > 0 { out("  WARNING: \(s.writerDropped) events dropped before storage") }
+    if let d = s.sourceDroppedEvents, d > 0 { out("  WARNING: \(d) file events dropped by the source (analysis backlog full)") }
+    if let e = s.rulesLoadError { out("  WARNING: stored rules failed to load (\(e)); enforcement stays off") }
+}
+
+/// Details older than `detailDays` survive only as per-day totals: say so when `--since` reaches
+/// past them, instead of silently returning a shorter history.
+func noteRolledUp(_ c: IPCClient, since: Date?) {
+    guard let since, let s = try? c.settings(), since < Date().addingTimeInterval(-Double(s.detailDays) * 86400) else { return }
+    let note = language == .zhHans
+        ? "注意：超过 \(s.detailDays) 天的明细只保留按天汇总，见 `whoread daily` 或 `whoread export --aggregates`。"
+        : "note: details older than \(s.detailDays) day\(s.detailDays == 1 ? "" : "s") are kept only as per-day totals; "
+            + "see `whoread daily` or `whoread export --aggregates`."
+    FileHandle.standardError.write(Data((note + "\n").utf8))
 }
 
 func cmdEvents(_ c: IPCClient) throws {
-    let events = try c.events(try eventQuery())
+    let q = try eventQuery()
+    noteRolledUp(c, since: q.since)
+    let events = try c.events(q)
     if args.json { return out(try Format.json(events)) }
     printEvents(events, context(c))
 }
 
 func cmdTail(_ c: IPCClient) throws {
     let ctx = context(c)
-    var after: Int64? = (try? c.events(EventQuery(includeBenign: true, limit: 1)))?.first?.id
+    var after: Int64? = try c.events(EventQuery(includeBenign: true, limit: 1)).first?.id
     out(language == .zhHans ? "正在跟踪新事件（Ctrl-C 退出）…" : "Following new events (Ctrl-C to stop)…")
+    fflush(stdout)
+    // Pages from the store in id order (not the live ring's newest-N), so a burst larger than one
+    // page is printed in full.
+    let page = 1000
     while true {
-        if case .events(let events) = try c.call(.live(afterID: after, limit: 500, includeBenign: args.has("all"))), !events.isEmpty {
-            for e in events {
-                out(ctx.eventLine(e).filter { !$0.isEmpty }.joined(separator: "  "))
-                after = e.id
-            }
+        let events = try c.events(EventQuery(includeBenign: args.has("all"), afterID: after, limit: page, newestFirst: false))
+        for e in events {
+            out(ctx.eventLine(e).filter { !$0.isEmpty }.joined(separator: "  "))
+            after = e.id
         }
-        Thread.sleep(forTimeInterval: 0.5)
+        fflush(stdout)
+        if events.count < page { Thread.sleep(forTimeInterval: 0.5) }
     }
 }
 
@@ -197,13 +251,18 @@ func cmdAlerts(_ c: IPCClient) throws {
 
 func cmdAlertAction(_ c: IPCClient) throws {
     guard args.positional.count >= 3, let id = Int64(args.positional[1]) else {
-        throw CLIError("usage: whoread alert <id> <allow-once|always-allow|block|keep-blocking|ignore>")
+        throw CLIError("usage: whoread alert <id> <block|allow-once|always-allow|keep-blocking|ignore>")
     }
     let map: [String: AlertAction] = ["allow-once": .allowOnce, "always-allow": .alwaysAllow, "block": .blockFromNowOn,
                                       "keep-blocking": .keepBlocking, "ignore": .ignore]
     guard let action = map[args.positional[2]] else { throw CLIError("unknown action \(args.positional[2])") }
     _ = try c.call(.alertAction(alertID: id, action: action))
     out("alert #\(id): \(action.rawValue)")
+    if action == .blockFromNowOn && geteuid() != 0 {
+        // The daemon adds the deny rule for anyone, but only root or the app may close the alert.
+        out(language == .zhHans ? "  已添加拦截规则；告警本身仍保持打开，请在 WhoRead 应用中处理（或用 sudo）。"
+                                : "  deny rule added; the alert itself stays open: handle it in the WhoRead app (or with sudo).")
+    }
 }
 
 func groupSummaries(_ sums: [UsageSummary], by key: (UsageSummary) -> String) -> [(String, [UsageSummary])] {
@@ -259,19 +318,180 @@ func cmdAgents(_ c: IPCClient) throws {
     out(Format.table(rows, header: language == .zhHans ? ["AI agent", "碰过的类别", "被拦截", "最近", "次数"] : ["AI AGENT", "CATEGORIES", "BLOCKED", "LAST", "COUNT"]))
 }
 
+/// Daily aggregates matching the event filters (the daemon applies `--since`).
+func dailyRows(_ c: IPCClient) throws -> [DailyAggregate] {
+    let q = try eventQuery()
+    let rows = try c.dailyAggregates(since: q.since).filter { a in
+        let s = a.summary
+        if let until = q.until, s.firstSeen > until { return false }
+        if let cats = q.categoryIDs, !cats.contains(s.categoryID) { return false }
+        if let agent = q.agentID, s.agentID != agent { return false }
+        if q.agentsOnly && s.agentID == nil { return false }
+        if !q.includeBenign && s.benign { return false }
+        if q.decisions != nil && s.denied == 0 { return false }
+        if let t = q.text?.lowercased(), !t.isEmpty, !s.responsible.displayName.lowercased().contains(t) { return false }
+        return true
+    }
+    return args.value("limit") == nil ? rows : Array(rows.prefix(max(0, q.limit)))
+}
+
+func cmdDaily(_ c: IPCClient) throws {
+    let rows = try dailyRows(c)
+    if args.json { return out(try Format.json(rows)) }
+    if rows.isEmpty {
+        return out(language == .zhHans ? "还没有按天汇总的历史（超过 detail-days 天的明细会汇总到这里）。"
+                                       : "No per-day history yet (details older than detail-days are rolled up here).")
+    }
+    let ctx = context(c)
+    let agents = (try? c.agents()) ?? AgentCatalog(agents: [])
+    let table = rows.map { a -> [String] in
+        let s = a.summary
+        return [a.day, s.responsible.displayName, ctx.categoryName(s.categoryID),
+                s.agentID.map { agents.agent($0)?.name.resolve(language) ?? $0 } ?? "",
+                String(s.count), String(s.reads), String(s.writes), String(s.denied)]
+    }
+    out(Format.table(table, header: language == .zhHans ? ["日期", "应用", "类别", "AI agent", "次数", "读", "写", "被拦截"]
+                                                        : ["DAY", "APP", "CATEGORY", "AI AGENT", "COUNT", "READS", "WRITES", "BLOCKED"]))
+}
+
+/// Writes an export to stdout, or to FILE through FILE.partial renamed at the end so a failed
+/// export never leaves a truncated file. Buffered, so a small export goes out in one write.
+final class ExportWriter {
+    private let handle: FileHandle
+    private let path: String?
+    private var buffer = Data()
+
+    init(path: String?) throws {
+        self.path = path
+        if let path {
+            guard FileManager.default.createFile(atPath: path + ".partial", contents: nil),
+                  let h = FileHandle(forWritingAtPath: path + ".partial") else { throw CLIError("cannot write \(path).partial") }
+            handle = h
+        } else {
+            handle = FileHandle.standardOutput
+        }
+    }
+
+    func write(_ data: Data) throws {
+        buffer.append(data)
+        if buffer.count >= 1 << 20 { try flush() }
+    }
+
+    func write(_ s: String) throws { try write(Data(s.utf8)) }
+
+    private func flush() throws {
+        guard !buffer.isEmpty else { return }
+        try handle.write(contentsOf: buffer)
+        buffer.removeAll(keepingCapacity: true)
+    }
+
+    func finish() throws {
+        try flush()
+        guard let path else { return }
+        try handle.close()
+        guard rename(path + ".partial", path) == 0 else {
+            throw CLIError("cannot rename \(path).partial: \(String(cString: strerror(errno)))")
+        }
+    }
+
+    func abandon() {
+        guard let path else { return }
+        try? handle.close()
+        unlink(path + ".partial")
+    }
+}
+
+/// Events per request: far below the dev socket's 64 MiB reply frame and the store's 100k cap.
+let exportPageSize = 5_000
+
 func cmdExport(_ c: IPCClient) throws {
     guard let f = Exporter.Format(rawValue: args.value("format") ?? "json") else { throw CLIError("--format json|jsonl|csv") }
-    var q = try eventQuery()
-    if args.value("limit") == nil { q.limit = 1_000_000 }
-    q.newestFirst = false
-    let events = try c.events(q)
-    let data = try Exporter.export(events: events, format: f, catalog: try? c.catalog().catalog)
-    if let path = args.value("output") ?? args.value("o") {
-        try data.write(to: URL(fileURLWithPath: path))
-        FileHandle.standardError.write(Data("exported \(events.count) events to \(path)\n".utf8))
-    } else {
-        FileHandle.standardOutput.write(data)
+    let path = args.value("output") ?? args.value("o")
+    let writer = try ExportWriter(path: path)
+    let count: Int
+    do {
+        count = args.has("aggregates") ? try exportAggregates(c, format: f, to: writer) : try exportEvents(c, format: f, to: writer)
+        try writer.finish()
+    } catch {
+        writer.abandon()
+        throw error
     }
+    if let path {
+        FileHandle.standardError.write(Data("exported \(count) \(args.has("aggregates") ? "daily aggregates" : "events") to \(path)\n".utf8))
+    }
+}
+
+/// Every matching event, oldest first, fetched in pages and streamed out.
+func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter) throws -> Int {
+    var q = try eventQuery()
+    noteRolledUp(c, since: q.since)
+    let total = args.value("limit") == nil ? Int.max : max(0, q.limit)
+    q.newestFirst = false
+    // Pin the end of the window so a busy machine cannot keep the export chasing new events.
+    if q.until == nil { q.until = Date() }
+    let catalog = try? c.catalog().catalog
+    let pretty = Exporter.encoder(pretty: true)
+    let compact = Exporter.encoder(pretty: false)
+    switch f {
+    case .json: try w.write("[")
+    case .jsonl: break
+    case .csv: try w.write(Exporter.csvColumns.joined(separator: ",") + "\n")
+    }
+    var count = 0
+    while count < total {
+        q.limit = min(exportPageSize, total - count)
+        let page = try c.events(q)
+        switch f {
+        case .json:
+            for (i, e) in page.enumerated() {
+                let item = String(decoding: try pretty.encode(e), as: UTF8.self).replacingOccurrences(of: "\n", with: "\n  ")
+                try w.write((count + i == 0 ? "\n  " : ",\n  ") + item)
+            }
+        case .jsonl:
+            for e in page {
+                try w.write(try compact.encode(e))
+                try w.write("\n")
+            }
+        case .csv:
+            // The header went out once above; drop the one Exporter puts on every page.
+            let csv = Exporter.csv(events: page, catalog: catalog)
+            if let nl = csv.firstIndex(of: "\n") { try w.write(String(csv[csv.index(after: nl)...])) }
+        }
+        count += page.count
+        guard page.count == q.limit, let last = page.last else { break }
+        q.afterID = last.id
+    }
+    if f == .json { try w.write(count == 0 ? "]\n" : "\n]\n") }
+    return count
+}
+
+/// Per-day totals (details older than detail-days live only here), oldest day first.
+func exportAggregates(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter) throws -> Int {
+    let rows = Array(try dailyRows(c).reversed())
+    switch f {
+    case .json:
+        try w.write(try Exporter.encoder(pretty: true).encode(rows))
+        try w.write("\n")
+    case .jsonl:
+        let enc = Exporter.encoder(pretty: false)
+        for r in rows {
+            try w.write(try enc.encode(r))
+            try w.write("\n")
+        }
+    case .csv:
+        let catalog = try? c.catalog().catalog
+        try w.write(["day", "responsible", "responsible_kind", "responsible_key", "category", "category_name", "agent",
+                     "first", "last", "count", "reads", "writes", "denied", "benign"].joined(separator: ",") + "\n")
+        for a in rows {
+            let s = a.summary
+            let cells = [a.day, s.responsible.displayName, s.responsible.kind.rawValue, s.responsible.key, s.categoryID,
+                         catalog?.category(s.categoryID)?.name.en ?? "", s.agentID ?? "",
+                         RFC3339.format(s.firstSeen, fractionDigits: 6), RFC3339.format(s.lastSeen, fractionDigits: 6),
+                         String(s.count), String(s.reads), String(s.writes), String(s.denied), s.benign ? "true" : "false"]
+            try w.write(cells.map(Exporter.csvField).joined(separator: ",") + "\n")
+        }
+    }
+    return rows.count
 }
 
 func cmdEnforcement(_ c: IPCClient) throws {
@@ -303,7 +523,9 @@ func cmdRules(_ c: IPCClient) throws {
         switch r.subject {
         case .signed(let sid, let team): subject = "signed \(sid)" + (team.map { " (\($0))" } ?? "")
         case .unsigned(let p, _): subject = "unsigned \(p)"
-        case .responsible(let k, _): subject = "app \(k)"
+        case .responsible(let k, let team, let cdhash, let exceptOwners):
+            subject = "app \(k)" + (team.map { " (\($0))" } ?? "") + (cdhash.map { " cdhash \($0.prefix(12))…" } ?? "")
+                + (exceptOwners ? " except owners" : "")
         case .anyNonOwner: subject = "any non-owner"
         case .agentAncestor(let ids, let ex): subject = "agent chain " + (ids?.joined(separator: ",") ?? "any") + (ex ? " except owners" : "")
         }
@@ -351,10 +573,57 @@ func idArg() throws -> String {
     return args.positional[2]
 }
 
+/// A catalog prefix as the classifier expects it: absolute or `~/`, no `.`/`..`, narrower than a
+/// whole disk or home.
+func catalogPath(_ raw: String) throws -> String {
+    let p = raw.trimmingCharacters(in: .whitespaces)
+    guard p.hasPrefix("/") || p.hasPrefix("~/") else { throw CLIError("path must start with / or ~/: \(raw)") }
+    let parts = p.split(separator: "/")
+    guard !parts.contains("..") && !parts.contains(".") else { throw CLIError("path must not contain . or ..: \(raw)") }
+    guard parts.count > (p.hasPrefix("~/") ? 1 : 0) else { throw CLIError("\(p) is too broad to monitor") }
+    return p
+}
+
+func severityArg(_ v: String) throws -> Severity {
+    guard let s = Severity(rawValue: v.lowercased()) else { throw CLIError("severity must be medium, high or critical") }
+    return s
+}
+
 func cmdCatalog(_ c: IPCClient) throws {
-    switch args.positional.dropFirst().first ?? "show" {
+    let sub = args.positional.dropFirst().first ?? "show"
+    func arg(_ n: Int, _ usage: String) throws -> String {
+        guard args.positional.count > n else { throw CLIError("usage: whoread catalog \(usage)") }
+        return args.positional[n]
+    }
+    func index(_ catalog: Catalog, _ id: String) throws -> Int {
+        guard let i = catalog.categories.firstIndex(where: { $0.id == id }) else {
+            throw CLIError("unknown category \(id) (see whoread catalog show)")
+        }
+        return i
+    }
+    /// Read-modify-write of the whole catalog (the daemon takes it through `.updateCatalog`).
+    func edit(_ change: (inout Catalog) throws -> String) throws {
+        var catalog = try c.catalog().catalog
+        let message = try change(&catalog)
+        _ = try c.call(.updateCatalog(catalog))
+        out(message)
+    }
+    switch sub {
     case "show":
         let info = try c.catalog()
+        if let id = args.positional.dropFirst(2).first {
+            guard let cat = info.catalog.category(id) else { throw CLIError("unknown category \(id) (see whoread catalog show)") }
+            if args.json { return out(try Format.json(cat)) }
+            out("\(cat.id) — \(cat.name.resolve(language))  [\(cat.kind.rawValue), \(cat.severity.rawValue)\(cat.enabled ? "" : ", disabled")]")
+            out(cat.paths.isEmpty ? "  (no paths)" : cat.paths.map { "  " + $0 }.joined(separator: "\n"))
+            if !cat.patterns.isEmpty { out("  \(cat.patterns.count) file pattern(s), \(cat.owners.count) owner(s)") }
+            let prefixes = info.prefixes.filter { $0.categoryID == id }
+            if !prefixes.isEmpty {
+                out(language == .zhHans ? "本机监控的前缀：" : "monitored on this machine:")
+                prefixes.forEach { out("  " + $0.path + ($0.viaSymlink ? " (via symlink)" : "")) }
+            }
+            return
+        }
         if args.json { return out(try Format.json(info)) }
         var rows: [[String]] = []
         for cat in info.catalog.categories {
@@ -364,17 +633,97 @@ func cmdCatalog(_ c: IPCClient) throws {
                          String(prefixes.count), String(cat.owners.count)])
         }
         out(Format.table(rows, header: ["ID", language == .zhHans ? "名称" : "NAME", "SEVERITY", "STATE", "PREFIXES", "OWNERS"]))
+    case "add-path", "remove-path":
+        let usage = "\(sub) CATEGORY PATH"
+        let id = try arg(2, usage)
+        let path = sub == "add-path" ? try catalogPath(try arg(3, usage)) : try arg(3, usage).trimmingCharacters(in: .whitespaces)
+        try edit { cat in
+            let i = try index(cat, id)
+            if cat.categories[i].kind == .projectRoots {
+                throw CLIError("\(id) takes its folders from the project roots setting: whoread settings set project-root-add PATH")
+            }
+            if sub == "remove-path" {
+                guard cat.categories[i].paths.contains(path) else { throw CLIError("\(id) has no path \(path)") }
+                cat.categories[i].paths.removeAll { $0 == path }
+                return "removed \(path) from \(id)"
+            }
+            guard !cat.categories[i].paths.contains(path) else { throw CLIError("\(id) already has \(path)") }
+            cat.categories[i].paths.append(path)
+            return "added \(path) to \(id)" + (cat.categories[i].enabled ? "" : " (category is disabled: whoread catalog enable \(id))")
+        }
+    case "add-category":
+        let usage = "add-category ID NAME_EN NAME_ZH medium|high|critical [--path PATH]..."
+        let id = try arg(2, usage), en = try arg(3, usage), zh = try arg(4, usage)
+        let severity = try severityArg(try arg(5, usage))
+        guard id.range(of: "^[a-z0-9][a-z0-9-]*$", options: .regularExpression) != nil else {
+            throw CLIError("category id: lowercase letters, digits and -")
+        }
+        guard !en.trimmingCharacters(in: .whitespaces).isEmpty else { throw CLIError("NAME_EN must not be empty") }
+        let paths = try args.all("path").map(catalogPath)
+        try edit { cat in
+            guard cat.category(id) == nil else { throw CLIError("category \(id) already exists") }
+            cat.categories.append(CategorySpec(id: id, name: LocalizedText(en: en, zhHans: zh), kind: .custom, group: "custom",
+                                               severity: severity, paths: paths))
+            return "added category \(id)" + (paths.isEmpty ? " (no paths yet: whoread catalog add-path \(id) PATH)" : " with \(paths.count) path(s)")
+        }
+    case "remove-category":
+        let id = try arg(2, "remove-category ID")
+        try edit { cat in
+            let i = try index(cat, id)
+            guard cat.categories[i].kind == .custom else { throw CLIError("\(id) is built in: turn it off with whoread catalog disable \(id)") }
+            cat.categories.remove(at: i)
+            return "removed category \(id)"
+        }
+    case "set-severity":
+        let usage = "set-severity ID medium|high|critical"
+        let id = try arg(2, usage)
+        let severity = try severityArg(try arg(3, usage))
+        try edit { cat in
+            let i = try index(cat, id)
+            cat.categories[i].severity = severity
+            return "\(id): severity \(severity.rawValue)"
+        }
+    case "enable", "disable":
+        let id = try arg(2, "\(sub) ID")
+        try edit { cat in
+            let i = try index(cat, id)
+            cat.categories[i].enabled = sub == "enable"
+            return "\(id): \(sub)d"
+        }
+    case "export":
+        let data = try c.catalog().catalog.encoded() + Data("\n".utf8)
+        if let path = args.value("output") ?? args.value("o") {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            FileHandle.standardError.write(Data("catalog written to \(path)\n".utf8))
+        } else {
+            FileHandle.standardOutput.write(data)
+        }
+    case "import":
+        let file = try arg(2, "import FILE")
+        let catalog: Catalog
+        do {
+            catalog = try Catalog.load(from: Data(contentsOf: URL(fileURLWithPath: file)))
+        } catch {
+            throw CLIError("cannot read catalog \(file): \(error)")
+        }
+        let ids = catalog.categories.map(\.id)
+        guard Set(ids).count == ids.count else { throw CLIError("\(file): duplicate category ids") }
+        for cat in catalog.categories where cat.kind != .projectRoots {
+            for p in cat.paths { _ = try catalogPath(p) }
+        }
+        _ = try c.call(.updateCatalog(catalog))
+        out("catalog imported: \(catalog.categories.count) categories")
     case "resolve-owners":
         #if os(macOS)
         let info = try c.catalog()
         let (resolved, report) = OwnerResolver.resolve(catalog: info.catalog, reader: CodesignCommandReader(),
                                                        exists: { FileManager.default.fileExists(atPath: $0) })
+        _ = resolved
         report.resolved.forEach { out("  resolved \($0)") }
         out("\(report.resolved.count) resolved, \(report.missing.count) not installed, \(report.skippedGlobs) glob patterns left as is")
-        if !args.has("dry-run") {
-            _ = try c.call(.updateCatalog(resolved))
-            out("catalog updated")
-        }
+        // Writing these into catalog.json would freeze the owners against later default updates; the
+        // daemon resolves them in memory at every start and after catalog changes instead.
+        out("Nothing was written: the daemon applies these identities in memory at start.")
         #else
         throw CLIError("resolve-owners runs codesign and needs macOS")
         #endif
@@ -399,13 +748,17 @@ func cmdSettings(_ c: IPCClient) throws {
         default: throw CLIError("expected on/off") }
     }
     func number(_ v: String) throws -> Double {
-        guard let d = Double(v) else { throw CLIError("expected a number") }
+        guard let d = Double(v), d.isFinite else { throw CLIError("expected a number") }
         return d
+    }
+    func integer(_ v: String) throws -> Int {
+        guard let n = Int(v) else { throw CLIError("expected a whole number") }
+        return n
     }
     switch key {
     case "learning-days": s.learningDays = try number(value)
-    case "retention-days": s.retentionDays = Int(try number(value))
-    case "detail-days": s.detailDays = Int(try number(value))
+    case "retention-days": s.retentionDays = try integer(value)
+    case "detail-days": s.detailDays = try integer(value)
     case "coalesce-minutes": s.coalesceMinutes = try number(value)
     case "readdir": s.readdirEnabled = try bool(value)
     case "project-root-add": s.projectRoots.append(value)
@@ -518,28 +871,20 @@ do {
     case "fixture": try cmdFixture()
     case "help": out(usage)
     default:
+        let commands: [String: (IPCClient) throws -> Void] = [
+            "status": cmdStatus, "events": cmdEvents, "tail": cmdTail, "alerts": cmdAlerts, "alert": cmdAlertAction,
+            "read-all": { c in _ = try c.call(.markAlertsRead(ids: nil)); out("all alerts marked read") },
+            "apps": cmdApps, "files": cmdFiles, "agents": cmdAgents, "daily": cmdDaily, "export": cmdExport,
+            "enforcement": cmdEnforcement,
+            "pause": { c in _ = try c.call(.setPaused(true)); out("monitoring paused") },
+            "resume": { c in _ = try c.call(.setPaused(false)); out("monitoring resumed") },
+            "rules": cmdRules, "catalog": cmdCatalog, "settings": cmdSettings, "baseline": cmdBaseline,
+        ]
+        guard let run = commands[command] else { throw CLIError("unknown command \(command)\n\n\(usage)", exitCode: 64) }
         let client = try makeClient()
         do {
-            switch command {
-            case "status": try cmdStatus(client)
-            case "events": try cmdEvents(client)
-            case "tail": try cmdTail(client)
-            case "alerts": try cmdAlerts(client)
-            case "alert": try cmdAlertAction(client)
-            case "read-all": _ = try client.call(.markAlertsRead(ids: nil)); out("all alerts marked read")
-            case "apps": try cmdApps(client)
-            case "files": try cmdFiles(client)
-            case "agents": try cmdAgents(client)
-            case "export": try cmdExport(client)
-            case "enforcement": try cmdEnforcement(client)
-            case "pause": _ = try client.call(.setPaused(true)); out("monitoring paused")
-            case "resume": _ = try client.call(.setPaused(false)); out("monitoring resumed")
-            case "rules": try cmdRules(client)
-            case "catalog": try cmdCatalog(client)
-            case "settings": try cmdSettings(client)
-            case "baseline": try cmdBaseline(client)
-            default: throw CLIError("unknown command \(command)\n\n\(usage)", exitCode: 64)
-            }
+            try handshake(client)
+            try run(client)
         } catch let e as IPCError {
             throw explain(e)
         }

@@ -7,7 +7,8 @@ import WhoReadCore
 /// - Literal bundle paths that exist → `teamIDs` (every binary in a bundle shares the team; helper
 ///   signing IDs differ, so signing IDs are not pinned for bundles).
 /// - Literal executable paths that exist → `signingIDs` (+ `teamIDs` when present).
-/// - Glob paths are left alone (reported).
+/// - A spec with any glob path is left alone (reported): pinning it from its literal paths would
+///   exclude the members only a glob matches.
 public struct CodesignInfo: Equatable, Sendable {
     public var identifier: String?
     public var teamID: String?
@@ -67,6 +68,14 @@ public enum OwnerResolver {
         for ci in out.categories.indices {
             for oi in out.categories[ci].owners.indices {
                 var spec = out.categories[ci].owners[oi]
+                // Pinned IDs would describe only the literal members and shut out every process a glob
+                // of the same spec matches (`/usr/sbin/securityd` resolves, `/usr/libexec/**/secd` cannot:
+                // secd would stop being a keychain owner). Such specs are left as they are.
+                let globs = (spec.bundles ?? []).filter(\.hasWildcards).count + (spec.executables ?? []).filter(\.hasWildcards).count
+                if globs > 0 {
+                    report.skippedGlobs += globs
+                    continue
+                }
                 var teams = Set(spec.teamIDs ?? [])
                 var signing = Set(spec.signingIDs ?? [])
                 var changed = false

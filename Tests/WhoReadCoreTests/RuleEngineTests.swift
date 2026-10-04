@@ -28,7 +28,7 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(d.verdict, .allow)
         XCTAssertEqual(d.reason, .defaultAllow)
         XCTAssertTrue(d.cacheable)
-        XCTAssertEqual(d.authorizedOpenFlags, UInt32.max)
+        XCTAssertTrue(d.policyDenied.isEmpty)
     }
 
     func testOwnerReason() {
@@ -41,7 +41,7 @@ final class RuleEngineTests: XCTestCase {
         var d = eval([allow, deny], zoom, [target("/Users/alice/.ssh/id_rsa")])
         XCTAssertEqual(d.verdict, .deny)
         XCTAssertEqual(d.ruleID, deny.id)
-        XCTAssertEqual(d.authorizedOpenFlags & 0x3, 0)
+        XCTAssertEqual(d.policyDenied, .readWrite)
         d = eval([allow], zoom, [target("/Users/alice/.ssh/id_rsa")])
         XCTAssertEqual(d.reason, .explicitAllow)
         XCTAssertTrue(d.suppressAlert)
@@ -61,7 +61,7 @@ final class RuleEngineTests: XCTestCase {
         d = eval([live], zoom, [target("/Users/alice/.ssh/id_rsa")], enforcing: false)
         XCTAssertEqual(d.verdict, .allow)
         XCTAssertTrue(d.wouldDeny)
-        XCTAssertEqual(d.authorizedOpenFlags, UInt32.max, "inactive enforcement never masks flags")
+        XCTAssertTrue(d.policyDenied.isEmpty, "inactive enforcement denies nothing")
     }
 
     func testAnyNonOwnerSkipsPlatformBinariesUnlessOptedIn() {
@@ -87,7 +87,11 @@ final class RuleEngineTests: XCTestCase {
         let key = target("/Users/alice/.ssh/id_rsa")
         XCTAssertEqual(eval([live], agentCat, [key], now: at(4)).verdict, .deny)
         XCTAssertEqual(eval([live], userCat, [key], now: at(4)).verdict, .allow, "no agent in chain")
-        XCTAssertEqual(eval([live], agentSSH, [key], now: at(4)).verdict, .allow, "owner exception")
+        // The brief's priority is deny > allow > owner: the template blocks owners under an agent too.
+        XCTAssertEqual(eval([live], agentSSH, [key], now: at(4)).verdict, .deny, "deny beats owner")
+        var lenient = live
+        lenient.subject = .agentAncestor(agentIDs: nil, exceptOwners: true)
+        XCTAssertEqual(eval([lenient], agentSSH, [key], now: at(4)).verdict, .allow, "opt-in owner exception")
         // severityAtLeast uses the file-level severity: ~/.ssh/config is medium.
         XCTAssertEqual(eval([live], agentCat, [target("/Users/alice/.ssh/config")], now: at(4)).verdict, .allow)
         // Writes are not covered by a read rule.
@@ -119,13 +123,13 @@ final class RuleEngineTests: XCTestCase {
         XCTAssertEqual(eval([rule], zoom, [dir]).verdict, .deny)
     }
 
-    func testPartialAccessPolicyShapesOpenFlags() {
+    func testPartialAccessPolicyIsNeverCachedAsAllow() {
         let denyWrite = Rule(enforce: true, target: .category("ssh"), subject: .anyNonOwner, access: .write, action: .deny)
         let d = eval([denyWrite], zoom, [target("/Users/alice/.ssh/id_rsa", .read)])
         XCTAssertEqual(d.verdict, .allow, "read-only open passes")
+        // A cached allow would let a later write open through without an AUTH event, so the native
+        // source only caches allows with nothing denied.
         XCTAssertEqual(d.policyDenied, .write)
-        XCTAssertEqual(d.authorizedOpenFlags & OperationSemantics.fwrite, 0, "a cached answer must still refuse later writes")
-        XCTAssertNotEqual(d.authorizedOpenFlags & OperationSemantics.fread, 0)
     }
 
     func testExceptionsAllowOnceAndAlways() {

@@ -36,6 +36,7 @@ public struct DefaultData: Sendable {
             let dir = URL(fileURLWithPath: exe).deletingLastPathComponent()
             // App / system extension bundle: Contents/MacOS/x -> Contents/Resources
             out.append(dir.deletingLastPathComponent().appendingPathComponent("Resources"))
+            out.append(dir.deletingLastPathComponent().appendingPathComponent("Resources/Data"))
             out.append(dir.appendingPathComponent("WhoReadData"))
         }
         out.append(URL(fileURLWithPath: WhoReadPaths.dataDirectory).appendingPathComponent("defaults"))

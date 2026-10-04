@@ -48,7 +48,9 @@ public final class XPCServer: NSObject, NSXPCListenerDelegate, @unchecked Sendab
 
     public func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         var trusted = false
-        if let requirement {
+        // Root may use any CLI build (`sudo whoread enforcement off` must always work; root can create
+        // the kill-switch file anyway). Everyone else must satisfy the requirement.
+        if let requirement, connection.effectiveUserIdentifier != 0 {
             // The connection is invalidated by the system if the peer does not satisfy it.
             connection.setCodeSigningRequirement(requirement)
             trusted = true

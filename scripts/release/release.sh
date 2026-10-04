@@ -22,8 +22,16 @@ APP="$OUT/export/WhoRead.app"
 
 # Sanity checks before uploading.
 codesign --verify --deep --strict --verbose=2 "$APP"
-codesign -d --entitlements :- "$APP/Contents/Library/SystemExtensions/"*.systemextension | grep -q endpoint-security.client \
+EXT="$(echo "$APP/Contents/Library/SystemExtensions/"*.systemextension)"
+codesign -d --entitlements :- "$EXT" | grep -q endpoint-security.client \
   || { echo "system extension lacks the ES entitlement" >&2; exit 1; }
+# The extension only talks to code that satisfies its requirements: the embedded CLI and the app.
+requirement() { /usr/libexec/PlistBuddy -c "Print :$1" "$EXT/Contents/Info.plist"; }
+[ -x "$APP/Contents/Helpers/whoread" ] || { echo "app lacks Contents/Helpers/whoread" >&2; exit 1; }
+codesign --verify -R="$(requirement WhoReadClientRequirement)" "$APP/Contents/Helpers/whoread" \
+  || { echo "embedded whoread does not satisfy WhoReadClientRequirement" >&2; exit 1; }
+codesign --verify -R="$(requirement WhoReadAppRequirement)" "$APP" \
+  || { echo "the app does not satisfy WhoReadAppRequirement" >&2; exit 1; }
 
 /usr/bin/ditto -c -k --keepParent "$APP" "$OUT/WhoRead.zip"
 xcrun notarytool submit "$OUT/WhoRead.zip" --keychain-profile "$PROFILE" --wait

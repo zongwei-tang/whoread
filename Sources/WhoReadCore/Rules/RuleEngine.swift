@@ -45,9 +45,9 @@ public enum DecisionReason: String, Codable, Sendable {
 
 public struct RuleDecision: Codable, Hashable, Sendable {
     public var verdict: Verdict
-    /// Accesses the policy denies for this process on these paths, over *all* access kinds (not
-    /// just the requested ones). AUTH_OPEN responses use it so a cached answer is right for later
-    /// opens with different flags.
+    /// Accesses enforced rules deny for this process on these paths, over *all* access kinds (not
+    /// just the requested ones). An AUTH_OPEN allow is only cached when this is empty: a cached
+    /// masked answer would deny later opens without an AUTH event (no log, no alert).
     public var policyDenied: AccessSet
     public var wouldDeny: Bool
     public var reason: DecisionReason
@@ -72,14 +72,6 @@ public struct RuleDecision: Codable, Hashable, Sendable {
     public static func failOpen() -> RuleDecision {
         RuleDecision(verdict: .allow, reason: .failOpen)
     }
-
-    /// Flags to authorize for AUTH_OPEN: everything except the denied access bits.
-    public var authorizedOpenFlags: UInt32 {
-        var flags = UInt32.max
-        if policyDenied.contains(.read) { flags &= ~OperationSemantics.fread }
-        if policyDenied.contains(.write) { flags &= ~OperationSemantics.fwrite }
-        return flags
-    }
 }
 
 /// Evaluates rules for an access. Thread-safe; everything is in memory.
@@ -90,6 +82,8 @@ public final class RuleEngine: @unchecked Sendable {
     private let lock = NSLock()
     private var compiled: [CompiledRule] = []
     private var classifier: PathClassifier
+    /// An "allow once" use was consumed since the last `takeConsumed()` (callers persist it).
+    private var consumed = false
     private let attributor: Attributor?
     public private(set) var neverBlock: NeverBlockList
 
@@ -97,6 +91,9 @@ public final class RuleEngine: @unchecked Sendable {
         var rule: Rule
         var prefixKeys: [String]
         var exceptionPrefixKeys: [[String]]
+        /// Folded, normalized program path for `.unsigned` subjects (computed once, not per event).
+        var unsignedKey: String?
+        var exceptionUnsignedKeys: [String?]
     }
 
     public init(rules: [Rule], classifier: PathClassifier, attributor: Attributor? = nil, neverBlock: NeverBlockList = NeverBlockList()) {
@@ -111,15 +108,37 @@ public final class RuleEngine: @unchecked Sendable {
             guard let prefix else { return [] }
             return classifier.normalizer.expand(prefix).map { PathClassifier.stripTrailingSlash(PathNormalizer.fold($0)) }
         }
+        func unsignedKey(_ s: RuleSubject) -> String? {
+            if case .unsigned(let path, _) = s { return PathNormalizer.fold(classifier.normalizer.normalize(path)) }
+            return nil
+        }
         var prefixKeys: [String] = []
         if case .pathPrefix(let p) = rule.target { prefixKeys = keys(p) }
-        return CompiledRule(rule: rule, prefixKeys: prefixKeys, exceptionPrefixKeys: rule.exceptions.map { keys($0.pathPrefix) })
+        return CompiledRule(rule: rule, prefixKeys: prefixKeys, exceptionPrefixKeys: rule.exceptions.map { keys($0.pathPrefix) },
+                            unsignedKey: unsignedKey(rule.subject), exceptionUnsignedKeys: rule.exceptions.map { unsignedKey($0.subject) })
     }
 
     public func replace(rules: [Rule], classifier: PathClassifier? = nil) {
         lock.lock(); defer { lock.unlock() }
         if let classifier { self.classifier = classifier }
         compiled = rules.map { RuleEngine.compile($0, self.classifier) }
+    }
+
+    /// Swaps the classifier and recompiles the current rules atomically (no stale rule snapshot).
+    public func replace(classifier: PathClassifier) {
+        lock.lock(); defer { lock.unlock() }
+        self.classifier = classifier
+        compiled = compiled.map { RuleEngine.compile($0.rule, classifier) }
+    }
+
+    /// Read-modify-write of the rule list under the engine lock. Returns the new list.
+    @discardableResult
+    public func mutate(_ f: (inout [Rule]) throws -> Void) rethrows -> [Rule] {
+        lock.lock(); defer { lock.unlock() }
+        var list = compiled.map(\.rule)
+        try f(&list)
+        compiled = list.map { RuleEngine.compile($0, classifier) }
+        return list
     }
 
     public func setNeverBlock(_ list: NeverBlockList) {
@@ -167,20 +186,26 @@ public final class RuleEngine: @unchecked Sendable {
         }
         let chainAgents = Set(chain.compactMap(\.agentID))
 
-        func subjectMatches(_ subject: RuleSubject, category: String) -> Bool {
+        let processPathKey = PathNormalizer.fold(process.executablePath)
+        let processCdhash = process.cdhash?.lowercased()
+
+        /// `unsignedKey` is the precompiled program path of an `.unsigned` subject. For deny rules a
+        /// pinned cdhash also matches the same code at any other path (copying the binary is not a
+        /// way around a block).
+        func subjectMatches(_ subject: RuleSubject, category: String, unsignedKey: String? = nil, widenForDeny: Bool = false) -> Bool {
             switch subject {
             case .signed(let sid, let team):
                 return process.signingID == sid && process.teamID == team
-            case .unsigned(let path, let cdhash):
-                guard PathNormalizer.fold(process.executablePath) == PathNormalizer.fold(classifier.normalizer.normalize(path)) else {
-                    return false
-                }
-                if let cdhash { return process.cdhash?.lowercased() == cdhash.lowercased() }
+            case .unsigned(_, let cdhash):
+                if widenForDeny, let cdhash, processCdhash == cdhash.lowercased() { return true }
+                guard let key = unsignedKey, processPathKey == key else { return false }
+                if let cdhash { return processCdhash == cdhash.lowercased() }
                 return true
-            case .responsible(let key, let team):
+            case .responsible(let key, let team, let cdhash, let exceptOwners):
                 guard let r = responsible(), r.key == key else { return false }
-                if let team { return r.teamID == team }
-                return true
+                if let team, r.teamID != team { return false }
+                if let cdhash, r.cdhash?.lowercased() != cdhash.lowercased() { return false }
+                return !(exceptOwners && isOwner(category))
             case .anyNonOwner:
                 return !isOwner(category)
             case .agentAncestor(let ids, let exceptOwners):
@@ -222,7 +247,8 @@ public final class RuleEngine: @unchecked Sendable {
                     if c.rule.subject.isChainDependent || c.rule.isTimeDependent || c.rule.hasChainDependentExceptions {
                         dynamicCovering = true
                     }
-                    guard subjectMatches(c.rule.subject, category: category.id) else { continue }
+                    guard subjectMatches(c.rule.subject, category: category.id, unsignedKey: c.unsignedKey,
+                                         widenForDeny: c.rule.action == .deny) else { continue }
 
                     switch c.rule.action {
                     case .deny:
@@ -234,15 +260,23 @@ public final class RuleEngine: @unchecked Sendable {
                             let e = c.rule.exceptions[ei]
                             guard e.isLive(at: now) else { return false }
                             if let cat = e.categoryID, cat != category.id { return false }
+                            // Only requests the approval fully covers (a read approval is not a write approval).
+                            if let a = e.access, a.intersect(requested) != requested { return false }
+                            // Only chains whose agents the user saw when approving.
+                            if let approved = e.chainAgents, !chainAgents.isSubset(of: Set(approved)) { return false }
                             let prefixes = c.exceptionPrefixKeys[ei]
                             if !prefixes.isEmpty && !prefixes.contains(where: { pathKey == $0 || pathKey.hasPrefix($0 + "/") }) {
                                 return false
                             }
-                            return subjectMatches(e.subject, category: category.id)
+                            return subjectMatches(e.subject, category: category.id, unsignedKey: c.exceptionUnsignedKeys[ei])
                         }
                         if let ei = exceptionIndex {
                             if !requested.isEmpty, c.rule.exceptions[ei].remainingUses != nil {
                                 consumedExceptions.append((ri, ei))
+                            }
+                            if enforcementActive && c.rule.enforce, let a = c.rule.exceptions[ei].access {
+                                // Access kinds outside the approval stay denied (keeps AUTH_OPEN caching honest).
+                                enforcedDenied.formUnion(c.rule.access.intersect(.readWrite).subtracting(a.intersect(.readWrite)))
                             }
                             continue
                         }
@@ -273,6 +307,7 @@ public final class RuleEngine: @unchecked Sendable {
         for (ri, ei) in consumedExceptions where consumeExceptions {
             if let uses = compiled[ri].rule.exceptions[ei].remainingUses {
                 compiled[ri].rule.exceptions[ei].remainingUses = uses - 1
+                consumed = true
             }
         }
         if let rule = dryRunDeny {
@@ -290,6 +325,31 @@ public final class RuleEngine: @unchecked Sendable {
         let owner = sensitive.allSatisfy { t in t.categories.allSatisfy { isOwner($0.id) } }
         return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: owner ? .owner : .defaultAllow,
                             cacheable: cacheable)
+    }
+
+    /// True once after an "allow once" use was consumed (the in-memory rules differ from what was saved).
+    public func takeConsumed() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        defer { consumed = false }
+        return consumed
+    }
+
+    /// Puts the flag back after a failed save.
+    public func markConsumed() {
+        lock.lock(); consumed = true; lock.unlock()
+    }
+
+    /// Drops exceptions that can never match again (used up or expired). Returns true if any was dropped.
+    @discardableResult
+    public func pruneDeadExceptions(at now: Date) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard compiled.contains(where: { $0.rule.exceptions.contains { !$0.isLive(at: now) } }) else { return false }
+        compiled = compiled.map { c in
+            var r = c.rule
+            r.exceptions.removeAll { !$0.isLive(at: now) }
+            return RuleEngine.compile(r, classifier)
+        }
+        return true
     }
 
     /// Rules changed outside (e.g. an exception was consumed): callers persist this.

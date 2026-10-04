@@ -11,14 +11,18 @@ struct OnboardingView: View {
 
     var body: some View {
         let o = connection.onboarding
+        // Detected from the connection too, so an extension approved before this launch shows as done.
+        let ext = o.extensionStepState(model.status, connected: model.connected, viaExtension: connection.connectedViaExtension)
         VStack(alignment: .leading, spacing: 16) {
             Text(L10n.t(.onbTitle)).font(.largeTitle.weight(.semibold))
             Text(L10n.t(.onbIntro)).foregroundStyle(.secondary)
-            step(1, L10n.t(.onbExtTitle), L10n.t(.onbExtBody), state: o.extensionState) {
-                Button(L10n.t(.onbExtButton)) { SystemExtensionManager.shared.activate() }
-                if o.extensionState == .waiting {
+            step(1, L10n.t(.onbExtTitle), L10n.t(.onbExtBody), state: ext) {
+                if ext != .needsRestart {
+                    Button(L10n.t(.onbExtButton)) { SystemExtensionManager.shared.activate() }
+                }
+                if ext == .waiting {
                     Text(L10n.t(.onbExtApprove)).font(.caption).foregroundStyle(.secondary)
-                    Button(L10n.t(.onbFDAButton)) {
+                    Button(L10n.t(.onbOpenLoginItems)) {
                         if let url = URL(string: OnboardingModel.loginItemsExtensionsURL) { NSWorkspace.shared.open(url) }
                     }
                 }
@@ -50,6 +54,9 @@ struct OnboardingView: View {
                 if case .failed(let reason) = state {
                     Text(L10n.f(.onbFailedFormat, reason)).font(.caption).foregroundStyle(.red)
                 }
+                if state == .needsRestart {
+                    Text(L10n.t(.onbRestartRequired)).font(.caption).foregroundStyle(.orange)
+                }
                 if state != .done { HStack { actions() } }
             }
         }
@@ -61,6 +68,7 @@ struct OnboardingView: View {
         case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
         case .waiting: ProgressView().controlSize(.small)
         case .pending: Image(systemName: "circle").foregroundStyle(.secondary)
+        case .needsRestart: Image(systemName: "arrow.clockwise.circle.fill").foregroundStyle(.orange)
         case .failed: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
         }
     }

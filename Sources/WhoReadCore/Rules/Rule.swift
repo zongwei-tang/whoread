@@ -16,8 +16,10 @@ public enum RuleSubject: Hashable, Sendable {
     /// Programs without a real signature: executable path, optionally pinned to a cdhash.
     case unsigned(path: String, cdhash: String?)
     /// The attributed responsible entity (what the UI shows as "the app"), optionally pinned to the
-    /// team ID of the bundle's code. Used by "block from now on" / "always allow" actions.
-    case responsible(key: String, teamID: String?)
+    /// team ID of the bundle's code, or to the cdhash of an unsigned binary (brief §5: path + cdhash).
+    /// Used by "block from now on" / "always allow" actions. `exceptOwners` keeps category owners
+    /// (ssh, git…) working when the responsible app is a terminal or IDE.
+    case responsible(key: String, teamID: String?, cdhash: String? = nil, exceptOwners: Bool = false)
     /// Any process that is not an owner of the target's category.
     case anyNonOwner
     /// Any process with a known AI agent in its ancestor chain (itself included).
@@ -113,7 +115,7 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
         expiresAt != nil || remainingUses != nil || exceptions.contains { $0.expiresAt != nil || $0.remainingUses != nil }
     }
 
-    var hasChainDependentExceptions: Bool { exceptions.contains { $0.subject.isChainDependent } }
+    var hasChainDependentExceptions: Bool { exceptions.contains { $0.subject.isChainDependent || $0.chainAgents != nil } }
 
     public func isLive(at now: Date) -> Bool {
         guard enabled else { return false }
@@ -154,16 +156,25 @@ public struct RuleException: Codable, Hashable, Sendable, Identifiable {
     public var pathPrefix: String?
     /// Narrow the exception to one category; nil = every category the rule targets.
     public var categoryID: String?
+    /// Narrow the exception to the access kind the user approved; nil = any. A request the exception
+    /// does not fully cover falls through to the deny (and does not use up an "allow once").
+    public var access: RuleAccess?
+    /// The AI agents that were in the chain when the user approved; nil = not scoped. A chain with
+    /// any other agent is not covered (an approved app's binary cannot be a tunnel for another agent).
+    public var chainAgents: [String]?
     public var expiresAt: Date?
     public var remainingUses: Int?
     public var createdAt: Date
 
     public init(id: String = UUID().uuidString, subject: RuleSubject, pathPrefix: String? = nil, categoryID: String? = nil,
+                access: RuleAccess? = nil, chainAgents: [String]? = nil,
                 expiresAt: Date? = nil, remainingUses: Int? = nil, createdAt: Date = Date()) {
         self.id = id
         self.subject = subject
         self.pathPrefix = pathPrefix
         self.categoryID = categoryID
+        self.access = access
+        self.chainAgents = chainAgents
         self.expiresAt = expiresAt
         self.remainingUses = remainingUses
         self.createdAt = createdAt
@@ -218,7 +229,9 @@ extension RuleSubject: Codable {
                              cdhash: try c.decodeIfPresent(String.self, forKey: .cdhash))
         case "responsible":
             self = .responsible(key: try c.decode(String.self, forKey: .key),
-                                teamID: try c.decodeIfPresent(String.self, forKey: .teamID))
+                                teamID: try c.decodeIfPresent(String.self, forKey: .teamID),
+                                cdhash: try c.decodeIfPresent(String.self, forKey: .cdhash),
+                                exceptOwners: try c.decodeIfPresent(Bool.self, forKey: .exceptOwners) ?? false)
         case "anyNonOwner":
             self = .anyNonOwner
         case "agentAncestor":
@@ -240,10 +253,12 @@ extension RuleSubject: Codable {
             try c.encode("unsigned", forKey: .type)
             try c.encode(path, forKey: .path)
             try c.encodeIfPresent(cdhash, forKey: .cdhash)
-        case .responsible(let key, let team):
+        case .responsible(let key, let team, let cdhash, let exceptOwners):
             try c.encode("responsible", forKey: .type)
             try c.encode(key, forKey: .key)
             try c.encodeIfPresent(team, forKey: .teamID)
+            try c.encodeIfPresent(cdhash, forKey: .cdhash)
+            if exceptOwners { try c.encode(true, forKey: .exceptOwners) }
         case .anyNonOwner:
             try c.encode("anyNonOwner", forKey: .type)
         case .agentAncestor(let ids, let exceptOwners):
@@ -264,7 +279,10 @@ public enum RuleTemplates {
             enabled: false,
             enforce: false,
             target: .severityAtLeast(.critical),
-            subject: .agentAncestor(agentIDs: nil, exceptOwners: true),
+            // Brief §5: deny beats owner. Turn exceptOwners on to let e.g. ssh keep reading keys for
+            // an agent's `git push`; owners are matched by location/identity, which agents can abuse
+            // (`curl -T ~/.netrc`, `git diff --no-index /dev/null key`).
+            subject: .agentAncestor(agentIDs: nil, exceptOwners: false),
             access: .read,
             action: .deny,
             createdAt: Date(timeIntervalSince1970: 0),

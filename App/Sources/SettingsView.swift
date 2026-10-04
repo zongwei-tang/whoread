@@ -23,24 +23,14 @@ struct SettingsView: View {
     @ViewBuilder
     func form(_ s: Binding<Settings>, base: Settings) -> some View {
         Form {
+            // Catalog edits are saved at once (read-modify-write on the daemon's current catalog);
+            // they are not part of the Save button's draft.
             Section(L10n.t(.setMonitoredPaths)) {
+                Text(L10n.t(.setMonitoredPathsNote)).font(.caption).foregroundStyle(.secondary)
                 ForEach(model.catalog?.catalog.categories ?? [], id: \.id) { c in
-                    HStack {
-                        Toggle(c.name.resolve(model.language), isOn: Binding(
-                            get: { c.enabled },
-                            set: { on in
-                                guard var catalog = model.catalog?.catalog,
-                                      let i = catalog.categories.firstIndex(where: { $0.id == c.id }) else { return }
-                                catalog.categories[i].enabled = on
-                                connection.save(catalog: catalog)
-                            }))
-                        Spacer()
-                        SeverityBadge(severity: c.severity)
-                        Text((model.catalog?.detected[c.id] ?? false) ? L10n.t(.detected) : L10n.t(.notDetected))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    .help(c.paths.joined(separator: "\n"))
+                    CategoryEditor(category: c, detected: model.catalog?.detected[c.id] ?? false)
                 }
+                NewCategoryForm()
             }
             Section(L10n.t(.setProjectRoots)) {
                 Text(L10n.t(.setProjectRootsNote)).font(.caption).foregroundStyle(.secondary)
@@ -54,10 +44,11 @@ struct SettingsView: View {
                 HStack {
                     TextField("~/code", text: $newRoot)
                     Button(L10n.t(.add)) {
-                        guard !newRoot.isEmpty else { return }
-                        s.wrappedValue.projectRoots.append(newRoot)
+                        guard let root = CatalogEdit.validPath(newRoot) else { return }
+                        if !s.wrappedValue.projectRoots.contains(root) { s.wrappedValue.projectRoots.append(root) }
                         newRoot = ""
                     }
+                    .disabled(CatalogEdit.validPath(newRoot) == nil)
                 }
             }
             Section(L10n.t(.setLearning)) {
@@ -82,9 +73,13 @@ struct SettingsView: View {
                 Toggle(L10n.t(.setNotifyWouldBlock), isOn: s.notifications.notifyWouldBlock)
             }
             Section(L10n.t(.setEnforcement)) {
+                // Its own request, not part of the draft. Shows what is in effect.
                 Toggle(L10n.t(.setEnforcementMaster), isOn: Binding(
-                    get: { model.status?.enforcementEnabled ?? false },
+                    get: { model.enforcementSwitchOn },
                     set: { connection.setEnforcement($0) }))
+                if let inactive = model.enforcementInactiveText {
+                    Text(inactive).font(.caption).foregroundStyle(.orange)
+                }
                 Text(L10n.t(.setEnforcementNote)).font(.caption).foregroundStyle(.secondary)
                 Stepper(value: s.latencyP99ThresholdMs, in: 1...1000, step: 5) {
                     Text("\(L10n.t(.setLatency)): \(Int(s.wrappedValue.latencyP99ThresholdMs))")
@@ -102,13 +97,105 @@ struct SettingsView: View {
                 Spacer()
                 Button(L10n.t(.revert)) { draft = nil }.disabled(draft == nil)
                 Button(L10n.t(.save)) {
-                    if let d = draft { connection.save(settings: d) }
-                    draft = nil
+                    guard let d = draft else { return }
+                    // Enforcement and pause come from the daemon's current state, not the draft;
+                    // the draft is kept if the daemon refuses.
+                    connection.save(settings: model.preparedForSave(d)) { draft = nil }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(draft == nil || draft == base)
+                .disabled(draft.map { model.preparedForSave($0) == base } ?? true)
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// One catalog category: on/off, severity and paths (brief §1: users can add, edit and delete).
+struct CategoryEditor: View {
+    @Environment(DaemonConnection.self) private var connection
+    @Environment(AppModel.self) private var model
+    let category: CategorySpec
+    let detected: Bool
+    @State private var expanded = false
+    @State private var newPath = ""
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            Picker(L10n.t(.colSeverity), selection: Binding(
+                get: { category.severity },
+                set: { connection.edit(catalog: [.setSeverity(categoryID: category.id, $0)]) })) {
+                ForEach(Severity.allCases, id: \.self) { Text(L10n.severity($0)).tag($0) }
+            }
+            if CatalogEdit.pathsEditable(category) {
+                ForEach(category.paths, id: \.self) { path in
+                    HStack {
+                        Text(path).textSelection(.enabled)
+                        Spacer()
+                        Button(L10n.t(.remove)) { connection.edit(catalog: [.removePath(categoryID: category.id, path)]) }
+                    }
+                }
+                HStack {
+                    TextField(L10n.t(.catPathPlaceholder), text: $newPath)
+                    Button(L10n.t(.add)) {
+                        connection.edit(catalog: [.addPath(categoryID: category.id, newPath)])
+                        newPath = ""
+                    }
+                    .disabled(CatalogEdit.validPath(newPath) == nil)
+                }
+                if !newPath.isEmpty && CatalogEdit.validPath(newPath) == nil {
+                    Text(L10n.t(.catInvalidPath)).font(.caption).foregroundStyle(.red)
+                }
+            } else {
+                Text(L10n.t(.catPathsManaged)).font(.caption).foregroundStyle(.secondary)
+            }
+            if CatalogEdit.isUserCategory(category) {
+                Button(L10n.t(.catDeleteCategory), role: .destructive) {
+                    connection.edit(catalog: [.deleteCategory(id: category.id)])
+                }
+            }
+        } label: {
+            HStack {
+                Toggle(category.name.resolve(model.language), isOn: Binding(
+                    get: { category.enabled },
+                    set: { connection.edit(catalog: [.setEnabled(categoryID: category.id, $0)]) }))
+                Spacer()
+                SeverityBadge(severity: category.severity)
+                Text(detected ? L10n.t(.detected) : L10n.t(.notDetected)).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// "Add category": a user category (kind custom) with a name, a severity and a first path.
+struct NewCategoryForm: View {
+    @Environment(DaemonConnection.self) private var connection
+    @State private var name = ""
+    @State private var path = ""
+    @State private var severity: Severity = .high
+
+    private var nameOK: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var pathOK: Bool { path.trimmingCharacters(in: .whitespaces).isEmpty || CatalogEdit.validPath(path) != nil }
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            HStack {
+                TextField(L10n.t(.catNewCategoryName), text: $name)
+                TextField(L10n.t(.catPathPlaceholder), text: $path)
+                Picker(L10n.t(.colSeverity), selection: $severity) {
+                    ForEach(Severity.allCases, id: \.self) { Text(L10n.severity($0)).tag($0) }
+                }
+                .labelsHidden()
+                .fixedSize()
+                Button(L10n.t(.catAddCategory)) {
+                    connection.edit(catalog: [.addCategory(id: CatalogEdit.newCategoryID(), name: name, severity: severity, path: path)])
+                    name = ""
+                    path = ""
+                }
+                .disabled(!nameOK || !pathOK)
+            }
+            if !pathOK {
+                Text(L10n.t(.catInvalidPath)).font(.caption).foregroundStyle(.red)
+            }
+        }
     }
 }

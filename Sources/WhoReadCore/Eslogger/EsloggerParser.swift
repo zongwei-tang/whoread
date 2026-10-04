@@ -45,12 +45,20 @@ public final class EsloggerParser: @unchecked Sendable {
         lock.lock(); f(&_stats); lock.unlock()
     }
 
-    /// Lines skipped by the prefilter still carry a sequence number; feeding it here keeps the
-    /// kernel-drop counter honest (a prefiltered line is not a dropped event).
+    /// Lines skipped by the prefilter (or rejected as malformed) still carry a sequence number;
+    /// feeding it here keeps the kernel-drop counter honest (such a line is not a dropped event).
     public func noteSequence(_ g: UInt64) {
         lock.lock()
         if let last = lastGlobalSeq, g > last + 1 { _stats.droppedByKernel += g - last - 1 }
-        if lastGlobalSeq.map({ g > $0 }) ?? true { lastGlobalSeq = g }
+        // A stream is monotonic: a smaller value means a new stream, which restarts the count.
+        lastGlobalSeq = g
+        lock.unlock()
+    }
+
+    /// A new eslogger client numbers its messages from 0 again: forget the previous stream.
+    public func resetSequence() {
+        lock.lock()
+        lastGlobalSeq = nil
         lock.unlock()
     }
 
@@ -102,12 +110,7 @@ public final class EsloggerParser: @unchecked Sendable {
         let time = J.string(root["time"]).flatMap(RFC3339.parse) ?? Date()
         let globalSeq = J.uint64(root["global_seq_num"])
         let seq = globalSeq ?? J.uint64(root["seq_num"])
-        if let g = globalSeq {
-            lock.lock()
-            if let last = lastGlobalSeq, g > last + 1 { _stats.droppedByKernel += g - last - 1 }
-            if lastGlobalSeq.map({ g > $0 }) ?? true { lastGlobalSeq = g }
-            lock.unlock()
-        }
+        if let g = globalSeq { noteSequence(g) }
 
         func file(_ op: FileOperation, _ targets: [FileTarget]) -> Result {
             guard !targets.isEmpty else { return .ignored("\(kind) without sensitive-capable targets") }
@@ -118,53 +121,55 @@ public final class EsloggerParser: @unchecked Sendable {
         case "open":
             guard let f = J.file(body["file"]) else { return .malformed("open without file") }
             let fflag = UInt32(truncatingIfNeeded: J.int(body["fflag"]) ?? 0)
-            return file(.open, OperationSemantics.open(path: f.path, fflag: fflag, truncated: f.truncated))
+            // A directory open (stat or O_DIRECTORY) only lists it: reported as readdir.
+            let (op, targets) = OperationSemantics.open(f, fflag: fflag)
+            return file(op, targets)
         case "close":
             guard let f = J.file(body["target"]) else { return .malformed("close without target") }
             let modified = J.bool(body["modified"]) ?? false
             if !modified { return .ignored("close without modification") }
-            return file(.close, OperationSemantics.close(path: f.path, modified: true, truncated: f.truncated))
+            return file(.close, OperationSemantics.close(f, modified: true))
         case "rename":
             guard let src = J.file(body["source"]) else { return .malformed("rename without source") }
             guard let dst = EsloggerParser.destination(body) else { return .malformed("rename without destination") }
-            return file(.rename, OperationSemantics.rename(source: src.path, destination: dst))
+            return file(.rename, OperationSemantics.rename(src, dst))
         case "clone":
             guard let src = J.file(body["source"]), let dir = J.file(body["target_dir"]), let name = J.string(body["target_name"]) else {
                 return .malformed("clone missing fields")
             }
-            return file(.clone, OperationSemantics.clone(source: src.path, destination: OperationSemantics.join(dir: dir.path, name: name)))
+            return file(.clone, OperationSemantics.clone(src, J.newPath(dir: dir, name: name)))
         case "copyfile":
             guard let src = J.file(body["source"]) else { return .malformed("copyfile without source") }
-            let dst: String
+            let dst: ReportedPath
             if let existing = J.file(body["target_file"]) {
-                dst = existing.path
+                dst = existing
             } else if let dir = J.file(body["target_dir"]), let name = J.string(body["target_name"]) {
-                dst = OperationSemantics.join(dir: dir.path, name: name)
+                dst = J.newPath(dir: dir, name: name)
             } else {
                 return .malformed("copyfile without target")
             }
-            return file(.copyfile, OperationSemantics.copyfile(source: src.path, destination: dst))
+            return file(.copyfile, OperationSemantics.copyfile(src, dst))
         case "link":
             guard let src = J.file(body["source"]), let dir = J.file(body["target_dir"]),
                   let name = J.string(body["target_filename"]) ?? J.string(body["target_name"]) else {
                 return .malformed("link missing fields")
             }
-            return file(.link, OperationSemantics.link(source: src.path, destination: OperationSemantics.join(dir: dir.path, name: name)))
+            return file(.link, OperationSemantics.link(src, J.newPath(dir: dir, name: name)))
         case "unlink":
             guard let t = J.file(body["target"]) else { return .malformed("unlink without target") }
-            return file(.unlink, OperationSemantics.unlink(path: t.path))
+            return file(.unlink, OperationSemantics.unlink(t))
         case "truncate":
             guard let t = J.file(body["target"]) else { return .malformed("truncate without target") }
-            return file(.truncate, OperationSemantics.truncate(path: t.path))
+            return file(.truncate, OperationSemantics.truncate(t))
         case "exchangedata":
             guard let a = J.file(body["file1"]), let b = J.file(body["file2"]) else { return .malformed("exchangedata missing files") }
-            return file(.exchangedata, OperationSemantics.exchangedata(a.path, b.path))
+            return file(.exchangedata, OperationSemantics.exchangedata(a, b))
         case "readdir":
             guard let t = J.file(body["target"]) else { return .malformed("readdir without target") }
-            return file(.readdir, OperationSemantics.readdir(path: t.path))
+            return file(.readdir, OperationSemantics.readdir(t))
         case "create":
             guard let dst = EsloggerParser.destination(body) else { return .malformed("create without destination") }
-            return file(.create, OperationSemantics.create(path: dst))
+            return file(.create, OperationSemantics.create(dst))
         case "exec":
             guard let targetObject = body["target"] as? [String: Any], var target = EsloggerParser.process(targetObject) else {
                 return .malformed("exec without target")
@@ -187,12 +192,12 @@ public final class EsloggerParser: @unchecked Sendable {
     }
 
     /// rename/create destination: `destination.existing_file` or `destination.new_path{dir, filename}`.
-    static func destination(_ body: [String: Any]) -> String? {
+    static func destination(_ body: [String: Any]) -> ReportedPath? {
         guard let dest = body["destination"] as? [String: Any] else { return nil }
-        if let existing = J.file(dest["existing_file"]) { return existing.path }
+        if let existing = J.file(dest["existing_file"]) { return existing }
         if let newPath = dest["new_path"] as? [String: Any], let dir = J.file(newPath["dir"]),
            let name = J.string(newPath["filename"]) {
-            return OperationSemantics.join(dir: dir.path, name: name)
+            return J.newPath(dir: dir, name: name)
         }
         return nil
     }
@@ -260,10 +265,18 @@ enum J {
         return nil
     }
 
-    /// es_file_t as JSON: {"path": "...", "path_truncated": false, "stat": {...}}.
-    static func file(_ v: Any?) -> (path: String, truncated: Bool)? {
+    /// es_file_t as JSON: {"path": "...", "path_truncated": false, "stat": {...}}. Directory-ness
+    /// comes from `stat.st_mode`; nil when there is no stat.
+    static func file(_ v: Any?) -> ReportedPath? {
         guard let o = v as? [String: Any], let path = o["path"] as? String else { return nil }
-        return (path, bool(o["path_truncated"]) ?? false)
+        let mode = int((o["stat"] as? [String: Any])?["st_mode"]).map { UInt32(truncatingIfNeeded: $0) }
+        return ReportedPath(path, truncated: bool(o["path_truncated"]) ?? false,
+                            isDirectory: mode.map { OperationSemantics.isDirectory(mode: $0) })
+    }
+
+    /// A destination that does not exist yet: parent directory + name (no stat of its own).
+    static func newPath(dir: ReportedPath, name: String) -> ReportedPath {
+        ReportedPath(OperationSemantics.join(dir: dir.path, name: name), truncated: dir.truncated)
     }
 
     /// cdhash as hex string, or as an array of byte values.

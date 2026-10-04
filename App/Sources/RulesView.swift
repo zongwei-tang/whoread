@@ -14,18 +14,14 @@ struct RulesView: View {
                 Button(L10n.t(.addRule)) { editing = RuleDraft() }
                 Menu(L10n.t(.templates)) {
                     ForEach(RuleTemplates.all, id: \.id) { t in
-                        Button(t.name ?? t.id) {
-                            var d = RuleDraft(rule: t)
-                            d.id = nil
-                            editing = d
-                        }
+                        Button(model.ruleName(t)) { editing = RuleDraft(template: t) }
                     }
                 }
                 .fixedSize()
                 Spacer()
             }
-            if let s = model.status, !s.enforcementActive {
-                Text(L10n.t(.rulesEnforcementOffNote)).font(.caption).foregroundStyle(.orange)
+            if let caveat = model.enforcementCaveat {
+                Text(caveat).font(.caption).foregroundStyle(.orange)
             }
             if let err = connection.lastActionError { Text(err).font(.caption).foregroundStyle(.red) }
             List(model.rules) { rule in
@@ -60,7 +56,7 @@ struct RuleRow: View {
                 connection.save(rule: r)
             })).labelsHidden()
             VStack(alignment: .leading, spacing: 2) {
-                Text(rule.name ?? rule.id).font(.body.weight(.medium))
+                Text(model.ruleName(rule)).font(.body.weight(.medium))
                 Text(describe(rule)).font(.caption).foregroundStyle(.secondary)
                 if !rule.exceptions.isEmpty {
                     Text(L10n.f(.ruleExceptionsFormat, rule.exceptions.count)).font(.caption2).foregroundStyle(.secondary)
@@ -94,7 +90,7 @@ struct RuleRow: View {
         switch r.subject {
         case .signed(let sid, _): subject = sid
         case .unsigned(let p, _): subject = p
-        case .responsible(let k, _): subject = k.replacingOccurrences(of: "app:", with: "").replacingOccurrences(of: "agent:", with: "")
+        case .responsible(let k, _, _, _): subject = k.replacingOccurrences(of: "app:", with: "").replacingOccurrences(of: "agent:", with: "")
         case .anyNonOwner: subject = L10n.t(.subjectAnyNonOwner)
         case .agentAncestor(let ids, _): subject = ids.map { $0.map(model.agentName).joined(separator: ", ") } ?? L10n.t(.subjectAgentChain)
         }
@@ -109,13 +105,16 @@ struct RuleRow: View {
 }
 
 struct RuleEditor: View {
+    @Environment(DaemonConnection.self) private var connection
     @Environment(AppModel.self) private var model
     @State var draft: RuleDraft
     let done: (Rule?) -> Void
 
     var body: some View {
         Form {
-            TextField("Name", text: $draft.name)
+            // Rules from a template keep its localized name until the user types one.
+            TextField(L10n.t(.ruleName), text: $draft.name,
+                      prompt: Text(L10n.templateName(draft.original?.template) ?? L10n.t(.ruleName)))
             Section(L10n.t(.ruleTarget)) {
                 Picker(L10n.t(.ruleTarget), selection: $draft.targetKind) {
                     Text(L10n.t(.targetCategory)).tag(RuleDraft.TargetKind.category)
@@ -133,6 +132,13 @@ struct RuleEditor: View {
                     }
                 case .path:
                     TextField("~/.ssh/id_ed25519", text: $draft.pathPrefix)
+                    // Only monitored paths reach the rule engine: say so, and offer to monitor it.
+                    if draft.validationError() != .ruleErrPath, !model.isMonitored(pathPrefix: draft.pathPrefix) {
+                        Text(L10n.t(.rulePathNotMonitored)).font(.caption).foregroundStyle(.orange)
+                        if CatalogEdit.validPath(draft.pathPrefix) != nil {
+                            Button(L10n.t(.ruleMonitorPath)) { connection.edit(catalog: [.monitorPath(draft.pathPrefix)]) }
+                        }
+                    }
                 }
             }
             Section(L10n.t(.ruleSubject)) {
@@ -145,17 +151,25 @@ struct RuleEditor: View {
                 }
                 switch draft.subjectKind {
                 case .signed:
-                    TextField("Signing ID", text: $draft.signingID)
-                    TextField("Team ID", text: $draft.teamID)
+                    TextField(L10n.t(.ruleSigningID), text: $draft.signingID)
+                    TextField(L10n.t(.ruleTeamID), text: $draft.teamID).disabled(draft.signedWithoutTeam)
+                    Toggle(L10n.t(.ruleNoTeamID), isOn: $draft.signedWithoutTeam)
                 case .unsigned:
-                    TextField("/path/to/program", text: $draft.unsignedPath)
-                    TextField("cdhash", text: $draft.cdhash)
+                    TextField(L10n.t(.ruleProgramPath), text: $draft.unsignedPath, prompt: Text(verbatim: "/path/to/program"))
+                    TextField(L10n.t(.ruleCdhash), text: $draft.cdhash)
                 case .app:
-                    Picker(L10n.t(.subjectApp), selection: $draft.appKey) {
+                    Picker(L10n.t(.subjectApp), selection: Binding(get: { draft.appKey }, set: { draft.selectApp($0) })) {
                         ForEach(model.appRows) { r in Text(r.name).tag(r.id) }
                     }
+                    Toggle(L10n.t(.exceptOwners), isOn: $draft.appExceptOwners)
                 case .agentChain:
                     Toggle(L10n.t(.exceptOwners), isOn: $draft.exceptOwners)
+                    ForEach(model.agents?.agents ?? []) { a in
+                        Toggle(a.name.resolve(model.language), isOn: Binding(
+                            get: { draft.agentIDs.contains(a.id) },
+                            set: { draft.setAgent(a.id, selected: $0) }))
+                    }
+                    Text(L10n.t(.ruleAgentsNote)).font(.caption).foregroundStyle(.secondary)
                 case .anyNonOwner:
                     Toggle(L10n.t(.includePlatformBinaries), isOn: $draft.includePlatformBinaries)
                 }
@@ -177,7 +191,7 @@ struct RuleEditor: View {
                 }
             }
             HStack {
-                if let err = draft.validationError() { Text(err).font(.caption).foregroundStyle(.red) }
+                if let err = draft.validationError() { Text(L10n.t(err)).font(.caption).foregroundStyle(.red) }
                 Spacer()
                 Button(L10n.t(.cancel)) { done(nil) }
                 Button(L10n.t(.save)) { done(draft.build()) }

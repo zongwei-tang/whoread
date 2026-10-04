@@ -140,4 +140,10 @@ public final class Baseline: @unchecked Sendable {
         dirty.removeAll()
         return out
     }
+
+    /// Puts keys back after a failed save so the next pass retries them.
+    public func markDirty<S: Sequence>(_ keys: S) where S.Element == BaselineKey {
+        lock.lock(); defer { lock.unlock() }
+        dirty.formUnion(keys)
+    }
 }

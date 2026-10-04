@@ -100,6 +100,8 @@ if geteuid() != 0 && config.source != .replay {
 }
 
 umask(0o022)
+// A client that hangs up mid-reply must cost one EPIPE, not the daemon.
+signal(SIGPIPE, SIG_IGN)
 let daemon: Daemon
 do {
     daemon = try Daemon(configuration: config)

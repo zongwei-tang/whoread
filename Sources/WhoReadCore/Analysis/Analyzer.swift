@@ -24,7 +24,7 @@ public enum RuleContext: Sendable {
 ///
 /// Pipeline for a file activity:
 ///   normalize → classify (prefix trie) → chain (process tree) → attribute → benign? → owner? →
-///   rules → baseline/anomaly → coalesce alerts
+///   rules (per category) → baseline/anomaly → coalesce alerts
 public final class Analyzer: @unchecked Sendable {
     public let tree: ProcessTree
     public let baseline: Baseline
@@ -35,11 +35,21 @@ public final class Analyzer: @unchecked Sendable {
     private let lock = NSLock()
     private var _classifier: PathClassifier
     private var _benign: BenignClassifier
+    private var _readdirEnabled = false
+    private var _ignoredPIDs: Set<Int32> = []
     private var nextEventID: Int64
 
-    public var readdirEnabled: Bool = false
-    /// Our own processes (daemon, eslogger child). Their events are dropped.
-    public var ignoredPIDs: Set<Int32> = []
+    /// Record directory listings (and opens of directories). Off by default.
+    public var readdirEnabled: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _readdirEnabled }
+        set { lock.lock(); _readdirEnabled = newValue; lock.unlock() }
+    }
+
+    /// Our own processes (the daemon). Their events are dropped.
+    public var ignoredPIDs: Set<Int32> {
+        get { lock.lock(); defer { lock.unlock() }; return _ignoredPIDs }
+        set { lock.lock(); _ignoredPIDs = newValue; lock.unlock() }
+    }
 
     public init(
         classifier: PathClassifier,
@@ -71,7 +81,7 @@ public final class Analyzer: @unchecked Sendable {
         _classifier = classifier
         if let benign { _benign = benign }
         lock.unlock()
-        rules.replace(rules: rules.rules, classifier: classifier)
+        rules.replace(classifier: classifier)
     }
 
     private func takeEventID() -> Int64 {
@@ -99,21 +109,51 @@ public final class Analyzer: @unchecked Sendable {
         }
     }
 
-    /// Classifies the targets of an activity. Used by the AUTH path too (without side effects).
+    /// Operations that carry a source's content (and, for directories, everything below it).
+    static let carryingOperations: Set<FileOperation> = [.rename, .clone, .link, .exchangedata, .copyfile]
+
+    /// Classifies the targets of an activity for the AUTH path (no side effects). Directory listings
+    /// are never blocked, so a `readdir` has no sensitive target here (it is still recorded, when
+    /// listings are enabled, by `handleFile`).
     public func classify(_ activity: FileActivity) -> [ClassifiedTarget] {
+        if activity.operation == .readdir { return [] }
+        return classifyTargets(activity)
+    }
+
+    /// Classifies the targets of an activity.
+    func classifyTargets(_ activity: FileActivity) -> [ClassifiedTarget] {
         let classifier = self.classifier
         var out: [ClassifiedTarget] = []
         for t in activity.targets {
             let path = classifier.normalizer.normalize(t.path)
-            if let c = classifier.classify(normalized: path) {
-                out.append(ClassifiedTarget(target: t, path: path, categories: [TargetCategory(id: c.categoryID, severity: c.severity)], viaAncestor: false))
+            let carries = t.role == .source && Analyzer.carryingOperations.contains(activity.operation)
+            if let c = classifier.classify(normalized: path, truncated: t.truncated) {
+                var severity = c.severity
+                // A directory of the category may hold its most sensitive files (moving a browser
+                // profile carries Cookies): judge it by the worst file it can contain. When the source
+                // does not say, a path a specific file pattern named (`.env.tmp`, `History`) is taken
+                // as a file; anything else may be a directory.
+                let mayBeDirectory = t.isDirectory ?? classifier.mayContainFiles(c)
+                if carries && mayBeDirectory, let m = classifier.maxSeverity(c.categoryID), m > severity {
+                    severity = m
+                }
+                out.append(ClassifiedTarget(target: t, path: path, categories: [TargetCategory(id: c.categoryID, severity: severity)],
+                                            viaAncestor: false))
                 continue
             }
-            // Moving or cloning a parent directory carries the sensitive files along.
-            if t.role == .source, [.rename, .clone, .link, .exchangedata].contains(activity.operation) {
-                let below = classifier.categoriesBelow(normalized: path)
-                if let first = below.first, let spec = classifier.spec(first) {
-                    out.append(ClassifiedTarget(target: t, path: path, categories: [TargetCategory(id: first, severity: spec.severity)], viaAncestor: true))
+            if carries {
+                // Moving or cloning a parent directory carries every category below it.
+                let below = classifier.categoriesBelow(normalized: path).compactMap { id -> TargetCategory? in
+                    guard let spec = classifier.spec(id) else { return nil }
+                    return TargetCategory(id: id, severity: classifier.maxSeverity(id) ?? spec.severity)
+                }
+                if !below.isEmpty {
+                    out.append(ClassifiedTarget(target: t, path: path, categories: below, viaAncestor: true))
+                    continue
+                }
+                // A folder inside a pattern-only category (a project): it carries the .env/.pem inside.
+                if t.isDirectory == true, let c = classifier.containingCategory(normalized: path) {
+                    out.append(ClassifiedTarget(target: t, path: path, categories: [c], viaAncestor: true))
                     continue
                 }
             }
@@ -132,9 +172,14 @@ public final class Analyzer: @unchecked Sendable {
     }
 
     func handleFile(_ activity: FileActivity, context: RuleContext) -> AnalysisOutput {
-        if activity.operation == .readdir && !readdirEnabled { return AnalysisOutput() }
-        if ignoredPIDs.contains(activity.process.pid) { return AnalysisOutput() }
-        let classified = classify(activity)
+        lock.lock()
+        let readdirOn = _readdirEnabled
+        let ignored = _ignoredPIDs.contains(activity.process.pid)
+        let benign = _benign
+        lock.unlock()
+        if activity.operation == .readdir && !readdirOn { return AnalysisOutput() }
+        if ignored { return AnalysisOutput() }
+        let classified = classifyTargets(activity)
         guard classified.contains(where: \.isSensitive) else { return AnalysisOutput() }
 
         let time = activity.time
@@ -142,39 +187,12 @@ public final class Analyzer: @unchecked Sendable {
         let process = chain.first?.image ?? activity.process
         let responsible = attributor.attribute(chain: chain)
         let agentID = chain.nearestAgent
-        let benignID: String?
-        do {
-            lock.lock()
-            let benign = _benign
-            lock.unlock()
-            benignID = benign.classify(chain: chain)
-        }
+        let benignID = benign.classify(chain: chain)
         let classifier = self.classifier
-        let chainLinks = Array(chain.reversed()).map { ChainLink(node: $0) }
-
-        let decision: RuleDecision
-        var eventDecision: EventDecision
-        let evaluationTargets = classified.filter(\.isSensitive).map(\.evaluationTarget)
-        switch context {
-        case .decided(let d):
-            decision = d
-            eventDecision = d.verdict == .deny ? .denied : .allowed
-        case .monitorOnly:
-            decision = rules.evaluate(process: process, chain: chain, targets: evaluationTargets, enforcementActive: false, now: time)
-            eventDecision = decision.wouldDeny ? .wouldDeny : .observed
-        case .afterAuth:
-            var d = rules.evaluate(process: process, chain: chain, targets: evaluationTargets, enforcementActive: true,
-                                   now: time, consumeExceptions: false)
-            if d.verdict == .deny {
-                // It happened, so AUTH allowed it (exception, kill switch or race). Not a block.
-                d = RuleDecision(verdict: .allow, reason: d.reason, ruleID: d.ruleID)
-            }
-            decision = d
-            eventDecision = d.wouldDeny ? .wouldDeny : .allowed
-        }
+        // Stored chains are capped (nearest 64 links); rules, attribution and agentID use the full chain.
+        let chainLinks = Array(chain.prefix(64).reversed()).map { ChainLink(node: $0) }
 
         // One event per category; two paths of the same operation in one category merge.
-        var output = AnalysisOutput()
         var groups: [(category: TargetCategory, targets: [ClassifiedTarget])] = []
         for t in classified where t.isSensitive {
             for c in t.categories {
@@ -187,8 +205,58 @@ public final class Analyzer: @unchecked Sendable {
             }
         }
 
+        var output = AnalysisOutput()
         let learning = baseline.isLearning(at: time)
-        for group in groups {
+        // Rules are evaluated per category: an allow for one category must not silence another
+        // category touched by the same operation (copying a key to a USB stick).
+        func evaluationTargets(_ group: (category: TargetCategory, targets: [ClassifiedTarget])) -> [EvaluationTarget] {
+            group.targets.map { EvaluationTarget(path: $0.path, access: $0.target.access, categories: [group.category]) }
+        }
+        // A denied syscall is a denial for every category it touches, but only a category a rule
+        // denies gets the rule and the blocked alert: "allow once" on the other one (the USB stick
+        // the key was copied to) would add an exception for the wrong category. If no category is
+        // denied any more (rules changed since the AUTH decision), all keep the AUTH decision.
+        var ownDenials: [RuleDecision]?
+        if case .decided(let d) = context, d.verdict == .deny, groups.count > 1 {
+            let own = groups.map {
+                rules.evaluate(process: process, chain: chain, targets: evaluationTargets($0), enforcementActive: true,
+                               now: time, consumeExceptions: false)
+            }
+            if own.contains(where: { $0.verdict == .deny }) { ownDenials = own }
+        }
+        for (gi, group) in groups.enumerated() {
+            let targets = evaluationTargets(group)
+            var decision: RuleDecision
+            var eventDecision: EventDecision
+            switch context {
+            case .decided(let d):
+                if let own = ownDenials?[gi] {
+                    decision = own.verdict == .deny ? own : RuleDecision(verdict: .deny, reason: d.reason, suppressAlert: true)
+                } else {
+                    decision = d
+                }
+                eventDecision = d.verdict == .deny ? .denied : .allowed
+            case .monitorOnly:
+                decision = rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: false, now: time)
+                eventDecision = decision.wouldDeny ? .wouldDeny : .observed
+            case .afterAuth:
+                var d = rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: true,
+                                       now: time, consumeExceptions: false)
+                if d.verdict == .deny {
+                    // It happened, so AUTH allowed it (allow once, a kill switch, cache lag, or a close
+                    // on an earlier fd). Not a block, but the matching rule still deserves an alert.
+                    d = RuleDecision(verdict: .allow, reason: d.reason, ruleID: d.ruleID, forceAlert: true)
+                }
+                decision = d
+                eventDecision = d.wouldDeny ? .wouldDeny : .allowed
+            }
+            if activity.operation == .readdir && (decision.reason == .explicitDeny || decision.reason == .wouldDeny) {
+                // Listings are never blocked (Analyzer.classify keeps them away from AUTH), so a deny rule
+                // neither "would block" one nor turns it into a rule alert.
+                decision = RuleDecision(verdict: .allow, reason: .defaultAllow)
+                if case .monitorOnly = context { eventDecision = .observed } else { eventDecision = .allowed }
+            }
+
             let primary = group.targets[0]
             let access = group.targets.reduce(AccessSet()) { $0.union($1.target.access) }
             let other = classified.first { $0.path != primary.path }?.path
@@ -200,14 +268,13 @@ public final class Analyzer: @unchecked Sendable {
                 chain: chainLinks, responsible: responsible, agentID: agentID, isOwner: isOwner,
                 benignServiceID: benignID, decision: eventDecision, ruleID: decision.ruleID)
 
+            let keys = access.kinds.map { BaselineKey(responsibleKey: responsible.key, categoryID: group.category.id, access: $0) }
+            let firstTime = !learning && benignID == nil && keys.contains { !baseline.contains($0) }
             let kind = alertKind(for: event, decision: decision, learning: learning)
-            if benignID == nil && eventDecision != .denied && !access.isEmpty {
-                for k in access.kinds {
-                    baseline.record(BaselineKey(responsibleKey: responsible.key, categoryID: group.category.id, access: k),
-                                    at: time, learning: learning)
-                }
+            if benignID == nil && eventDecision != .denied {
+                for k in keys { baseline.record(k, at: time, learning: learning) }
             }
-            if benignID == nil, let update = coalescer.ingest(event, kind: kind) {
+            if benignID == nil, let update = coalescer.ingest(event, kind: kind, firstTime: firstTime) {
                 event.alertID = update.alert.id
                 output.alerts.append(update)
             }
@@ -220,7 +287,8 @@ public final class Analyzer: @unchecked Sendable {
     func alertKind(for event: AnalyzedEvent, decision: RuleDecision, learning: Bool) -> AlertKind? {
         if event.isBenign { return nil }
         switch event.decision {
-        case .denied: return .blocked
+        // A category that was only denied along with another one: that one's alert covers it.
+        case .denied: return decision.suppressAlert ? nil : .blocked
         case .wouldDeny: return .wouldBlock
         default: break
         }

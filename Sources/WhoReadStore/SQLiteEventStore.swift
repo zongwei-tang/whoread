@@ -231,6 +231,10 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         try locked {
             var v: Int64 = 0
             try db.prepare("SELECT max(id) FROM alerts").query { v = $0.isNull(0) ? 0 : $0.int(0) }
+            // Ids continue after purged alerts too (a stale notification must not act on a reused id).
+            if let stored = try valueLocked("max_alert_id").flatMap({ String(data: $0, encoding: .utf8) }).flatMap(Int64.init) {
+                v = max(v, stored)
+            }
             return v
         }
     }
@@ -291,7 +295,14 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             var out: [Rule] = []
             try db.prepare("SELECT body FROM rules ORDER BY position").query { row in
                 any = true
-                if let r = try? decoder.decode(Rule.self, from: row.blob(0)) { out.append(r) }
+                // Strict: a row this build cannot read (written by a newer version, or damaged) must not
+                // be dropped silently. The daemon then keeps enforcement off and refuses to overwrite
+                // the rules unless root or the app replaces them.
+                do {
+                    out.append(try decoder.decode(Rule.self, from: row.blob(0)))
+                } catch {
+                    throw RuleDecodingError(position: out.count, underlying: "\(error)")
+                }
             }
             // An explicit "no rules" state is stored as a marker so templates are not re-added.
             if !any, try valueLocked("rules_initialized") == nil { return nil }
@@ -340,37 +351,42 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     public func applyRetention(detailCutoff: Date, retentionCutoff: Date) throws -> Int {
         try locked {
             try db.transaction {
-                // Remember the high-water mark so new ids never collide with rolled-up ones.
+                // Remember the high-water marks so new ids never collide with rolled-up or purged ones.
                 var maxID: Int64 = 0
                 try db.prepare("SELECT max(id) FROM events").query { maxID = $0.isNull(0) ? 0 : $0.int(0) }
                 if maxID > 0 { try setValueLocked(Data(String(maxID).utf8), forKey: "max_event_id") }
+                var maxAlert: Int64 = 0
+                try db.prepare("SELECT max(id) FROM alerts").query { maxAlert = $0.isNull(0) ? 0 : $0.int(0) }
+                if maxAlert > 0 { try setValueLocked(Data(String(maxAlert).utf8), forKey: "max_alert_id") }
 
-                // Roll details older than the cutoff into daily aggregates (UTC days).
+                // Roll details older than the cutoff into daily aggregates (local calendar days, as the
+                // CLI and app display them). One row per day/app/category/agent: benign and non-benign
+                // accesses share it, and it counts as benign only if every access was.
                 let cutoff = Statement.Value.double(detailCutoff.timeIntervalSince1970)
                 let rows = try db.prepare("""
-                    SELECT strftime('%Y-%m-%d', ts, 'unixepoch') AS day, responsible_key, category, coalesce(agent_id, ''),
-                           min(ts), max(ts), count(*), benign, max(id)
-                    FROM events WHERE ts < ? GROUP BY day, responsible_key, category, coalesce(agent_id, ''), benign
+                    SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') AS day, responsible_key, category,
+                           coalesce(agent_id, '') AS agent, min(ts), max(ts), count(*), min(benign), max(id),
+                           sum((access & 1) != 0), sum((access & 2) != 0), sum(decision = 'denied')
+                    FROM events WHERE ts < ? GROUP BY day, responsible_key, category, agent
                     """)
-                struct Agg { var day: String; var key: String; var cat: String; var agent: String; var first: Double; var last: Double; var count: Int64; var benign: Int64; var sampleID: Int64 }
+                struct Agg {
+                    var day: String; var key: String; var cat: String; var agent: String; var first: Double; var last: Double
+                    var count: Int64; var benign: Int64; var sampleID: Int64; var reads: Int64; var writes: Int64; var denied: Int64
+                }
                 var aggs: [Agg] = []
                 try rows.query([cutoff]) { r in
                     aggs.append(Agg(day: r.text(0) ?? "", key: r.text(1) ?? "", cat: r.text(2) ?? "", agent: r.text(3) ?? "",
-                                    first: r.double(4), last: r.double(5), count: r.int(6), benign: r.int(7), sampleID: r.int(8)))
+                                    first: r.double(4), last: r.double(5), count: r.int(6), benign: r.int(7), sampleID: r.int(8),
+                                    reads: r.int(9), writes: r.int(10), denied: r.int(11)))
                 }
                 let sample = try db.prepare("SELECT body FROM events WHERE id = ?")
-                let counts = try db.prepare("""
-                    SELECT sum((access & 1) != 0), sum((access & 2) != 0), sum(decision = 'denied')
-                    FROM events WHERE ts < ? AND strftime('%Y-%m-%d', ts, 'unixepoch') = ? AND responsible_key = ?
-                          AND category = ? AND coalesce(agent_id, '') = ?
-                    """)
                 let up = try db.prepare("""
                     INSERT INTO daily(day, responsible_key, category, agent_id, responsible, first_ts, last_ts, count, reads, writes, denied, benign)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(day, responsible_key, category, agent_id) DO UPDATE SET
                         first_ts = min(first_ts, excluded.first_ts), last_ts = max(last_ts, excluded.last_ts),
                         count = count + excluded.count, reads = reads + excluded.reads, writes = writes + excluded.writes,
-                        denied = denied + excluded.denied
+                        denied = denied + excluded.denied, benign = min(benign, excluded.benign)
                     """)
                 for a in aggs {
                     var responsible = Data()
@@ -379,12 +395,8 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
                             responsible = (try? encoder.encode(e.responsible)) ?? Data()
                         }
                     }
-                    var reads: Int64 = 0, writes: Int64 = 0, denied: Int64 = 0
-                    try counts.query([cutoff, .text(a.day), .text(a.key), .text(a.cat), .text(a.agent)]) { r in
-                        reads = r.int(0); writes = r.int(1); denied = r.int(2)
-                    }
                     try up.run([.text(a.day), .text(a.key), .text(a.cat), .text(a.agent), .blob(responsible), .double(a.first),
-                                .double(a.last), .int(a.count), .int(reads), .int(writes), .int(denied), .int(a.benign)])
+                                .double(a.last), .int(a.count), .int(a.reads), .int(a.writes), .int(a.denied), .int(a.benign)])
                 }
                 try db.prepare("DELETE FROM events WHERE ts < ?").run([cutoff])
                 let removed = db.changes
@@ -414,15 +426,15 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     }
 
     /// Daily aggregates (for exports beyond the detail window).
-    public func dailyAggregates(since: Date?) throws -> [(day: String, summary: UsageSummary)] {
+    public func dailyAggregates(since: Date?) throws -> [DailyAggregate] {
         try locked {
-            var out: [(String, UsageSummary)] = []
+            var out: [DailyAggregate] = []
             let sql = "SELECT day, responsible, category, agent_id, first_ts, last_ts, count, reads, writes, denied, benign FROM daily"
                 + (since != nil ? " WHERE last_ts >= ?" : "") + " ORDER BY day DESC"
             try db.prepare(sql).query(since.map { [.double($0.timeIntervalSince1970)] } ?? []) { row in
                 guard let responsible = try? decoder.decode(ResponsibleEntity.self, from: row.blob(1)) else { return }
                 let agent = row.text(3) ?? ""
-                out.append((row.text(0) ?? "", UsageSummary(
+                out.append(DailyAggregate(day: row.text(0) ?? "", summary: UsageSummary(
                     responsible: responsible, categoryID: row.text(2) ?? "", agentID: agent.isEmpty ? nil : agent,
                     firstSeen: Date(timeIntervalSince1970: row.double(4)), lastSeen: Date(timeIntervalSince1970: row.double(5)),
                     count: Int(row.int(6)), reads: Int(row.int(7)), writes: Int(row.int(8)), denied: Int(row.int(9)),
@@ -431,4 +443,11 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             return out
         }
     }
+}
+
+/// A stored rule could not be decoded (see `SQLiteEventStore.loadRules`).
+public struct RuleDecodingError: Error, CustomStringConvertible {
+    public var position: Int
+    public var underlying: String
+    public var description: String { "stored rule #\(position + 1) cannot be read: \(underlying)" }
 }

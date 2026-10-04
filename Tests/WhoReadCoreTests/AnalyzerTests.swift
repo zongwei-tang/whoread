@@ -156,11 +156,11 @@ final class AnalyzerTests: XCTestCase {
         XCTAssertEqual(out.events.first?.access, .read)
         out = h.file(.link, mv, OperationSemantics.link(source: key, destination: "/private/tmp/l"), 3)
         XCTAssertEqual(out.events.first?.operation, .link)
-        // Moving a parent directory carries ~/.config/gh along.
+        // Moving a parent directory carries every category below it (gh, gcloud, git credentials).
         out = h.file(.rename, mv, OperationSemantics.rename(source: "/Users/alice/.config", destination: "/private/tmp/cfg"), 4)
-        XCTAssertEqual(out.events.count, 1)
-        XCTAssertTrue(out.events[0].viaAncestor)
-        XCTAssertEqual(out.events[0].severity, .critical)
+        XCTAssertEqual(Set(out.events.map(\.categoryID)), ["gh", "gcloud", "git-credentials"])
+        XCTAssertTrue(out.events.allSatisfy(\.viaAncestor))
+        XCTAssertTrue(out.events.allSatisfy { $0.severity == .critical })
         // Rename within the same category is one event.
         out = h.file(.rename, mv, OperationSemantics.rename(source: key, destination: "/Users/alice/.ssh/id_ed25519.bak"), 5)
         XCTAssertEqual(out.events.count, 1)
@@ -192,7 +192,8 @@ final class AnalyzerTests: XCTestCase {
         out = h.open(cat, key, 4, context: .decided(denied))
         XCTAssertEqual(out.events[0].decision, .denied)
         XCTAssertEqual(out.alerts[0].alert.kind, .blocked)
-        XCTAssertEqual(out.alerts[0].change, .escalated)
+        // Blocked attempts get their own alert: "blocked ×N" never counts reads that went through.
+        XCTAssertEqual(out.alerts[0].change, .created)
         // Denied accesses never enter the baseline (they did not happen).
         let k = BaselineKey(responsibleKey: "agent:claude-code", categoryID: "ssh", access: .read)
         XCTAssertEqual(h.baseline.entry(k)?.count, 1, "only the monitor-only read was recorded")
@@ -204,8 +205,8 @@ final class AnalyzerTests: XCTestCase {
                            proc(530, "/usr/bin/curl", start: 1, platform: true,
                                 argv: ["curl", "-H", "Authorization: Bearer abc", "--token=ghp_0123456789abcdefghij", "https://x"]), 1)
         let out = h.open(curl, "/Users/alice/.netrc", 2)
-        XCTAssertEqual(out.events[0].process.argv, ["curl", "-H", "‹redacted›", "--token=‹redacted›", "https://x"])
-        XCTAssertEqual(out.events[0].chain.last?.argv, ["curl", "-H", "‹redacted›", "--token=‹redacted›", "https://x"])
+        XCTAssertEqual(out.events[0].process.argv, ["curl", "-H", "Authorization: ‹redacted›", "--token=‹redacted›", "https://x"])
+        XCTAssertEqual(out.events[0].chain.last?.argv, ["curl", "-H", "Authorization: ‹redacted›", "--token=‹redacted›", "https://x"])
         // The tree still has the raw argv for agent detection.
         XCTAssertEqual(h.tree.node(pid: 530)?.image.argv?[2], "Authorization: Bearer abc")
     }

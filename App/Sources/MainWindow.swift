@@ -20,6 +20,12 @@ struct MainWindow: View {
             SettingsView().tabItem { Label(Tab.settings.title, systemImage: Tab.settings.symbol) }.tag(Tab.settings)
         }
         .padding(8)
+        .safeAreaInset(edge: .top) {
+            if let problem = model.versionProblem {
+                Text(L10n.f(.errVersionMismatchFormat, problem))
+                    .font(.callout).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12)
+            }
+        }
         .sheet(isPresented: $nav.showOnboarding) { OnboardingView() }
         .onAppear {
             if !connection.onboarding.isComplete(model.status, connected: model.connected) { nav.showOnboarding = true }
@@ -34,6 +40,7 @@ struct MainWindow: View {
 
 struct LiveView: View {
     @Environment(AppModel.self) private var model
+    @State private var selection: AnalyzedEvent.ID?
 
     var body: some View {
         @Bindable var model = model
@@ -47,11 +54,11 @@ struct LiveView: View {
             if model.liveRows.isEmpty {
                 ContentUnavailableView(L10n.t(.liveEmpty), systemImage: "checkmark.shield")
             } else {
-                Table(model.liveRows) {
+                Table(model.liveRows, selection: $selection) {
                     TableColumn(L10n.t(.colTime)) { e in Text(e.time.formatted(date: .omitted, time: .standard)).monospacedDigit() }
                         .width(min: 70, ideal: 80)
                     TableColumn(L10n.t(.colApp)) { e in Text(e.responsible.displayName) }.width(min: 90, ideal: 120)
-                    TableColumn(L10n.t(.colOperation)) { e in Text(L10n.operation(e.operation) + " · " + e.access.label) }
+                    TableColumn(L10n.t(.colOperation)) { e in Text(L10n.operation(e.operation) + " · " + L10n.access(e.access)) }
                         .width(min: 80, ideal: 110)
                     TableColumn(L10n.t(.colPath)) { e in Text(model.abbreviate(e.path)).lineLimit(1).truncationMode(.middle) }
                     TableColumn(L10n.t(.colCategory)) { e in
@@ -62,6 +69,55 @@ struct LiveView: View {
                 }
             }
         }
+        // Process identity of the selected access (brief §1: pid, path, signing ID, team ID, platform flag).
+        .inspector(isPresented: Binding(get: { selection != nil }, set: { if !$0 { selection = nil } })) {
+            if let e = model.live.events.first(where: { $0.id == selection }) {
+                EventDetail(event: e)
+            }
+        }
+    }
+}
+
+struct EventDetail: View {
+    @Environment(AppModel.self) private var model
+    let event: AnalyzedEvent
+
+    var body: some View {
+        let p = event.process
+        Form {
+            Section(L10n.t(.detTitle)) {
+                LabeledContent(L10n.t(.colPath), value: model.abbreviate(event.path))
+                if let other = event.secondaryPath {
+                    LabeledContent(L10n.t(.detOtherPath), value: model.abbreviate(other))
+                }
+                LabeledContent(L10n.t(.colOperation), value: L10n.operation(event.operation) + " · " + L10n.access(event.access))
+                LabeledContent(L10n.t(.colCategory), value: model.categoryName(event.categoryID))
+                LabeledContent(L10n.t(.colDecision)) { DecisionBadge(event: event) }
+                LabeledContent(L10n.t(.detResponsible), value: event.responsible.displayName)
+                if let agent = event.agentID {
+                    LabeledContent(L10n.t(.colAgent), value: model.agentName(agent))
+                }
+            }
+            Section(L10n.t(.detProcess)) {
+                LabeledContent(L10n.t(.detPID), value: String(p.pid))
+                LabeledContent(L10n.t(.detExecutable), value: p.executablePath)
+                LabeledContent(L10n.t(.ruleSigningID), value: p.signingID ?? "—")
+                LabeledContent(L10n.t(.ruleTeamID), value: p.teamID ?? "—")
+                LabeledContent(L10n.t(.detCdhash), value: p.cdhash ?? "—")
+                LabeledContent(L10n.t(.detPlatformBinary), value: p.isPlatformBinary ? L10n.t(.yes) : L10n.t(.no))
+                if let argv = p.argv {
+                    LabeledContent(L10n.t(.detArguments), value: argv.joined(separator: " "))
+                }
+            }
+            Section(L10n.t(.colChain)) {
+                ForEach(Array(event.chain.enumerated()), id: \.offset) { _, link in
+                    Text(verbatim: "\(link.name) (\(link.pid))").help(link.path)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .textSelection(.enabled)
+        .inspectorColumnWidth(min: 260, ideal: 320)
     }
 }
 
@@ -114,10 +170,15 @@ struct AlertRow: View {
                 HStack {
                     ForEach(alert.availableActions, id: \.self) { action in
                         Button(f.actionTitle(action)) { connection.act(on: alert.id, action) }
+                            .help(action == .blockFromNowOn ? (model.enforcementCaveat ?? "") : "")
                     }
                 }
             } else if let r = alert.resolution {
                 Text("✓ " + f.actionTitle(r)).font(.caption).foregroundStyle(.secondary)
+                // The rule is saved, but nothing is blocked while enforcement is not active.
+                if r == .blockFromNowOn, let caveat = model.enforcementCaveat {
+                    Text(caveat).font(.caption).foregroundStyle(.orange)
+                }
             }
         }
         .padding(.vertical, 4)

@@ -56,6 +56,10 @@ Info.plist keys, already in `Xcode/project.yml`:
 - `WhoReadClientRequirement` / `WhoReadAppRequirement`: the code-signing requirements the
   extension enforces on XPC clients (team-pinned).
 
+The `whoread` CLI is embedded as `WhoRead.app/Contents/Helpers/whoread` and signed with the same
+team, so it satisfies `WhoReadClientRequirement`; a self-built CLI does not. It has no restricted
+entitlements and needs no provisioning profile.
+
 ## 4. Build, notarize, staple
 
 ```bash
@@ -66,7 +70,8 @@ scripts/release/release.sh whoread-notary
 `release.sh`:
 1. archives the app;
 2. exports it with Developer ID;
-3. checks signatures and that the embedded extension carries the ES entitlement;
+3. checks signatures, that the embedded extension carries the ES entitlement, and that the
+   embedded CLI and the app satisfy the extension's client and app requirements;
 4. zips it with `ditto`, then `notarytool submit --wait`, `stapler staple` the app;
 5. builds a DMG, signs, notarizes and staples it.
 
@@ -76,20 +81,39 @@ Hardened Runtime is on for all targets (`ENABLE_HARDENED_RUNTIME`), as notarizat
 
 ## 5. What the user does
 
+0. Developers only: if the dev LaunchDaemon is installed, remove it first
+   (`sudo scripts/uninstall-dev-daemon.sh`). Only one daemon may use
+   `/Library/Application Support/WhoRead`; whichever starts second refuses to run.
 1. Drag WhoRead to **/Applications** (system extensions only activate from there) and open it.
 2. Onboarding → **Install extension** → macOS asks for approval in System Settings → General →
    Login Items & Extensions.
 3. Grant **Full Disk Access** to WhoRead's extension (onboarding opens the right pane;
    macOS 13+ deep link `x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles`).
-4. WhoRead learns for 7 days, then alerts only on unusual access. Blocking stays off until the
+4. Put the CLI on `PATH` (optional, but it carries the `sudo whoread enforcement off` kill
+   switch):
+   ```bash
+   sudo mkdir -p /usr/local/bin
+   sudo ln -sf /Applications/WhoRead.app/Contents/Helpers/whoread /usr/local/bin/whoread
+   ```
+5. The extension pins owner apps to the team IDs `codesign -dv` reports on this Mac, in memory,
+   at every start. To see what it finds (nothing is written):
+   ```bash
+   sudo whoread catalog resolve-owners
+   ```
+6. WhoRead learns for 7 days, then alerts only on unusual access. Blocking stays off until the
    user turns on enforcement and marks rules as Enforce.
+
+The extension logs to `/Library/Logs/WhoRead/extension.log` (root only).
 
 ## 6. Uninstall
 
 ```bash
 scripts/release/uninstall.sh [--purge]
 ```
-It runs `WhoRead --uninstall-extension`, which submits an `OSSystemExtensionRequest`
-deactivation that the user confirms, removes the app and, with `--purge`, deletes
-`/Library/Application Support/WhoRead`. `systemextensionsctl uninstall` is not used because it
-requires SIP to be disabled.
+It first creates the kill-switch file, so nothing stays blocked. If `systemextensionsctl list`
+shows the extension, it runs `WhoRead --uninstall-extension`, which submits an
+`OSSystemExtensionRequest` deactivation that the user confirms. If that fails or is cancelled,
+the script stops and keeps the app, since an extension without its app has no UI to turn it off.
+Otherwise it removes the dev LaunchDaemon if present, the `/usr/local/bin/whoread` link, the app
+and, with `--purge`, `/Library/Application Support/WhoRead` and the logs.
+`systemextensionsctl uninstall` is not used because it requires SIP to be disabled.

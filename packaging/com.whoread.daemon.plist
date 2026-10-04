@@ -13,7 +13,7 @@
 		<string>__SOURCE__</string>
 		<string>--defaults</string>
 		<string>/Library/Application Support/WhoRead/defaults</string>
-		__EXTRA_ARGS__
+		<!-- __EXTRA_ARGS__ (replaced by scripts/install-dev-daemon.sh) -->
 	</array>
 	<key>MachServices</key>
 	<dict>

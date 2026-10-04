@@ -118,7 +118,8 @@ final class DaemonTests: XCTestCase {
         // Block from now on → an enforcing deny rule for that app on that category.
         _ = try client.call(.alertAction(alertID: agentAlert.id, action: .blockFromNowOn))
         let rules = try client.rules()
-        let block = try XCTUnwrap(rules.first { $0.subject == .responsible(key: "agent:claude-code", teamID: nil) })
+        // Owners keep working (critic-5): the rule exempts the category's owners.
+        let block = try XCTUnwrap(rules.first { $0.subject == .responsible(key: "agent:claude-code", teamID: nil, exceptOwners: true) })
         XCTAssertEqual(block.action, .deny)
         XCTAssertTrue(block.enforce)
         XCTAssertEqual(block.target, .category("test-vault"))
@@ -258,6 +259,7 @@ final class EnforcementPathTests: XCTestCase {
         var s = core.currentSettings
         s.enforcementEnabled = true
         try core.update(settings: s, peer: .inProcess)
+        core.drainPolicyQueue()  // observers run off the mutating thread
         XCTAssertEqual(fake.enforcementCalls.last, true)
         XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .deny)
         XCTAssertEqual(core.enforcer.decide(read(cat, "/Users/alice/Documents/x")).reason, .notSensitive)
@@ -282,13 +284,67 @@ final class EnforcementPathTests: XCTestCase {
         try FileManager.default.removeItem(atPath: core.config.resolvedKillSwitchPath)
         XCTAssertNotNil(waitFor(1) { core.enforcer.decide(read(cat, key)).verdict == .deny })
 
-        // 3. Latency trip (deadline miss) → automatic off, until the user re-enables.
+        // 3. Latency trip (deadline miss) → automatic off, until the user re-enables. The trip is
+        // persisted as "enforcement off" so a restart does not silently turn it back on.
         core.enforcer.recordResponse(micros: 10, missedDeadline: true)
+        _ = waitFor(1) { core.enforcement.latencyTripReason != nil }
+        core.drainPolicyQueue()
         XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .allow)
-        XCTAssertEqual(core.status().enforcementInactiveReasons, [.latencyTripped])
-        try core.update(settings: { var x = s; x.enforcementEnabled = false; return x }(), peer: .inProcess)
-        try core.update(settings: s, peer: .inProcess)
+        XCTAssertTrue(core.status().enforcementInactiveReasons.contains(.latencyTripped))
+        XCTAssertFalse(core.currentSettings.enforcementEnabled, "trip persisted as the setting")
+        XCTAssertFalse(try core.store.settings().enforcementEnabled)
+        XCTAssertNotNil(core.status().latencyTripReason)
+        // Unrelated settings changes do not re-enable it.
+        try core.mutateSettings(peer: .inProcess) { $0.coalesceMinutes = 5 }
+        XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .allow)
+        // `whoread enforcement on`.
+        try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
         XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .deny, "re-enabling clears the trip")
+        XCTAssertNil(core.status().latencyTripReason)
+    }
+
+    func testTripWhileSettingStillOnIsClearedByEnforcementOn() throws {
+        let dir = TempDir()
+        let (core, _) = try makeCore(dir)
+        var rule = RuleTemplates.blockAgentsFromCritical()
+        rule.enabled = true
+        rule.enforce = true
+        try core.setRules([rule])
+        try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
+        let cat = agentCat(core)
+        let key = "/Users/alice/.ssh/id_ed25519"
+        // A trip whose persistence has not run yet: the setting is still on.
+        core.enforcement.tripLatency("test")
+        XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .allow)
+        try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
+        core.drainPolicyQueue()
+        XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .deny)
+    }
+
+    func testTripDuringKillSwitchWindowIsStillPersisted() throws {
+        let dir = TempDir()
+        let (core, _) = try makeCore(dir)
+        try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
+        core.enforcement.setKillSwitchFilePresent(true)   // already inactive
+        core.enforcement.tripLatency("deadline missed")
+        core.drainPolicyQueue()
+        XCTAssertFalse(core.currentSettings.enforcementEnabled)
+        XCTAssertFalse(try core.store.settings().enforcementEnabled)
+        core.enforcement.setKillSwitchFilePresent(false)
+        XCTAssertFalse(core.enforcement.isActive, "stays off after the kill switch is released")
+    }
+
+    func testRestartAfterDeathWhileEnforcingLeavesEnforcementOff() throws {
+        let dir = TempDir()
+        do {
+            let (core, _) = try makeCore(dir)
+            try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
+        }
+        FileManager.default.createFile(atPath: dir.path("data/auth-armed"), contents: Data())
+        let (core, _) = try makeCore(dir)
+        XCTAssertFalse(core.currentSettings.enforcementEnabled)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path("data/auth-armed")))
+        XCTAssertNotNil(core.status().latencyTripReason)
     }
 
     func testP99TripViaMaintenance() throws {
@@ -314,6 +370,7 @@ final class EnforcementPathTests: XCTestCase {
         var s = core.currentSettings
         s.enforcementEnabled = true
         try core.update(settings: s, peer: .inProcess)
+        core.drainPolicyQueue()
         XCTAssertGreaterThanOrEqual(counter.value, 2)
     }
 }

@@ -23,10 +23,10 @@ terminal and every tool it spawns.
   truncate on sensitive paths. For each one it keeps the time, pid, executable, signing ID, team
   ID, platform-binary flag, the full parent chain and the **responsible app**, for example
   `Claude Code → zsh → cat → ~/.aws/credentials`.
-- **Built-in catalog** of 40 categories, editable: SSH, cloud and developer credentials (AWS,
+- **Built-in catalog** of 44 categories, editable: SSH, cloud and developer credentials (AWS,
   gcloud, Azure, kube, Docker, npm, PyPI, netrc, git, gh, GnuPG), keychains, browser profiles,
   password managers, chats (Messages, WeChat, Telegram, Signal…), Mail/Contacts/Calendar/Photos,
-  shell history, cloud drives, iPhone backups, external volumes, AI-agent transcripts, and
+  shell history, cloud drives, iPhone backups, external volumes, each AI agent's transcripts, and
   `.env`/`*.pem`/`*.key` inside your project folders. Categories that do not exist on your Mac
   are shown as "not detected".
 - **Attribution** charges helpers to their `.app`, and interpreters or CLI tools to the app or AI
@@ -39,11 +39,13 @@ terminal and every tool it spawns.
 - **Optional blocking.** Rules (deny / allow / alert) can target a category, a severity or a path,
   and apply to a signed program, an unsigned program, an app, "anything that isn't an expected
   owner" or **"anything started by an AI agent"**. Off by default. Fail-open. Three instant kill
-  switches.
+  switches (turning enforcement off needs `sudo` or the app, so an agent cannot switch off its
+  own guard).
 - **Menu bar app** with seven tabs (Live, Alerts, Apps, Files, Agents, Rules, Settings),
   notifications with actions ("Allow once · Always allow · Keep blocking"), English and
   Simplified Chinese.
-- **`whoread` CLI** for status, queries, JSON/CSV export, enforcement on/off and the kill switch.
+- **`whoread` CLI** for status, queries, daily aggregates, JSON/CSV export, catalog edits,
+  enforcement on/off and the kill switch.
 - **Private.** It never reads file contents, never uses the network, and has no telemetry and no
   LLM calls. Command lines are redacted before they are stored.
 
@@ -61,8 +63,25 @@ sudo launchctl kickstart -k system/com.whoread.daemon
 whoread status
 whoread events --since 1h
 whoread alerts
+whoread daily --since 30d
 whoread export --format csv --since 7d --output accesses.csv
+whoread export --aggregates --format json --since 30d
 ```
+
+Times without an offset (`--since "2026-10-01 09:00"`) are local time. The daemon reads the team
+IDs of installed apps with `codesign -dv` at start, so apps are recognised as the expected owners
+of their data (restart the daemon after installing an owner app). To see what it finds:
+
+```bash
+sudo whoread catalog resolve-owners
+```
+
+Catalog edits (`whoread catalog add-path|remove-path|add-category|remove-category|set-severity|
+enable|disable|export|import`) and anything else that weakens protection need `sudo` or the
+signed app. With a release build, link the bundled CLI once:
+`sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/WhoRead.app/Contents/Helpers/whoread /usr/local/bin/whoread`.
+To use the signed app with the dev daemon, see "M3: the signed app against the dev daemon" in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Permissions, and why
 
@@ -102,13 +121,13 @@ macOS 的隐私弹窗（TCC）只保护桌面、文稿、下载等少数位置�
 ## 功能
 
 - **记录**：对敏感路径的 open（读/写）、修改后的 close、rename、clone、copyfile、link、unlink、truncate。每条记录包含时间、pid、可执行文件、signing ID、team ID、是否 platform binary、完整父进程链，以及归因后的**负责 app**，例如 `Claude Code → zsh → cat → ~/.aws/credentials`。
-- **内置 40 个类别**，可增删改：
+- **内置 44 个类别**，可增删改：
   - SSH；
   - 开发与云凭证：AWS、gcloud、Azure、kube、Docker、npm、PyPI、netrc、git、gh、GnuPG；
   - 钥匙串、浏览器资料、密码管理器；
   - 聊天记录：信息、微信、Telegram、Signal 等；
   - 邮件、通讯录、日历、照片；
-  - shell 历史、云盘、iPhone 备份、外接卷、AI agent 会话记录；
+  - shell 历史、云盘、iPhone 备份、外接卷、各 AI agent 各自的会话记录；
   - 项目目录下的 `.env`、`*.pem`、`*.key`。
 
   本机不存在的类别标记为「未检测到」。
@@ -122,9 +141,9 @@ macOS 的隐私弹窗（TCC）只保护桌面、文稿、下载等少数位置�
   - 规则动作：拦截、允许或告警；
   - 保护对象：类别、严重程度或路径；
   - 适用对象：已签名程序、未签名程序、某个 app、「任意非 owner 进程」，或**「祖先链中包含 AI agent 的任意进程」**；
-  - 默认关闭，出错时放行（fail-open），有三种立即生效的 kill switch。
+  - 默认关闭，出错时放行（fail-open），有三种立即生效的 kill switch（关闭拦截需要 `sudo` 或应用本身，agent 无法自己关掉）。
 - **菜单栏应用**：实时、告警、应用、文件、AI agent、规则、设置七个页签。通知带操作按钮（「允许一次 · 始终允许 · 保持拦截」）。界面提供中英文。
-- **`whoread` 命令行**：查看状态、查询、导出 JSON/CSV、开关拦截、kill switch。
+- **`whoread` 命令行**：查看状态、查询、按天汇总、导出 JSON/CSV、编辑类别、开关拦截、kill switch。
 - **隐私**：从不读取文件内容，不联网，没有遥测，不调用任何 LLM。命令行参数在存储前会脱敏。
 
 ## 安装（开发版）
@@ -148,7 +167,16 @@ sudo launchctl kickstart -k system/com.whoread.daemon
 whoread status
 whoread events --since 1h --lang zh-Hans
 whoread alerts --lang zh-Hans
+whoread daily --since 30d
 ```
+
+不带时区的时间（如 `--since "2026-10-01 09:00"`）按本地时间理解。守护进程每次启动时会用 `codesign -dv` 读取已安装 app 的 team ID，从而把它们识别为自己数据的预期 owner（安装新的 owner app 后请重启守护进程）。查看识别结果（不会写入任何文件）：
+
+```bash
+sudo whoread catalog resolve-owners
+```
+
+编辑类别（`whoread catalog add-path|remove-path|add-category|remove-category|set-severity|enable|disable|export|import`）以及其他任何削弱保护的操作，都需要 `sudo` 或已签名的应用。
 
 ## 权限说明
 

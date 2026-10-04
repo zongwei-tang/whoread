@@ -160,3 +160,21 @@ final class SQLiteEventStoreTests: XCTestCase {
         XCTAssertEqual(try store.counts().events, 200)
     }
 }
+
+final class RuleDecodingTests: XCTestCase {
+    /// A rule row this build cannot read must not be dropped silently (spec-5 / policy-8): the daemon
+    /// would keep enforcing with the rest and the next save would erase it.
+    func testUndecodableRuleRowThrows() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("whoread-rules-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("w.sqlite").path
+        let store = try SQLiteEventStore(path: path)
+        try store.saveRules(RuleTemplates.all)
+        let db = try SQLiteDatabase(path: path)
+        try db.exec("INSERT INTO rules(id, position, body) VALUES('future', 99, CAST('{\"subject\":{\"type\":\"fromTheFuture\"}}' AS BLOB));")
+        XCTAssertThrowsError(try store.loadRules()) { error in
+            XCTAssertTrue(error is RuleDecodingError, "\(error)")
+        }
+    }
+}

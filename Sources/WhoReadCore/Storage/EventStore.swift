@@ -205,6 +205,20 @@ public struct UsageSummary: Codable, Hashable, Sendable {
     }
 }
 
+/// One day of rolled-up activity (details older than `detailDays` live only here). Benign and
+/// non-benign accesses of the same app/category/agent share a row; `summary.benign` is true only
+/// if every access that day was benign.
+public struct DailyAggregate: Codable, Hashable, Sendable {
+    /// The daemon's local calendar day, "YYYY-MM-DD".
+    public var day: String
+    public var summary: UsageSummary
+
+    public init(day: String, summary: UsageSummary) {
+        self.day = day
+        self.summary = summary
+    }
+}
+
 /// Storage interface. The daemon uses the SQLite implementation; tests use `InMemoryEventStore`.
 /// Implementations must be thread-safe.
 public protocol EventStore: AnyObject, Sendable {
@@ -215,6 +229,8 @@ public protocol EventStore: AnyObject, Sendable {
     func alerts(_ query: AlertQuery) throws -> [Alert]
     func alert(id: Int64) throws -> Alert?
     func summaries(since: Date?) throws -> [UsageSummary]
+    /// Daily aggregates of rolled-up details, newest day first.
+    func dailyAggregates(since: Date?) throws -> [DailyAggregate]
     func maxEventID() throws -> Int64
     func maxAlertID() throws -> Int64
 
@@ -272,16 +288,20 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
     private var order: [Int64] = []
     private var alertsByID: [Int64: Alert] = [:]
     private var summaryRows: [String: UsageSummary] = [:]
-    private var dailyRows: Set<String> = []
+    private var dailyRows: [String: DailyAggregate] = [:]
     private var baseline: [BaselineKey: BaselineEntry] = [:]
     private var rules: [Rule]?
     private var kv: [String: Data] = [:]
+    /// High-water marks: ids keep counting after retention removes rows.
+    private var highestEventID: Int64 = 0
+    private var highestAlertID: Int64 = 0
 
     public init() {}
 
     public func insert(_ events: [AnalyzedEvent]) throws {
         lock.lock(); defer { lock.unlock() }
         for e in events {
+            highestEventID = max(highestEventID, e.id)
             if eventsByID[e.id] == nil { order.append(e.id) }
             eventsByID[e.id] = e
             let row = UsageSummary.from(e)
@@ -296,7 +316,10 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
 
     public func upsert(_ alerts: [Alert]) throws {
         lock.lock(); defer { lock.unlock() }
-        for a in alerts { alertsByID[a.id] = a }
+        for a in alerts {
+            highestAlertID = max(highestAlertID, a.id)
+            alertsByID[a.id] = a
+        }
     }
 
     public func events(_ query: EventQuery) throws -> [AnalyzedEvent] {
@@ -340,12 +363,12 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
 
     public func maxEventID() throws -> Int64 {
         lock.lock(); defer { lock.unlock() }
-        return order.max() ?? 0
+        return highestEventID
     }
 
     public func maxAlertID() throws -> Int64 {
         lock.lock(); defer { lock.unlock() }
-        return alertsByID.keys.max() ?? 0
+        return highestAlertID
     }
 
     public func loadBaseline() throws -> [BaselineEntry] {
@@ -383,23 +406,40 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
         var removed = 0
         order.removeAll { id in
             guard let e = eventsByID[id], e.time < detailCutoff else { return false }
-            dailyRows.insert(InMemoryEventStore.dayKey(e.time) + e.responsible.key + e.categoryID)
+            let day = InMemoryEventStore.dayKey(e.time)
+            let key = day + "\u{0}" + e.responsible.key + "\u{0}" + e.categoryID + "\u{0}" + (e.agentID ?? "")
+            if var agg = dailyRows[key] {
+                agg.summary.add(e)
+                agg.summary.benign = agg.summary.benign && e.isBenign
+                dailyRows[key] = agg
+            } else {
+                dailyRows[key] = DailyAggregate(day: day, summary: UsageSummary.from(e))
+            }
             eventsByID[id] = nil
             removed += 1
             return true
         }
         summaryRows = summaryRows.filter { $0.value.lastSeen >= retentionCutoff }
+        dailyRows = dailyRows.filter { $0.value.summary.lastSeen >= retentionCutoff }
         alertsByID = alertsByID.filter { $0.value.updatedAt >= retentionCutoff }
         return removed
     }
 
     public func counts() throws -> StoreCounts {
         lock.lock(); defer { lock.unlock() }
-        return StoreCounts(events: eventsByID.count, aggregatedDays: dailyRows.count, alerts: alertsByID.count,
+        return StoreCounts(events: eventsByID.count, aggregatedDays: Set(dailyRows.values.map(\.day)).count, alerts: alertsByID.count,
                            unreadAlerts: alertsByID.values.filter { $0.status == .unread }.count)
     }
 
+    public func dailyAggregates(since: Date?) throws -> [DailyAggregate] {
+        lock.lock(); defer { lock.unlock() }
+        return dailyRows.values.filter { a in since.map { a.summary.lastSeen >= $0 } ?? true }
+            .sorted { ($0.day, $0.summary.lastSeen) > ($1.day, $1.summary.lastSeen) }
+    }
+
+    /// Local calendar day, like SQLite's `strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime')`.
     static func dayKey(_ d: Date) -> String {
-        String(RFC3339.format(d, fractionDigits: 0).prefix(10))
+        let c = Calendar(identifier: .gregorian).dateComponents(in: .current, from: d)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 }

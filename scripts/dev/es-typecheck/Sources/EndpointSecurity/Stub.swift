@@ -47,6 +47,8 @@ public struct es_process_t {
 }
 public struct es_thread_t { public var thread_id: UInt64 }
 
+// Case names are verified (docs/research/endpoint-security-api.md §12); raw values are not, and the
+// code never depends on them (they only appear in log lines).
 public struct es_event_type_t: Equatable, Hashable, RawRepresentable, Sendable {
     public var rawValue: UInt32
     public init(_ v: UInt32) { rawValue = v }
@@ -60,12 +62,14 @@ public var ES_EVENT_TYPE_NOTIFY_EXEC: es_event_type_t { .init(9) }
 public var ES_EVENT_TYPE_NOTIFY_OPEN: es_event_type_t { .init(10) }
 public var ES_EVENT_TYPE_NOTIFY_FORK: es_event_type_t { .init(11) }
 public var ES_EVENT_TYPE_NOTIFY_CLOSE: es_event_type_t { .init(12) }
+public var ES_EVENT_TYPE_NOTIFY_CREATE: es_event_type_t { .init(13) }
 public var ES_EVENT_TYPE_NOTIFY_EXCHANGEDATA: es_event_type_t { .init(14) }
 public var ES_EVENT_TYPE_NOTIFY_EXIT: es_event_type_t { .init(15) }
 public var ES_EVENT_TYPE_NOTIFY_LINK: es_event_type_t { .init(19) }
 public var ES_EVENT_TYPE_NOTIFY_RENAME: es_event_type_t { .init(25) }
 public var ES_EVENT_TYPE_NOTIFY_UNLINK: es_event_type_t { .init(32) }
 public var ES_EVENT_TYPE_AUTH_LINK: es_event_type_t { .init(42) }
+public var ES_EVENT_TYPE_AUTH_CREATE: es_event_type_t { .init(44) }
 public var ES_EVENT_TYPE_NOTIFY_TRUNCATE: es_event_type_t { .init(41) }
 public var ES_EVENT_TYPE_AUTH_TRUNCATE: es_event_type_t { .init(50) }
 public var ES_EVENT_TYPE_AUTH_CLONE: es_event_type_t { .init(60) }
@@ -109,6 +113,16 @@ public struct es_event_unlink_t { public var target: UnsafeMutablePointer<es_fil
 public struct es_event_truncate_t { public var target: UnsafeMutablePointer<es_file_t> }
 public struct es_event_exchangedata_t { public var file1: UnsafeMutablePointer<es_file_t>; public var file2: UnsafeMutablePointer<es_file_t> }
 public struct es_event_readdir_t { public var target: UnsafeMutablePointer<es_file_t> }
+// Header (HM:#L656-L705): the trailing `acl` (message version >= 2) is omitted; nothing reads it.
+public struct es_event_create_t {
+    public struct __Unnamed_union_destination {
+        public struct __Unnamed_struct_new_path { public var dir: UnsafeMutablePointer<es_file_t>; public var filename: es_string_token_t; public var mode: mode_t }
+        public var existing_file: UnsafeMutablePointer<es_file_t>
+        public var new_path: __Unnamed_struct_new_path
+    }
+    public var destination_type: es_destination_type_t
+    public var destination: __Unnamed_union_destination
+}
 public struct es_event_exec_t { public var target: UnsafeMutablePointer<es_process_t>; public var dyld_exec_path: es_string_token_t; public var script: UnsafeMutablePointer<es_file_t>?; public var cwd: UnsafeMutablePointer<es_file_t> }
 public struct es_event_fork_t { public var child: UnsafeMutablePointer<es_process_t> }
 public struct es_event_exit_t { public var stat: Int32 }
@@ -123,6 +137,7 @@ public struct es_events_t {
     public var truncate: es_event_truncate_t
     public var exchangedata: es_event_exchangedata_t
     public var readdir: es_event_readdir_t
+    public var create: es_event_create_t
     public var exec: es_event_exec_t
     public var fork: es_event_fork_t
     public var exit: es_event_exit_t

@@ -10,8 +10,9 @@ final class NotificationManager: @unchecked Sendable {
 
     private func actionID(_ a: AlertAction) -> String { "whoread.action." + a.rawValue }
 
-    func registerCategories() {
-        let f = AlertFormatter(language: L10n.current)
+    /// Called at launch and again whenever the UI language changes.
+    func registerCategories(language: Language = L10n.current) {
+        let f = AlertFormatter(language: language)
         func category(_ id: String, _ actions: [AlertAction]) -> UNNotificationCategory {
             let buttons = actions.map { a -> UNNotificationAction in
                 let destructive = a == .blockFromNowOn || a == .keepBlocking
@@ -38,14 +39,30 @@ final class NotificationManager: @unchecked Sendable {
         UNUserNotificationCenter.current().add(request)
     }
 
+    /// A notice about WhoRead itself (no action buttons). Clicking it opens `tab`.
+    func post(_ notice: SystemNotice, tab: Tab) {
+        let content = UNMutableNotificationContent()
+        content.title = notice.title
+        content.body = notice.body
+        content.userInfo = ["tab": tab.rawValue]
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: notice.identifier, content: content, trigger: nil))
+    }
+
     func handle(_ response: UNNotificationResponse) {
-        guard let id = (response.notification.request.content.userInfo["alertID"] as? NSNumber)?.int64Value else { return }
+        let info = response.notification.request.content.userInfo
+        guard let id = (info["alertID"] as? NSNumber)?.int64Value else {
+            if let raw = info["tab"] as? String, let tab = Tab(rawValue: raw) {
+                Task { @MainActor in NavigationState.shared.show(tab: tab) }
+            }
+            return
+        }
         let raw = response.actionIdentifier
         guard raw.hasPrefix("whoread.action."), let action = AlertAction(rawValue: String(raw.dropFirst("whoread.action.".count))) else {
             // Clicked the banner itself: open the Alerts tab.
             Task { @MainActor in NavigationState.shared.show(tab: .alerts) }
             return
         }
-        Task { @MainActor in DaemonConnection.shared.act(on: id, action) }
+        Task { @MainActor in DaemonConnection.shared.act(on: id, action, fromNotification: true) }
     }
 }

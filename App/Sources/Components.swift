@@ -3,6 +3,11 @@ import SwiftUI
 import WhoReadCore
 import WhoReadUIModel
 
+// SwiftUI also exports `Alert` (legacy alert struct) and `Settings` (the settings scene, unused
+// here). App-module aliases shadow both, so the bare names mean WhoRead's types in every file.
+typealias Alert = WhoReadCore.Alert
+typealias Settings = WhoReadCore.Settings
+
 enum Tab: String, CaseIterable, Identifiable {
     case live, alerts, apps, files, agents, rules, settings
     var id: String { rawValue }
@@ -38,9 +43,13 @@ final class NavigationState {
     static let shared = NavigationState()
     var tab: Tab = .live
     var showOnboarding = false
+    /// `openWindow(id: "main")`, captured from a view (only views get that action). The main
+    /// window is usually closed in a menu bar app, and activating the app does not reopen it.
+    @ObservationIgnored var openMainWindow: (@MainActor () -> Void)?
 
     func show(tab: Tab) {
         self.tab = tab
+        openMainWindow?()
         NSApp.activate(ignoringOtherApps: true)
     }
 }

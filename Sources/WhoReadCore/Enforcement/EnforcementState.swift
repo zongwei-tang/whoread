@@ -25,6 +25,7 @@ public final class EnforcementState: @unchecked Sendable {
     private var rulesOK = true
     private var sourceCanEnforce: Bool
     private var observers: [(Bool) -> Void] = []
+    private var tripObservers: [(String) -> Void] = []
 
     public init(userEnabled: Bool, sourceCanEnforce: Bool) {
         self.userEnabled = userEnabled
@@ -66,9 +67,17 @@ public final class EnforcementState: @unchecked Sendable {
         return killFile
     }
 
-    /// Called with the new `isActive` value whenever it changes (from the mutating thread).
+    /// Called with the new `isActive` value whenever it changes, on the mutating thread: observers
+    /// must only hand work to a queue (the mutating thread can be latency-critical).
     public func onChange(_ observer: @escaping (Bool) -> Void) {
         lock.lock(); observers.append(observer); lock.unlock()
+    }
+
+    /// Called with the reason when the latency monitor trips, whether or not enforcement was active
+    /// at that moment (a trip during a kill-switch window must still be kept). Same threading rules
+    /// as `onChange`: hand the work to a queue.
+    public func onTrip(_ observer: @escaping (String) -> Void) {
+        lock.lock(); tripObservers.append(observer); lock.unlock()
     }
 
     private func mutate(_ f: () -> Void) {
@@ -90,7 +99,16 @@ public final class EnforcementState: @unchecked Sendable {
     }
 
     public func setKillSwitchFilePresent(_ v: Bool) { mutate { killFile = v } }
-    public func tripLatency(_ reason: String) { mutate { if latencyTrip == nil { latencyTrip = reason } } }
+    public func tripLatency(_ reason: String) {
+        var trips: [(String) -> Void] = []
+        mutate {
+            if latencyTrip == nil {
+                latencyTrip = reason
+                trips = tripObservers
+            }
+        }
+        trips.forEach { $0(reason) }
+    }
     public func setRulesLoaded(_ ok: Bool) { mutate { rulesOK = ok } }
     public func setSourceCanEnforce(_ v: Bool) { mutate { sourceCanEnforce = v } }
 }

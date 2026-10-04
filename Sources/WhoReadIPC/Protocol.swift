@@ -2,7 +2,9 @@ import Foundation
 import WhoReadCore
 
 /// Version of the request/response protocol. Bumped on incompatible changes.
-public let whoReadIPCVersion = 1
+/// 2: daily aggregates, alert firstTime, rule subject cdhash/exceptOwners, exception access/chain
+/// scoping, status rulesLoadError/sourceDroppedEvents.
+public let whoReadIPCVersion = 2
 
 /// Requests from the app / CLI to the daemon. Encoded as JSON over XPC (`Data` in, `Data` out)
 /// or over the development Unix socket.
@@ -17,6 +19,8 @@ public enum IPCRequest: Codable, Sendable {
     /// nil marks every alert read.
     case markAlertsRead(ids: [Int64]?)
     case summaries(since: Date?)
+    /// Rolled-up per-day activity (details older than the detail window).
+    case dailyAggregates(since: Date?)
     case rules
     case upsertRule(Rule)
     case deleteRule(id: String)
@@ -40,6 +44,7 @@ public enum IPCResponse: Codable, Sendable {
     case events([AnalyzedEvent])
     case alerts([Alert])
     case summaries([UsageSummary])
+    case dailyAggregates([DailyAggregate])
     case rules([Rule])
     case settings(Settings)
     case catalog(CatalogInfo)
@@ -130,6 +135,10 @@ public struct DaemonStatus: Codable, Sendable {
     public var writerDropped: UInt64
     public var monitoredPrefixes: Int
     public var homeDirectories: [String]
+    /// The stored rules could not be read: enforcement stays off until they load (or are replaced).
+    public var rulesLoadError: String?
+    /// File events the source had to drop because the analysis backlog was full (native source).
+    public var sourceDroppedEvents: UInt64?
 
     public init(version: String, pid: Int32, startedAt: Date, mode: DaemonMode, source: SourceKind, sourceRunning: Bool,
                 sourceError: String?, sourceHint: String?, sourceCanEnforce: Bool, learning: Bool, learningEndsAt: Date,
@@ -137,7 +146,7 @@ public struct DaemonStatus: Codable, Sendable {
                 enforcementInactiveReasons: [EnforcementState.InactiveReason], latencyTripReason: String?,
                 killSwitchFilePresent: Bool, latency: LatencyStats, parser: EsloggerParser.Stats?, counts: StoreCounts,
                 unreadAlerts: Int, lastEventAt: Date?, eventsProcessed: UInt64, writerDropped: UInt64, monitoredPrefixes: Int,
-                homeDirectories: [String]) {
+                homeDirectories: [String], rulesLoadError: String? = nil, sourceDroppedEvents: UInt64? = nil) {
         self.version = version
         self.pid = pid
         self.startedAt = startedAt
@@ -164,6 +173,8 @@ public struct DaemonStatus: Codable, Sendable {
         self.writerDropped = writerDropped
         self.monitoredPrefixes = monitoredPrefixes
         self.homeDirectories = homeDirectories
+        self.rulesLoadError = rulesLoadError
+        self.sourceDroppedEvents = sourceDroppedEvents
     }
 }
 
@@ -259,6 +270,11 @@ extension IPCClient {
     public func summaries(since: Date?) throws -> [UsageSummary] {
         guard case .summaries(let s) = try call(.summaries(since: since)) else { throw IPCError(.internalError, "unexpected response") }
         return s
+    }
+
+    public func dailyAggregates(since: Date?) throws -> [DailyAggregate] {
+        guard case .dailyAggregates(let d) = try call(.dailyAggregates(since: since)) else { throw IPCError(.internalError, "unexpected response") }
+        return d
     }
 
     public func rules() throws -> [Rule] {

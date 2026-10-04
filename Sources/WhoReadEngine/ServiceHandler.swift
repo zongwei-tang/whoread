@@ -5,12 +5,13 @@ import WhoReadIPC
 /// Serves app / CLI requests. Runs on IPC threads; everything it touches is thread-safe.
 ///
 /// Permission policy (see docs/THREAT_MODEL.md):
-/// - non-root peers must be the console user (no reading other users' history);
-/// - reading and *strengthening* requests (enforcement on, new deny/alert rule, block, ignore,
-///   mark read, unpause) are open to the console user;
-/// - *weakening* requests (enforcement off, pause, allow / exceptions, rule edits and deletes,
-///   settings, catalog, restart learning) need root (`sudo whoread …`) or the signed WhoRead app.
-///   An AI agent running as the user can run `whoread`, but cannot disable its own guard.
+/// - non-root peers must be the console user, and both must be known (fail closed);
+/// - reading and *strengthening* requests (enforcement on, new deny/alert rule, "block from now on",
+///   unpause) are open to the console user;
+/// - *weakening* requests (enforcement off, pause, allow / exceptions, ignore / keep blocking / mark
+///   read — they silence alerts —, rule edits and deletes, settings, catalog, restart learning) need
+///   root (`sudo whoread …`) or the signed WhoRead app. An AI agent running as the user can run
+///   `whoread`, but can neither disable its own guard nor dismiss the alert about itself.
 public final class ServiceHandler: IPCHandler, @unchecked Sendable {
     public enum Policy: Sendable {
         case strict
@@ -33,18 +34,19 @@ public final class ServiceHandler: IPCHandler, @unchecked Sendable {
 
     func privilege(of request: IPCRequest) -> Privilege {
         switch request {
-        case .hello, .status, .events, .live, .alerts, .summaries, .rules, .settings, .catalog, .agents, .baseline:
+        case .hello, .status, .events, .live, .alerts, .summaries, .dailyAggregates, .rules, .settings, .catalog, .agents, .baseline:
             return .read
         case .markAlertsRead:
-            return .strengthen
+            return .weaken
         case .setEnforcement(let on):
             return on ? .strengthen : .weaken
         case .setPaused(let paused):
             return paused ? .weaken : .strengthen
         case .alertAction(_, let action):
             switch action {
-            case .blockFromNowOn, .keepBlocking, .ignore: return .strengthen
-            case .allowOnce, .alwaysAllow: return .weaken
+            // An unprivileged "block from now on" adds the rule but leaves the alert open (DaemonCore.apply).
+            case .blockFromNowOn: return .strengthen
+            case .keepBlocking, .ignore, .allowOnce, .alwaysAllow: return .weaken
             }
         case .upsertRule(let rule):
             let exists = daemon.rules.rules.contains { $0.id == rule.id }
@@ -55,16 +57,24 @@ public final class ServiceHandler: IPCHandler, @unchecked Sendable {
         }
     }
 
+    /// Root, the signed app, or permissive (dev) mode: may weaken protection.
+    func isPrivileged(_ peer: IPCPeer) -> Bool {
+        if policy == .permissive || peer.isRoot { return true }
+        if peer.isTrustedCode, let pid = peer.pid, peerVerifier.isApp(pid: pid) { return true }
+        return false
+    }
+
     func authorize(_ request: IPCRequest, peer: IPCPeer) -> IPCError? {
         if policy == .permissive || peer.isRoot { return nil }
-        if let console = consoleUID(), let euid = peer.euid, euid != console {
+        // Unknown peer or unknown console user: refuse rather than serve someone else's history.
+        guard let euid = peer.euid, let console = consoleUID(), euid == console else {
             return IPCError(.notPermitted, "only root or the console user may talk to the WhoRead daemon")
         }
         switch privilege(of: request) {
         case .read, .strengthen:
             return nil
         case .weaken:
-            if peer.isTrustedCode, let pid = peer.pid, peerVerifier.isApp(pid: pid) { return nil }
+            if isPrivileged(peer) { return nil }
             return IPCError(.notPermitted, "this change weakens protection: run it with sudo, or use the WhoRead app")
         }
     }
@@ -99,36 +109,42 @@ public final class ServiceHandler: IPCHandler, @unchecked Sendable {
             d.writer.flush()
             return .alerts(try d.store.alerts(q))
         case .alertAction(let id, let action):
-            try d.apply(action: action, toAlert: id, peer: peer)
+            try d.apply(action: action, toAlert: id, peer: peer, privileged: isPrivileged(peer))
             return .ok
         case .markAlertsRead(let ids):
-            try d.markRead(ids)
+            try d.markRead(ids, peer: peer)
             return .ok
         case .summaries(let since):
             d.writer.flush()
             return .summaries(try d.store.summaries(since: since))
+        case .dailyAggregates(let since):
+            d.writer.flush()
+            return .dailyAggregates(try d.store.dailyAggregates(since: since))
         case .rules:
             return .rules(d.rules.rules)
         case .upsertRule(let rule):
-            try d.upsert(rule: rule, peer: peer)
+            let privileged = isPrivileged(peer)
+            try d.upsert(rule: rule, peer: peer, mustBeNew: !privileged, privileged: privileged)
             return .rules(d.rules.rules)
         case .deleteRule(let id):
             try d.deleteRule(id: id, peer: peer)
             return .rules(d.rules.rules)
         case .settings:
             return .settings(d.currentSettings)
-        case .updateSettings(let s):
-            try d.update(settings: s, peer: peer)
+        case .updateSettings(var s):
+            // Enforcement and pause have their own requests (and privilege checks): a stale copy of the
+            // settings must never flip them.
+            try d.mutateSettings(peer: peer) { current in
+                s.enforcementEnabled = current.enforcementEnabled
+                s.monitoringPaused = current.monitoringPaused
+                current = s
+            }
             return .settings(d.currentSettings)
         case .setEnforcement(let on):
-            var s = d.currentSettings
-            s.enforcementEnabled = on
-            try d.update(settings: s, peer: peer)
+            try d.mutateSettings(peer: peer, reenable: on) { $0.enforcementEnabled = on }
             return .status(d.status())
         case .setPaused(let paused):
-            var s = d.currentSettings
-            s.monitoringPaused = paused
-            try d.update(settings: s, peer: peer)
+            try d.mutateSettings(peer: peer) { $0.monitoringPaused = paused }
             return .status(d.status())
         case .catalog:
             return .catalog(d.catalogInfo())

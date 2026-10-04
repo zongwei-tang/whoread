@@ -285,3 +285,111 @@ final class FixtureReplayTests: XCTestCase {
         XCTAssertEqual(a, b)
     }
 }
+
+/// Review round 1 (ingest): copyfile/create prefiltering, anchored needles, sequence accounting,
+/// directory semantics.
+final class EsloggerIngestFixTests: XCTestCase {
+    func esLine(_ event: String, seq: Int? = nil, exe: String = "/bin/cat") -> String {
+        let s = seq.map { #""global_seq_num":\#($0),"# } ?? ""
+        return #"{"schema_version":1,\#(s)"time":"2025-10-09T08:53:20.000000000Z","process":{"audit_token":{"pid":501,"pidversion":5},"ppid":1,"executable":{"path":"\#(exe)"}},"event":{\#(event)}}"#
+    }
+
+    func fileEvent(_ line: String, _ p: EsloggerParser = EsloggerParser()) -> FileActivity? {
+        if case .event(.file(let f)) = p.parse(line: line) { return f }
+        return nil
+    }
+
+    func testCopyfileAndCreateToNewSensitivePathAreParsed() {
+        let filter = LinePrefilter(prefixes: ["/Users/alice/.npmrc", "/Users/alice/.docker/config.json"])
+        // eslogger emits target_file null and splits the destination into dir + name.
+        let npmrc = esLine(#""copyfile":{"flags":0,"target_dir":{"path":"\/Users\/alice"},"source":{"path":"\/private\/tmp\/x"},"target_file":null,"target_name":".npmrc","mode":420}"#)
+        XCTAssertEqual(filter.verdict(npmrc), .parse)
+        let docker = esLine(#""copyfile":{"target_dir":{"path":"/Users/alice/.docker"},"source":{"path":"/private/tmp/x"},"target_file":null,"target_name":"config.json"}"#)
+        XCTAssertEqual(filter.verdict(docker), .parse)
+        let create = esLine(#""create":{"destination_type":1,"destination":{"new_path":{"dir":{"path":"\/Users\/alice"},"filename":".npmrc","mode":384}},"acl":null}"#)
+        XCTAssertEqual(filter.verdict(create), .parse)
+        // The parser joins dir + name and records a write of the new file.
+        let f = fileEvent(npmrc)
+        XCTAssertEqual(f?.operation, .copyfile)
+        XCTAssertEqual(f?.targets.last?.path, "/Users/alice/.npmrc")
+        XCTAssertEqual(f?.targets.last?.access, .write)
+        XCTAssertEqual(fileEvent(create)?.targets.map(\.path), ["/Users/alice/.npmrc"])
+    }
+
+    func testPrefixNeedlesAreAnchoredToStringStart() {
+        let filter = LinePrefilter(prefixes: ["/Volumes", "/Users/alice/.ssh"])
+        // /volumes inside /System/Volumes/… (here the process executable) no longer matches.
+        let cryptex = esLine(#""open":{"fflag":1,"file":{"path":"\/System\/Library\/Fonts\/x.ttf"}}"#,
+                             exe: #"\/System\/Volumes\/Preboot\/Cryptexes\/App\/System\/Applications\/Safari.app\/Contents\/MacOS\/Safari"#)
+        XCTAssertEqual(filter.verdict(cryptex), .drop)
+        XCTAssertEqual(filter.verdict(esLine(#""open":{"fflag":1,"file":{"path":"\/System\/Volumes\/Data\/.Spotlight-V100\/x"}}"#)), .drop)
+        // Real matches: plain, escaped, firmlinked, case-insensitive.
+        XCTAssertEqual(filter.verdict(esLine(#""open":{"fflag":1,"file":{"path":"\/Volumes\/USB\/x"}}"#)), .parse)
+        XCTAssertEqual(filter.verdict(esLine(#""open":{"fflag":1,"file":{"path":"/volumes/USB/x"}}"#)), .parse)
+        XCTAssertEqual(filter.verdict(esLine(#""open":{"fflag":1,"file":{"path":"\/System\/Volumes\/Data\/Users\/alice\/.ssh\/id_rsa"}}"#)), .parse)
+        XCTAssertEqual(filter.verdict(esLine(#""open":{"fflag":1,"file":{"path":"/System/Volumes/Data/Users/alice/.ssh/id_rsa"}}"#)), .parse)
+        // A non-ASCII prefix still matches by its (unanchored) ASCII fragment.
+        let cjk = LinePrefilter(prefixes: ["/Users/alice/Work/项目"])
+        XCTAssertEqual(cjk.verdict(esLine(#""open":{"fflag":1,"file":{"path":"\/Users\/alice\/Work\/"# + "项目" + #"\/a"}}"#)), .parse)
+    }
+
+    func testSequenceRestartsWithNewStream() {
+        let p = EsloggerParser()
+        p.noteSequence(20_000_000)
+        // A restarted eslogger counts from 0 again; its own gap (2…4) is still counted.
+        p.noteSequence(0)
+        p.noteSequence(1)
+        p.noteSequence(5)
+        XCTAssertEqual(p.stats.droppedByKernel, 3)
+        // resetSequence forgets the previous stream even when the new one starts higher.
+        let q = EsloggerParser()
+        q.noteSequence(5)
+        q.resetSequence()
+        q.noteSequence(7)
+        XCTAssertEqual(q.stats.droppedByKernel, 0)
+        // Noting the same number twice (malformed after the parser saw it) is harmless.
+        q.noteSequence(7)
+        q.noteSequence(8)
+        XCTAssertEqual(q.stats.droppedByKernel, 0)
+    }
+
+    func testDirectoryOpenBecomesReaddir() throws {
+        let dirStat = #""stat":{"st_mode":16877,"st_size":192}"#
+        let fileStat = #""stat":{"st_mode":33188,"st_size":411}"#
+        // Directory by stat.
+        let byStat = try XCTUnwrap(fileEvent(esLine(#""open":{"fflag":1,"file":{"path":"\/Users\/alice\/.ssh","path_truncated":false,\#(dirStat)}}"#)))
+        XCTAssertEqual(byStat.operation, .readdir)
+        XCTAssertEqual(byStat.targets.map(\.isDirectory), [true])
+        XCTAssertEqual(byStat.targets.map(\.access), [.read])
+        // Directory by O_DIRECTORY in fflag (the documented sample 0x1100001), no stat.
+        let byFlag = try XCTUnwrap(fileEvent(esLine(#""open":{"fflag":17825793,"file":{"path":"/Users/alice/.ssh"}}"#)))
+        XCTAssertEqual(byFlag.operation, .readdir)
+        // A regular file stays an open, with what its stat says.
+        let regular = try XCTUnwrap(fileEvent(esLine(#""open":{"fflag":1,"file":{"path":"/Users/alice/.ssh/id_rsa","path_truncated":true,\#(fileStat)}}"#)))
+        XCTAssertEqual(regular.operation, .open)
+        XCTAssertEqual(regular.targets.map(\.isDirectory), [false])
+        XCTAssertEqual(regular.targets.map(\.truncated), [true])
+        // No stat: unknown.
+        let unknown = try XCTUnwrap(fileEvent(esLine(#""open":{"fflag":1,"file":{"path":"/Users/alice/.ssh/id_rsa"}}"#)))
+        XCTAssertEqual(unknown.targets.map(\.isDirectory), [nil])
+        // Other operations carry the stat too; new-path destinations are dir + filename.
+        let unlink = try XCTUnwrap(fileEvent(esLine(#""unlink":{"target":{"path":"/Users/alice/.ssh/old",\#(dirStat)},"parent_dir":{"path":"/Users/alice/.ssh"}}"#)))
+        XCTAssertEqual(unlink.targets.map(\.isDirectory), [true])
+        let rename = try XCTUnwrap(fileEvent(esLine(#""rename":{"source":{"path":"/Users/alice/.ssh",\#(dirStat)},"destination_type":1,"destination":{"new_path":{"dir":{"path":"/private/tmp","path_truncated":true},"filename":"s"}}}"#)))
+        XCTAssertEqual(rename.targets.map(\.path), ["/Users/alice/.ssh", "/private/tmp/s"])
+        XCTAssertEqual(rename.targets.map(\.isDirectory), [true, nil])
+        XCTAssertEqual(rename.targets.map(\.truncated), [false, true])
+        let link = try XCTUnwrap(fileEvent(esLine(#""link":{"target_dir":{"path":"/private/tmp/"},"target_filename":"k","source":{"path":"/Users/alice/.ssh/id_rsa",\#(fileStat)}}"#)))
+        XCTAssertEqual(link.targets.map(\.path), ["/Users/alice/.ssh/id_rsa", "/private/tmp/k"])
+
+        // The analyzer drops readdir unless it is enabled.
+        let h = try Harness()
+        let open = esLine(#""open":{"fflag":1,"file":{"path":"\/Users\/alice\/.ssh",\#(dirStat)}}"#)
+        guard case .event(let e) = EsloggerParser().parse(line: open) else { return XCTFail() }
+        XCTAssertTrue(h.analyzer.handle(e).events.isEmpty)
+        h.analyzer.readdirEnabled = true
+        let listed = h.analyzer.handle(e).events
+        XCTAssertFalse(listed.isEmpty)
+        XCTAssertTrue(listed.allSatisfy { $0.operation == .readdir })
+    }
+}

@@ -7,7 +7,7 @@ cd "$ROOT"
 swift build >/dev/null
 BIN="$ROOT/.build/debug"
 TMP="$(mktemp -d)"
-trap 'kill $DPID 2>/dev/null || true; rm -rf "$TMP"' EXIT
+trap 'kill ${DPID:-} 2>/dev/null || true; rm -rf "$TMP"' EXIT
 FIXTURE="${1:-$ROOT/Tests/Fixtures/eslogger/schema-v1-msgv10/scenario.jsonl}"
 cat > "$TMP/eslogger" <<SH
 #!/bin/sh
@@ -31,5 +31,10 @@ echo "== agents"; W agents
 echo "== export csv (first 3 lines)"; W export --format csv | head -3
 echo "== rules"; W rules
 echo "== enforcement on (replay/eslogger cannot enforce)"; W enforcement on
-echo "== kill switch"; "$BIN/whoread" kill-switch engage --path "$TMP/data/disable-enforcement"; sleep 0.4; W status | grep "kill switch"
+echo "== kill switch"; "$BIN/whoread" kill-switch engage --path "$TMP/data/disable-enforcement"
+# The watcher polls every 200 ms; the daemon must report the file, not just print the line.
+seen=""
+for _ in $(seq 20); do W status | grep "kill switch:" | grep -q "PRESENT" && { seen=1; break; }; sleep 0.1; done
+W status | grep "kill switch:"
+[ -n "$seen" ] || { echo "FAIL: the daemon did not observe the kill-switch file" >&2; cat "$TMP/daemon.log" >&2; exit 1; }
 echo "== daemon log"; cat "$TMP/daemon.log"

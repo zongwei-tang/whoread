@@ -18,7 +18,7 @@ struct WhoReadApp: App {
                 .environment(connection)
                 .environment(connection.model)
         } label: {
-            MenuBarLabel(state: connection.model.menuBar)
+            MenuBarLabel(model: connection.model)
         }
         .menuBarExtraStyle(.window)
 
@@ -32,10 +32,14 @@ struct WhoReadApp: App {
     }
 }
 
-/// Icon + unread badge in the menu bar.
+/// Icon + unread badge in the menu bar. Reads the model in its own body so observation tracking
+/// refreshes it (a value computed in `App.body` might not be).
 struct MenuBarLabel: View {
-    let state: MenuBarState
+    let model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
     var body: some View {
+        let state = model.menuBar
         HStack(spacing: 2) {
             Image(systemName: state.symbol)
             if let badge = state.badge {
@@ -43,6 +47,8 @@ struct MenuBarLabel: View {
             }
         }
         .accessibilityLabel(Text(state.title))
+        // The label lives as long as the app: lets notification clicks open the main window.
+        .onAppear { NavigationState.shared.openMainWindow = { openWindow(id: "main") } }
     }
 }
 
@@ -51,7 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if CommandLine.arguments.contains("--uninstall-extension") {
             // Used by scripts/release/uninstall.sh: deactivate and quit.
             Task { @MainActor in
-                SystemExtensionManager.shared.onFinish = { NSApp.terminate(nil) }
+                // The exit status tells scripts/release/uninstall.sh whether deactivation worked.
+                SystemExtensionManager.shared.onFinish = { ok in exit(ok ? 0 : 1) }
                 SystemExtensionManager.shared.deactivate()
             }
             return

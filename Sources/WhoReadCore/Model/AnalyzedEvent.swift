@@ -138,11 +138,14 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
     public var ruleID: String?
     public var status: AlertStatus
     public var resolution: AlertAction?
+    /// The (app, category, access) combination had never been seen before (after learning).
+    public var firstTime: Bool
 
     public init(id: Int64, kind: AlertKind, createdAt: Date, updatedAt: Date, windowEndsAt: Date,
                 responsible: ResponsibleEntity, categoryID: String, severity: Severity, count: Int, accesses: AccessSet,
                 firstPath: String, firstEventID: Int64, lastEventID: Int64, paths: [String], chain: [ChainLink],
-                agentID: String?, ruleID: String?, status: AlertStatus = .unread, resolution: AlertAction? = nil) {
+                agentID: String?, ruleID: String?, status: AlertStatus = .unread, resolution: AlertAction? = nil,
+                firstTime: Bool = false) {
         self.id = id
         self.kind = kind
         self.createdAt = createdAt
@@ -162,6 +165,36 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
         self.ruleID = ruleID
         self.status = status
         self.resolution = resolution
+        self.firstTime = firstTime
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, createdAt, updatedAt, windowEndsAt, responsible, categoryID, severity, count, accesses, firstPath
+        case firstEventID, lastEventID, paths, chain, agentID, ruleID, status, resolution, firstTime
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int64.self, forKey: .id)
+        kind = try c.decode(AlertKind.self, forKey: .kind)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        windowEndsAt = try c.decode(Date.self, forKey: .windowEndsAt)
+        responsible = try c.decode(ResponsibleEntity.self, forKey: .responsible)
+        categoryID = try c.decode(String.self, forKey: .categoryID)
+        severity = try c.decode(Severity.self, forKey: .severity)
+        count = try c.decode(Int.self, forKey: .count)
+        accesses = try c.decode(AccessSet.self, forKey: .accesses)
+        firstPath = try c.decode(String.self, forKey: .firstPath)
+        firstEventID = try c.decode(Int64.self, forKey: .firstEventID)
+        lastEventID = try c.decode(Int64.self, forKey: .lastEventID)
+        paths = try c.decodeIfPresent([String].self, forKey: .paths) ?? []
+        chain = try c.decodeIfPresent([ChainLink].self, forKey: .chain) ?? []
+        agentID = try c.decodeIfPresent(String.self, forKey: .agentID)
+        ruleID = try c.decodeIfPresent(String.self, forKey: .ruleID)
+        status = try c.decodeIfPresent(AlertStatus.self, forKey: .status) ?? .unread
+        resolution = try c.decodeIfPresent(AlertAction.self, forKey: .resolution)
+        firstTime = try c.decodeIfPresent(Bool.self, forKey: .firstTime) ?? false
     }
 
     /// Actions offered for this alert, in display order.

@@ -52,6 +52,12 @@ public struct PathNormalizer: Sendable {
         PathNormalizer.fold(normalize(raw))
     }
 
+    /// Path components split on Unicode scalars. Splitting on Characters would merge "/" with a
+    /// following combining mark into one grapheme and lose a component boundary.
+    public static func components(_ path: String) -> [String] {
+        path.unicodeScalars.split(separator: "/").map { String(String.UnicodeScalarView($0)) }
+    }
+
     /// Case folding used for match keys. Exposed so pre-normalized strings can be folded alone.
     public static func fold(_ s: String) -> String {
         if s.utf8.allSatisfy({ $0 < 0x80 }) {
@@ -104,8 +110,8 @@ public struct PathNormalizer: Sendable {
             && !path.hasSuffix("/.") && !path.hasSuffix("/..") && (path == "/" || !path.hasSuffix("/")) {
             return path
         }
-        var stack: [Substring] = []
-        for component in path.split(separator: "/", omittingEmptySubsequences: true) {
+        var stack: [String] = []
+        for component in PathNormalizer.components(path) {
             if component == "." { continue }
             if component == ".." {
                 if !stack.isEmpty { stack.removeLast() }
@@ -142,6 +148,12 @@ public struct PathNormalizer: Sendable {
 public protocol SymlinkResolver: Sendable {
     /// Returns the fully resolved path, or nil if the path does not exist / cannot be resolved.
     func resolve(_ path: String) -> String?
+    /// Symbolic links found inside a directory (bounded walk), with their fully resolved targets.
+    func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)]
+}
+
+extension SymlinkResolver {
+    public func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] { [] }
 }
 
 public struct NoSymlinkResolver: SymlinkResolver {
@@ -151,7 +163,16 @@ public struct NoSymlinkResolver: SymlinkResolver {
 
 public struct MapSymlinkResolver: SymlinkResolver {
     public var map: [String: String]
-    public init(_ map: [String: String]) { self.map = map }
+    /// Links inside directories: directory → [(link, target)].
+    public var links: [String: [(link: String, target: String)]]
+    public init(_ map: [String: String], links: [String: [(link: String, target: String)]] = [:]) {
+        self.map = map
+        self.links = links
+    }
+
+    public func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] {
+        links[dir] ?? []
+    }
     public func resolve(_ path: String) -> String? {
         // Resolve the longest mapped prefix, like a symlinked directory would.
         for (from, to) in map.sorted(by: { $0.key.count > $1.key.count }) {
@@ -169,5 +190,29 @@ public struct RealpathSymlinkResolver: SymlinkResolver {
         guard let resolved = realpath(path, nil) else { return nil }
         defer { free(resolved) }
         return String(cString: resolved)
+    }
+
+    /// lstat-based walk; does not follow directory links (their targets are reported instead).
+    public func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] {
+        var out: [(String, String)] = []
+        var visited = 0
+        func walk(_ d: String, _ depth: Int) {
+            guard depth <= maxDepth, let entries = try? FileManager.default.contentsOfDirectory(atPath: d) else { return }
+            for name in entries {
+                visited += 1
+                if visited > maxEntries { return }
+                let p = d.hasSuffix("/") ? d + name : d + "/" + name
+                var st = stat()
+                guard lstat(p, &st) == 0 else { continue }
+                let type = UInt32(st.st_mode) & 0o170000
+                if type == 0o120000 {
+                    if let target = resolve(p), !target.hasPrefix(dir + "/") && target != dir { out.append((p, target)) }
+                } else if type == 0o040000 {
+                    walk(p, depth + 1)
+                }
+            }
+        }
+        walk(dir, 1)
+        return out
     }
 }

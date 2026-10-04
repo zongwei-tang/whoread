@@ -138,7 +138,8 @@ final class ClassifierTests: XCTestCase {
         for required in ["ssh", "aws", "gcloud", "azure", "kube", "docker", "npm", "pypi", "netrc", "git-credentials", "gh",
                          "gnupg", "keychain", "chrome", "brave", "edge", "arc", "firefox", "safari", "1password", "bitwarden",
                          "proton-pass", "messages", "wechat", "telegram", "signal", "simplex", "mail", "contacts", "calendar",
-                         "photos", "shell-history", "cloud-storage", "iphone-backup", "volumes", "ai-sessions", "test-vault",
+                         "photos", "shell-history", "cloud-storage", "iphone-backup", "volumes", "claude-sessions",
+                         "codex-sessions", "gemini-sessions", "cursor-data", "opencode-data", "test-vault",
                          "project-secrets", "custom"] {
             XCTAssertTrue(ids.contains(required), required)
         }
@@ -154,17 +155,64 @@ final class ClassifierTests: XCTestCase {
         // Same name, not Apple-signed, not in a known location: not an owner.
         let fake = ProcessRecord(pid: 9, ppid: 1, executablePath: "/tmp/ssh", isPlatformBinary: false)
         XCTAssertFalse(classifier.isOwner(fake, of: "ssh"))
-        let chrome = ProcessRecord(pid: 9, ppid: 1,
-            executablePath: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/131/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper")
-        XCTAssertTrue(classifier.isOwner(chrome, of: "chrome"))
-        XCTAssertFalse(classifier.isOwner(chrome, of: "firefox"))
+        // A copied Apple binary keeps its platform flag; outside system locations it is not an owner.
+        let copied = ProcessRecord(pid: 9, ppid: 1, executablePath: "/usr/local/bin/ssh", isPlatformBinary: true)
+        XCTAssertFalse(classifier.isOwner(copied, of: "ssh"))
+        let fakeKeychainApp = ProcessRecord(pid: 9, ppid: 1, executablePath: "/Users/alice/x/Keychain Access.app/Contents/MacOS/cp",
+                                            isPlatformBinary: true)
+        XCTAssertFalse(classifier.isOwner(fakeKeychainApp, of: "keychain"))
+        let keychainApp = ProcessRecord(pid: 9, ppid: 1, executablePath: "/System/Applications/Utilities/Keychain Access.app/Contents/MacOS/Keychain Access",
+                                        isPlatformBinary: true)
+        XCTAssertTrue(classifier.isOwner(keychainApp, of: "keychain"))
+        // git does not read ~/.ssh itself (ssh does).
+        let git = ProcessRecord(pid: 9, ppid: 1, executablePath: "/Library/Developer/CommandLineTools/usr/bin/git", isPlatformBinary: true)
+        XCTAssertFalse(classifier.isOwner(git, of: "ssh"))
+        XCTAssertTrue(classifier.isOwner(git, of: "git-credentials"))
+        // Shells and curl are not owners: they read on behalf of whoever runs them.
+        let zsh = ProcessRecord(pid: 9, ppid: 1, executablePath: "/bin/zsh", isPlatformBinary: true)
+        XCTAssertFalse(classifier.isOwner(zsh, of: "shell-history"))
+        let curl = ProcessRecord(pid: 9, ppid: 1, executablePath: "/usr/bin/curl", isPlatformBinary: true)
+        XCTAssertFalse(classifier.isOwner(curl, of: "netrc"))
+        // Third-party bundles need a team ID (filled by `whoread catalog resolve-owners`).
+        let chromeHelper = "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/131/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper"
+        var chrome = ProcessRecord(pid: 9, ppid: 1, executablePath: chromeHelper, teamID: "TEAMCHROME")
+        XCTAssertFalse(classifier.isOwner(chrome, of: "chrome"), "unresolved catalog: fail closed")
+        var data = try defaultData()
+        let i = data.catalog.categories.firstIndex { $0.id == "chrome" }!
+        data.catalog.categories[i].owners[0].teamIDs = ["TEAMCHROME"]
+        let resolved = PathClassifier(catalog: data.catalog, normalizer: PathNormalizer(homeDirectories: [home]))
+        XCTAssertTrue(resolved.isOwner(chrome, of: "chrome"))
+        XCTAssertFalse(resolved.isOwner(chrome, of: "firefox"))
+        chrome.teamID = "OTHERTEAM"
+        XCTAssertFalse(resolved.isOwner(chrome, of: "chrome"), "same path, different signer")
         let cat = ProcessRecord(pid: 9, ppid: 1, executablePath: "/bin/cat", isPlatformBinary: true)
         XCTAssertFalse(classifier.isOwner(cat, of: "ssh"))
-        let python = ProcessRecord(pid: 9, ppid: 1, executablePath: "/opt/homebrew/Cellar/python@3.12/3.12.5/bin/python3.12",
-                                   argv: ["python3", "/opt/homebrew/bin/aws", "s3", "ls"])
+        // Script owners: the interpreter location and the script position must both match.
+        let python = ProcessRecord(pid: 9, ppid: 1,
+            executablePath: "/opt/homebrew/Cellar/python@3.12/3.12.5/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python",
+            argv: ["python3", "/opt/homebrew/bin/aws", "s3", "ls"])
         XCTAssertTrue(classifier.isOwner(python, of: "aws"))
         var randomScript = python
         randomScript.argv = ["python3", "/tmp/steal.py"]
         XCTAssertFalse(classifier.isOwner(randomScript, of: "aws"))
+        var trailing = python
+        trailing.argv = ["python3", "/tmp/steal.py", "/opt/homebrew/bin/aws"]
+        XCTAssertFalse(classifier.isOwner(trailing, of: "aws"), "argv only counts at the script position")
+        let catPosingAsAWS = ProcessRecord(pid: 9, ppid: 1, executablePath: "/bin/cat", isPlatformBinary: true,
+                                           argv: ["cat", "/opt/homebrew/bin/aws", "/Users/alice/.aws/credentials"])
+        XCTAssertFalse(classifier.isOwner(catPosingAsAWS, of: "aws"), "not an interpreter")
+        let az = ProcessRecord(pid: 9, ppid: 1, executablePath: "/opt/homebrew/Cellar/python@3.12/3.12.5/bin/python3.12",
+                               argv: ["python3", "-Im", "azure.cli", "account", "show"])
+        XCTAssertTrue(classifier.isOwner(az, of: "azure"))
+        // Names alone never make an owner.
+        let fakeGH = ProcessRecord(pid: 9, ppid: 1, executablePath: "/tmp/gh")
+        XCTAssertFalse(classifier.isOwner(fakeGH, of: "gh"))
+        let gh = ProcessRecord(pid: 9, ppid: 1, executablePath: "/opt/homebrew/Cellar/gh/2.60.0/bin/gh")
+        XCTAssertTrue(classifier.isOwner(gh, of: "gh"))
+        // Each agent owns only its own transcripts.
+        let claude = ProcessRecord(pid: 9, ppid: 1, executablePath: "/opt/homebrew/Cellar/node/22.1.0/bin/node",
+                                   argv: ["node", "/opt/homebrew/bin/claude"])
+        XCTAssertTrue(classifier.isOwner(claude, of: "claude-sessions"))
+        XCTAssertFalse(classifier.isOwner(claude, of: "codex-sessions"))
     }
 }

@@ -6,11 +6,12 @@ import WhoReadCore
 /// Keeps:
 /// - every event that touches the test vault;
 /// - fork/exec/exit events of the processes involved and their ancestors (chain reconstruction);
-/// - up to `samplePerKind` other events per event kind, only if all their paths are system paths
-///   (structure coverage without personal data).
+/// - up to `samplePerKind` other events per event kind, only if all their paths, the process's
+///   included, are system paths after firmlink normalization (structure coverage without personal data).
 ///
 /// Rewrites, on the raw line so eslogger's exact shape (`\/` escaping, key order) survives:
-/// - the home directory → `/Users/alice`, the user name → `alice`;
+/// - the home directory → `/Users/alice`, the user name → `alice`, the per-user
+///   `/private/var/folders/<xx>/<id>` (or `/var/folders/…`) → `…/folders/xx/alice`;
 /// - exec `env` arrays → `[]` (eslogger emits the full environment, which may hold secrets);
 /// - exec `args` of sampled events → only argv[0]; vault-related argv kept (test commands).
 public struct FixtureSanitizer {
@@ -34,8 +35,21 @@ public struct FixtureSanitizer {
         public var byKind: [String: Int] = [:]
     }
 
+    /// Apple-managed roots. Deliberately absent: /Applications/Utilities (Apple's utilities live in
+    /// /System/Applications/Utilities; the data-volume folder holds third-party apps) and /Library/Preferences
+    /// (third-party file names there are the installed-app inventory).
     static let systemPrefixes = ["/System/", "/usr/", "/bin/", "/sbin/", "/Library/Apple/", "/private/var/db/", "/dev/",
-                                 "/Library/Preferences/", "/private/etc/", "/Applications/Utilities/", "/System/Volumes/Preboot/"]
+                                 "/private/etc/", "/System/Volumes/Preboot/"]
+    /// User-writable, per-user or inventory places under the system prefixes (lowercase: compared case-folded,
+    /// since APFS is case-insensitive).
+    static let nonSystemPrefixes = ["/usr/local/", "/private/var/db/dslocal/", "/private/var/db/sudo/", "/private/var/db/receipts/"]
+
+    /// Checked on the normalized path: `/System/Volumes/Data/…` is the user data volume, not the system.
+    static func isSystem(_ path: String, normalizer: PathNormalizer) -> Bool {
+        let n = normalizer.normalize(path)
+        let key = PathNormalizer.fold(n)
+        return systemPrefixes.contains { n.hasPrefix($0) } && !nonSystemPrefixes.contains { key.hasPrefix($0) }
+    }
 
     public func sanitize(lines: [String]) -> (output: [String], report: Report) {
         var report = Report()
@@ -43,7 +57,10 @@ public struct FixtureSanitizer {
         let vaultVariants = [vault, vault.replacingOccurrences(of: "/", with: "\\/")]
 
         // Pass 1: parse what we need.
-        struct Info { var kind: String; var pid: Int32?; var ppid: Int32?; var childPID: Int32?; var paths: [String]; var vault: Bool }
+        struct Info {
+            var kind: String; var pid: Int32?; var ppid: Int32?; var childPID: Int32?; var paths: [String]; var procPaths: [String]
+            var vault: Bool
+        }
         var infos: [Info?] = []
         var interesting = Set<Int32>()
         var parent: [Int32: Int32] = [:]
@@ -58,17 +75,23 @@ public struct FixtureSanitizer {
             let process = root["process"] as? [String: Any]
             let pid = FixtureSanitizer.int((process?["audit_token"] as? [String: Any])?["pid"]).map { Int32(truncatingIfNeeded: $0) }
             let ppid = FixtureSanitizer.int(process?["ppid"]).map { Int32(truncatingIfNeeded: $0) }
+            let originalPPID = FixtureSanitizer.int(process?["original_ppid"]).map { Int32(truncatingIfNeeded: $0) }
             var childPID: Int32?
             if kind == "fork", let child = body["child"] as? [String: Any] {
                 childPID = FixtureSanitizer.int((child["audit_token"] as? [String: Any])?["pid"]).map { Int32(truncatingIfNeeded: $0) }
             }
             var paths: [String] = []
             FixtureSanitizer.collectPaths(body, into: &paths)
+            // The process object (executable, tty) is committed with the line too.
+            var procPaths: [String] = []
+            if let process { FixtureSanitizer.collectPaths(process, into: &procPaths) }
             let touchesVault = vaultVariants.contains { line.contains($0) }
             if touchesVault, let pid { interesting.insert(pid) }
-            if let pid, let ppid { parent[pid] = ppid }
+            // A reparented process reports ppid 1: use original_ppid, and never replace known ancestry.
+            if let pid, let pp = (ppid == 1 ? originalPPID : ppid) ?? ppid, pp > 1, parent[pid] == nil { parent[pid] = pp }
             if let c = childPID, let pid { parent[c] = pid }
-            infos.append(Info(kind: kind, pid: pid, ppid: ppid, childPID: childPID, paths: paths, vault: touchesVault))
+            infos.append(Info(kind: kind, pid: pid, ppid: ppid, childPID: childPID, paths: paths, procPaths: procPaths,
+                              vault: touchesVault))
         }
         // Ancestors of interesting processes.
         var frontier = Array(interesting)
@@ -82,6 +105,7 @@ public struct FixtureSanitizer {
         // Pass 2: select and rewrite.
         var out: [String] = []
         var sampled: [String: Int] = [:]
+        let normalizer = PathNormalizer()
         for (line, info) in zip(lines, infos) {
             guard let info else { continue }
             var keep = false
@@ -94,7 +118,7 @@ public struct FixtureSanitizer {
                 keep = true
                 report.lifecycle += 1
             } else if sampled[info.kind, default: 0] < samplePerKind,
-                      !info.paths.isEmpty, info.paths.allSatisfy({ p in FixtureSanitizer.systemPrefixes.contains { p.hasPrefix($0) } }) {
+                      !info.paths.isEmpty, (info.paths + info.procPaths).allSatisfy({ FixtureSanitizer.isSystem($0, normalizer: normalizer) }) {
                 keep = true
                 isSample = true
                 sampled[info.kind, default: 0] += 1
@@ -113,7 +137,7 @@ public struct FixtureSanitizer {
         return (out, report)
     }
 
-    /// Home and user-name replacement in both `/` and `\/` spellings.
+    /// Home, user-name and per-user temporary folder replacement in both `/` and `\/` spellings.
     func rewrite(_ line: String) -> String {
         var s = line
         let user = (home as NSString).lastPathComponent
@@ -121,11 +145,18 @@ public struct FixtureSanitizer {
                            (home.replacingOccurrences(of: "/", with: "\\/"), replacementHome.replacingOccurrences(of: "/", with: "\\/"))] {
             s = s.replacingOccurrences(of: from, with: to)
         }
+        func replace(_ pattern: String, _ template: String) {
+            guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+            s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: template)
+        }
         if !user.isEmpty && user != "alice" {
-            s = s.replacingOccurrences(of: "/" + user + "/", with: "/alice/")
-            s = s.replacingOccurrences(of: "\\/" + user + "\\/", with: "\\/alice\\/")
+            // A whole path component (`/bob/`, `\/bob\/`, `/bob"`, `/bob.plist`) or a whole string.
+            replace("(?<=/)" + NSRegularExpression.escapedPattern(for: user) + #"(?=[/\\".]|$)"#, "alice")
             s = s.replacingOccurrences(of: "\"" + user + "\"", with: "\"alice\"")
         }
+        // $TMPDIR / confstr folders: /private/var/folders/<xx>/<per-user id>, also spelled /var/folders/…
+        // (the $TMPDIR value itself, as in the capture script's cp/ln/rm arguments).
+        replace(#"(/(?:private\\?/)?var\\?/folders\\?/)[^/\\"]+(\\?/)[^/\\"]+"#, "$1xx$2alice")
         return s
     }
 

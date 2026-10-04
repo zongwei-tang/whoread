@@ -16,9 +16,11 @@ public struct ResponsibleEntity: Codable, Hashable, Sendable {
     public var signingID: String?
     public var teamID: String?
     public var agentID: String?
+    /// For unsigned, non-platform binaries: the cdhash, so rules can pin "path + cdhash".
+    public var cdhash: String?
 
     public init(kind: Kind, key: String, displayName: String, path: String? = nil,
-                signingID: String? = nil, teamID: String? = nil, agentID: String? = nil) {
+                signingID: String? = nil, teamID: String? = nil, agentID: String? = nil, cdhash: String? = nil) {
         self.kind = kind
         self.key = key
         self.displayName = displayName
@@ -26,6 +28,7 @@ public struct ResponsibleEntity: Codable, Hashable, Sendable {
         self.signingID = signingID
         self.teamID = teamID
         self.agentID = agentID
+        self.cdhash = cdhash
     }
 }
 
@@ -131,7 +134,8 @@ public struct Attributor: Sendable {
         }
         return ResponsibleEntity(
             kind: .binary, key: "bin:" + identity, displayName: p.name, path: p.executablePath,
-            signingID: p.signingID, teamID: p.teamID, agentID: nil)
+            signingID: p.signingID, teamID: p.teamID, agentID: nil,
+            cdhash: p.teamID == nil && !p.isPlatformBinary ? p.cdhash : nil)
     }
 
     /// Chain trimmed to start at the responsible entity, root first:
