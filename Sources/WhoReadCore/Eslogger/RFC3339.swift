@@ -72,7 +72,10 @@ public enum RFC3339 {
 
     /// Formats a date with nanosecond precision, UTC. Used by fixtures and exports.
     public static func format(_ date: Date, fractionDigits: Int = 9) -> String {
-        let t = date.timeIntervalSince1970
+        // Never trap on a value Int cannot hold: clamp to what four year digits can show.
+        let raw = date.timeIntervalSince1970
+        let range = Exporter.representableDates
+        let t = raw.isFinite ? min(max(raw, range.lowerBound), range.upperBound.nextDown) : range.lowerBound
         var whole = Int(t.rounded(.down))
         var frac = t - Double(whole)
         if frac < 0 { frac += 1; whole -= 1 }

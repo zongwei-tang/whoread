@@ -36,6 +36,9 @@ public enum IPCRequest: Codable, Sendable {
     case baseline
     /// Clears learned entries and restarts the learning period (approvals are kept).
     case restartLearning
+    /// Replaces the whole rule list (root or the app). The only rule change accepted while the stored
+    /// rules cannot be read; the old rows are then kept in the database's `rules_backup` table.
+    case replaceRules([Rule])
 }
 
 public enum IPCResponse: Codable, Sendable {
@@ -139,6 +142,8 @@ public struct DaemonStatus: Codable, Sendable {
     public var rulesLoadError: String?
     /// File events the source had to drop because the analysis backlog was full (native source).
     public var sourceDroppedEvents: UInt64?
+    /// NOTIFY events the kernel dropped before the source saw them (sequence-number gaps).
+    public var sourceKernelDrops: UInt64?
 
     public init(version: String, pid: Int32, startedAt: Date, mode: DaemonMode, source: SourceKind, sourceRunning: Bool,
                 sourceError: String?, sourceHint: String?, sourceCanEnforce: Bool, learning: Bool, learningEndsAt: Date,
@@ -146,7 +151,8 @@ public struct DaemonStatus: Codable, Sendable {
                 enforcementInactiveReasons: [EnforcementState.InactiveReason], latencyTripReason: String?,
                 killSwitchFilePresent: Bool, latency: LatencyStats, parser: EsloggerParser.Stats?, counts: StoreCounts,
                 unreadAlerts: Int, lastEventAt: Date?, eventsProcessed: UInt64, writerDropped: UInt64, monitoredPrefixes: Int,
-                homeDirectories: [String], rulesLoadError: String? = nil, sourceDroppedEvents: UInt64? = nil) {
+                homeDirectories: [String], rulesLoadError: String? = nil, sourceDroppedEvents: UInt64? = nil,
+                sourceKernelDrops: UInt64? = nil) {
         self.version = version
         self.pid = pid
         self.startedAt = startedAt
@@ -175,6 +181,7 @@ public struct DaemonStatus: Codable, Sendable {
         self.homeDirectories = homeDirectories
         self.rulesLoadError = rulesLoadError
         self.sourceDroppedEvents = sourceDroppedEvents
+        self.sourceKernelDrops = sourceKernelDrops
     }
 }
 

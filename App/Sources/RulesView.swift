@@ -29,9 +29,11 @@ struct RulesView: View {
             }
         }
         .sheet(item: Binding(get: { editing.map(IdentifiedDraft.init) }, set: { editing = $0?.draft })) { item in
+            // Closed once the daemon accepted the rule: a refused save keeps the edits. Not another
+            // rule's editor, opened after this one was cancelled while its save was still running.
             RuleEditor(draft: item.draft) { result in
-                if let rule = result { connection.save(rule: rule) }
-                editing = nil
+                guard let rule = result else { editing = nil; return }
+                connection.save(rule: rule) { if editing == item.draft { editing = nil } }
             }
         }
     }
@@ -50,11 +52,7 @@ struct RuleRow: View {
 
     var body: some View {
         HStack(alignment: .top) {
-            Toggle("", isOn: Binding(get: { rule.enabled }, set: { on in
-                var r = rule
-                r.enabled = on
-                connection.save(rule: r)
-            })).labelsHidden()
+            Toggle("", isOn: Binding(get: { rule.enabled }, set: { connection.setEnabled($0, rule: rule.id) })).labelsHidden()
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.ruleName(rule)).font(.body.weight(.medium))
                 Text(describe(rule)).font(.caption).foregroundStyle(.secondary)
@@ -132,12 +130,9 @@ struct RuleEditor: View {
                     }
                 case .path:
                     TextField("~/.ssh/id_ed25519", text: $draft.pathPrefix)
-                    // Only monitored paths reach the rule engine: say so, and offer to monitor it.
+                    // Only monitored paths reach the rule engine; the daemon monitors an uncovered one on save.
                     if draft.validationError() != .ruleErrPath, !model.isMonitored(pathPrefix: draft.pathPrefix) {
                         Text(L10n.t(.rulePathNotMonitored)).font(.caption).foregroundStyle(.orange)
-                        if CatalogEdit.validPath(draft.pathPrefix) != nil {
-                            Button(L10n.t(.ruleMonitorPath)) { connection.edit(catalog: [.monitorPath(draft.pathPrefix)]) }
-                        }
                     }
                 }
             }
@@ -158,7 +153,9 @@ struct RuleEditor: View {
                     TextField(L10n.t(.ruleProgramPath), text: $draft.unsignedPath, prompt: Text(verbatim: "/path/to/program"))
                     TextField(L10n.t(.ruleCdhash), text: $draft.cdhash)
                 case .app:
-                    Picker(L10n.t(.subjectApp), selection: Binding(get: { draft.appKey }, set: { draft.selectApp($0) })) {
+                    Picker(L10n.t(.subjectApp), selection: Binding(get: { draft.appKey }, set: { key in
+                        if let row = model.appRows.first(where: { $0.id == key }) { draft.selectApp(row) }
+                    })) {
                         ForEach(model.appRows) { r in Text(r.name).tag(r.id) }
                     }
                     Toggle(L10n.t(.exceptOwners), isOn: $draft.appExceptOwners)
@@ -191,7 +188,12 @@ struct RuleEditor: View {
                 }
             }
             HStack {
-                if let err = draft.validationError() { Text(L10n.t(err)).font(.caption).foregroundStyle(.red) }
+                if let err = draft.validationError() {
+                    Text(L10n.t(err)).font(.caption).foregroundStyle(.red)
+                } else if let err = connection.lastActionError {
+                    // The daemon refused the save; the sheet stays open with the edits.
+                    Text(err).font(.caption).foregroundStyle(.red)
+                }
                 Spacer()
                 Button(L10n.t(.cancel)) { done(nil) }
                 Button(L10n.t(.save)) { done(draft.build()) }
@@ -202,5 +204,7 @@ struct RuleEditor: View {
         .formStyle(.grouped)
         .frame(minWidth: 520, minHeight: 520)
         .padding()
+        // Only this sheet's saves are shown in it.
+        .onAppear { connection.lastActionError = nil }
     }
 }

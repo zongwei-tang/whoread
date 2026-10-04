@@ -37,7 +37,9 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
     private var readerDone: DispatchGroup?
 
     public static func eventNames(readdir: Bool) -> [String] {
-        ["open", "close", "exec", "fork", "exit", "rename", "clone", "copyfile", "link", "unlink", "truncate", "exchangedata"]
+        // "create": symlink, mkdir and mknod have no open (the parser skips regular-file creates).
+        ["open", "close", "exec", "fork", "exit", "rename", "clone", "copyfile", "link", "unlink", "truncate", "exchangedata",
+         "create"]
             + (readdir ? ["readdir"] : [])
     }
 

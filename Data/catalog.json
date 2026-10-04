@@ -695,7 +695,8 @@
         {
           "label": "git HTTP transport (Xcode)",
           "executables": [
-            "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-remote-http*"
+            "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-remote-http",
+            "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-remote-https"
           ],
           "platformBinary": true
         },

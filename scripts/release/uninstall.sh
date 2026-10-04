@@ -30,6 +30,17 @@ if [ -d "$APP" ]; then
     fi
   fi
 fi
+# Any WhoRead extension still active (the app was moved or deleted, or installed another one):
+# nothing here can deactivate it, so keep the kill switch, the app and the data.
+if extension_active '.whoread.extension'; then
+  if [ -d "$APP" ]; then
+    echo "A WhoRead system extension that $APP does not manage is still active; deactivate it from the app that installed it, then rerun." >&2
+  else
+    echo "The WhoRead system extension is still active but $APP is missing; put the app back in /Applications and rerun." >&2
+  fi
+  [ -e "$KILL_SWITCH" ] && echo "Enforcement stays off while $KILL_SWITCH exists (sudo rm it to undo)." >&2
+  exit 1
+fi
 
 if [ -f /Library/LaunchDaemons/com.whoread.daemon.plist ]; then
   sudo launchctl bootout system /Library/LaunchDaemons/com.whoread.daemon.plist 2>/dev/null || true

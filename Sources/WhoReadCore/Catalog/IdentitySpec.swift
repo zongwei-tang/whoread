@@ -54,6 +54,12 @@ public struct IdentitySpec: Codable, Hashable, Sendable {
     static let systemLocations = ["/System/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/bin/", "/sbin/",
                                   "/Library/Apple/", "/Library/Developer/CommandLineTools/"]
 
+    /// True for an executable in a root-owned system location. `/System/Volumes/Data/…` is the
+    /// writable data volume (`/Users`, `/private/tmp`…) under another spelling, not a system location.
+    static func isSystemLocation(_ path: String) -> Bool {
+        systemLocations.contains { path.hasPrefix($0) } && !PathNormalizer.fold(path).hasPrefix("/system/volumes/data/")
+    }
+
     public func matches(_ p: ProcessRecord) -> Bool {
         let executables = self.executables ?? [], bundles = self.bundles ?? []
         let signingIDs = self.signingIDs ?? [], teamIDs = self.teamIDs ?? [], cdhashes = self.cdhashes ?? []
@@ -89,8 +95,7 @@ public struct IdentitySpec: Codable, Hashable, Sendable {
         }
         if let platformBinary {
             if platformBinary != p.isPlatformBinary { return false }
-            if platformBinary && signingIDs.isEmpty
-                && !IdentitySpec.systemLocations.contains(where: { p.executablePath.hasPrefix($0) }) {
+            if platformBinary && signingIDs.isEmpty && !IdentitySpec.isSystemLocation(p.executablePath) {
                 return false
             }
         }

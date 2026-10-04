@@ -169,6 +169,9 @@ public final class EsloggerParser: @unchecked Sendable {
             return file(.readdir, OperationSemantics.readdir(t))
         case "create":
             guard let dst = EsloggerParser.destination(body) else { return .malformed("create without destination") }
+            // Recorded for what no open records (symlink, mkdir, mknod): a new regular file comes with
+            // a creating open, which is already an event.
+            if EsloggerParser.createsRegularFile(body) { return .ignored("create of a regular file") }
             return file(.create, OperationSemantics.create(dst))
         case "exec":
             guard let targetObject = body["target"] as? [String: Any], var target = EsloggerParser.process(targetObject) else {
@@ -200,6 +203,13 @@ public final class EsloggerParser: @unchecked Sendable {
             return J.newPath(dir: dir, name: name)
         }
         return nil
+    }
+
+    /// A create whose `destination.existing_file.stat.st_mode` says regular file. Unknown → false.
+    static func createsRegularFile(_ body: [String: Any]) -> Bool {
+        let existing = (body["destination"] as? [String: Any])?["existing_file"] as? [String: Any]
+        guard let mode = J.int((existing?["stat"] as? [String: Any])?["st_mode"]) else { return false }
+        return UInt32(truncatingIfNeeded: mode) & 0o170000 == 0o100000
     }
 
     static func process(_ o: [String: Any]) -> ProcessRecord? {

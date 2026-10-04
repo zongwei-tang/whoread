@@ -3,8 +3,10 @@ import Foundation
 /// Processes WhoRead never denies, regardless of rules. Hard-coded on purpose: a corrupted or
 /// malicious rule file must not be able to wedge the login session or the update machinery.
 ///
-/// Matching is by executable name *and* the platform-binary flag, which the kernel only sets for
-/// Apple-signed system binaries, so a third-party binary named `launchd` does not qualify.
+/// Matching is by executable name, the platform-binary flag (which the kernel only sets for
+/// Apple-signed system binaries, so a third-party binary named `launchd` does not qualify) *and* a
+/// root-owned system location: a copied Apple binary keeps its platform flag, so `cp /bin/cat
+/// /tmp/launchd` (or `~/mds_x`) must not escape every rule.
 public struct NeverBlockList: Sendable {
     public static let exactNames: Set<String> = [
         "launchd",
@@ -50,7 +52,7 @@ public struct NeverBlockList: Sendable {
                 return true
             }
         }
-        guard p.isPlatformBinary else { return false }
+        guard p.isPlatformBinary, IdentitySpec.isSystemLocation(p.executablePath) else { return false }
         let name = p.name
         if NeverBlockList.exactNames.contains(name) { return true }
         return NeverBlockList.namePrefixes.contains { name.hasPrefix($0) }

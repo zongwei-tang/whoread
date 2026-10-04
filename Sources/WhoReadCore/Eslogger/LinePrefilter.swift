@@ -6,8 +6,11 @@ import Foundation
 /// would dominate CPU; instead one Aho–Corasick pass over the raw bytes decides whether a line
 /// can possibly matter:
 /// - process lifecycle (`"exec":`, `"fork":`, `"exit":`) → always parse (the process tree needs them)
-/// - rename/clone/copyfile/link/exchangedata/create → always parse (split dir+name destinations;
+/// - rename/clone/copyfile/link/exchangedata → always parse (split dir+name destinations;
 ///   parents of sensitive dirs may be moved)
+/// - create → parse with a `new_path` (split dir+name) destination; an `existing_file` one carries
+///   the full path, so it goes through the prefix test like an open (every file creation on the
+///   system is a create event)
 /// - `close` with `"modified":false` → drop
 /// - any JSON string starting with a monitored prefix, plain or under `/System/Volumes/Data`
 ///   (ASCII case-insensitive, `/` or `\/` escaped) → parse
@@ -24,6 +27,8 @@ public final class LinePrefilter: @unchecked Sendable {
         case notModified = 4
         case prefix = 5
         case escape = 6
+        case create = 7
+        case newPath = 8
     }
 
     private var automaton: AhoCorasick
@@ -65,9 +70,11 @@ public final class LinePrefilter: @unchecked Sendable {
             if !bytes.isEmpty { patterns.append((bytes, tag.rawValue)) }
         }
         for key in ["\"exec\":", "\"fork\":", "\"exit\":"] { add(key, .lifecycle) }
-        for key in ["\"rename\":", "\"clone\":", "\"copyfile\":", "\"link\":", "\"exchangedata\":", "\"create\":"] {
+        for key in ["\"rename\":", "\"clone\":", "\"copyfile\":", "\"link\":", "\"exchangedata\":"] {
             add(key, .multiPath)
         }
+        add("\"create\":", .create)
+        add("\"new_path\":", .newPath)
         add("\"close\":", .close)
         add("\"modified\":false", .notModified)
         add("\"modified\": false", .notModified)
@@ -98,14 +105,15 @@ public final class LinePrefilter: @unchecked Sendable {
     static func lower(_ b: UInt8) -> UInt8 { (b >= 0x41 && b <= 0x5A) ? b + 0x20 : b }
 
     public func verdict(_ line: UnsafeRawBufferPointer) -> Verdict {
-        var seen: UInt8 = 0 // bitmask of tags
+        var seen: UInt16 = 0 // bitmask of tags
         automaton.scan(line, transform: LinePrefilter.lower) { tag in
-            seen |= 1 << tag
+            seen |= UInt16(1) << tag
             // Lifecycle / multi-path lines are decided immediately.
             return tag == Tag.lifecycle.rawValue || tag == Tag.multiPath.rawValue
         }
         func has(_ t: Tag) -> Bool { seen & (1 << t.rawValue) != 0 }
         if has(.lifecycle) || has(.multiPath) { return .parse }
+        if has(.create) && has(.newPath) { return .parse }
         if has(.close) && has(.notModified) { return .drop }
         if has(.prefix) || has(.escape) || parseAllFileEvents { return .parse }
         return .drop

@@ -90,6 +90,8 @@ public final class RuleEngine: @unchecked Sendable {
     struct CompiledRule {
         var rule: Rule
         var prefixKeys: [String]
+        /// `prefixKeys` with a trailing "/" (computed once: this runs for every rule on the AUTH path).
+        var prefixKeysSlash: [String]
         var exceptionPrefixKeys: [[String]]
         /// Folded, normalized program path for `.unsigned` subjects (computed once, not per event).
         var unsignedKey: String?
@@ -104,17 +106,32 @@ public final class RuleEngine: @unchecked Sendable {
     }
 
     static func compile(_ rule: Rule, _ classifier: PathClassifier) -> CompiledRule {
-        func keys(_ prefix: String?) -> [String] {
+        /// Endpoint Security reports resolved paths: a prefix reached through a link the classifier
+        /// followed (`~/secret -> ~/Dropbox/secret`) also matches the link's target. A deny or alert
+        /// rule's own target also takes the links found inside it; an exception's path does not (a link
+        /// added inside an approved folder must not carry the approval to another file). An allow rule
+        /// takes no link targets at all: links are re-pointed by whoever owns the files (an agent turning
+        /// `~/.aws/credentials` into a link to `~/.ssh/id_ed25519` must not silence that key's alerts).
+        func keys(_ prefix: String?, links: Bool, linksBelow: Bool) -> [String] {
             guard let prefix else { return [] }
-            return classifier.normalizer.expand(prefix).map { PathClassifier.stripTrailingSlash(PathNormalizer.fold($0)) }
+            var out: [String] = []
+            for expanded in classifier.normalizer.expand(prefix) {
+                let aliases = links ? classifier.linkAliases(of: expanded, includingLinksBelow: linksBelow) : []
+                for p in [expanded] + aliases {
+                    let key = PathClassifier.stripTrailingSlash(PathNormalizer.fold(p))
+                    if !out.contains(key) { out.append(key) }
+                }
+            }
+            return out
         }
         func unsignedKey(_ s: RuleSubject) -> String? {
             if case .unsigned(let path, _) = s { return PathNormalizer.fold(classifier.normalizer.normalize(path)) }
             return nil
         }
         var prefixKeys: [String] = []
-        if case .pathPrefix(let p) = rule.target { prefixKeys = keys(p) }
-        return CompiledRule(rule: rule, prefixKeys: prefixKeys, exceptionPrefixKeys: rule.exceptions.map { keys($0.pathPrefix) },
+        if case .pathPrefix(let p) = rule.target { prefixKeys = keys(p, links: rule.action != .allow, linksBelow: true) }
+        return CompiledRule(rule: rule, prefixKeys: prefixKeys, prefixKeysSlash: prefixKeys.map { $0 + "/" },
+                            exceptionPrefixKeys: rule.exceptions.map { keys($0.pathPrefix, links: true, linksBelow: false) },
                             unsignedKey: unsignedKey(rule.subject), exceptionUnsignedKeys: rule.exceptions.map { unsignedKey($0.subject) })
     }
 
@@ -191,7 +208,7 @@ public final class RuleEngine: @unchecked Sendable {
 
         /// `unsignedKey` is the precompiled program path of an `.unsigned` subject. For deny rules a
         /// pinned cdhash also matches the same code at any other path (copying the binary is not a
-        /// way around a block).
+        /// way around a block), and a responsible agent also matches wherever it is in the chain.
         func subjectMatches(_ subject: RuleSubject, category: String, unsignedKey: String? = nil, widenForDeny: Bool = false) -> Bool {
             switch subject {
             case .signed(let sid, let team):
@@ -202,6 +219,24 @@ public final class RuleEngine: @unchecked Sendable {
                 if let cdhash { return processCdhash == cdhash.lowercased() }
                 return true
             case .responsible(let key, let team, let cdhash, let exceptOwners):
+                if widenForDeny {
+                    // "Block from now on" for an unsigned binary (a cdhash pin, no team): the same code
+                    // copied to another path, or run as the leaf of a chain charged to someone else.
+                    if team == nil, let pin = cdhash?.lowercased() {
+                        let r = responsible()
+                        if (r?.kind == .binary && r?.cdhash?.lowercased() == pin) || processCdhash == pin {
+                            return !(exceptOwners && isOwner(category))
+                        }
+                    }
+                    // For an agent: attribution picks the nearest .app first, so a leaf inside any bundle
+                    // (`mkdir X.app; cp /bin/cat X.app/`) would otherwise be charged to that bundle.
+                    if cdhash == nil, key.hasPrefix("agent:") {
+                        let id = String(key.dropFirst("agent:".count))
+                        if chain.contains(where: { $0.agentID == id && (team == nil || $0.image.teamID == team) }) {
+                            return !(exceptOwners && isOwner(category))
+                        }
+                    }
+                }
                 guard let r = responsible(), r.key == key else { return false }
                 if let team, r.teamID != team { return false }
                 if let cdhash, r.cdhash?.lowercased() != cdhash.lowercased() { return false }
@@ -215,15 +250,14 @@ public final class RuleEngine: @unchecked Sendable {
             }
         }
 
-        func targetMatches(_ c: CompiledRule, _ target: EvaluationTarget, _ category: TargetCategory) -> Bool {
+        func targetMatches(_ c: CompiledRule, _ key: String, _ keySlash: String, _ category: TargetCategory) -> Bool {
             switch c.rule.target {
             case .category(let id): return id == category.id
             case .severityAtLeast(let s): return category.severity >= s
             case .pathPrefix:
-                let key = PathNormalizer.fold(target.path)
-                return c.prefixKeys.contains { prefix in
+                return c.prefixKeys.indices.contains { i in
                     // Inside the prefix, or an ancestor directory of it (rename/clone of a parent).
-                    key == prefix || key.hasPrefix(prefix + "/") || prefix.hasPrefix(key + "/")
+                    key == c.prefixKeys[i] || key.hasPrefix(c.prefixKeysSlash[i]) || c.prefixKeys[i].hasPrefix(keySlash)
                 }
             }
         }
@@ -239,9 +273,10 @@ public final class RuleEngine: @unchecked Sendable {
 
         for target in sensitive {
             let pathKey = PathNormalizer.fold(target.path)
+            let pathKeySlash = pathKey + "/"
             for category in target.categories {
                 for (ri, c) in compiled.enumerated() where c.rule.isLive(at: now) {
-                    guard targetMatches(c, target, category) else { continue }
+                    guard targetMatches(c, pathKey, pathKeySlash, category) else { continue }
                     let requested = c.rule.access.intersect(target.access)
                     anyCovering = true
                     if c.rule.subject.isChainDependent || c.rule.isTimeDependent || c.rule.hasChainDependentExceptions {

@@ -27,7 +27,7 @@ public struct SystemNotice: Equatable, Sendable {
 }
 
 /// Decides which alerts deserve a notification: new ones, and ones that escalated (e.g. a
-/// first-access alert that later got blocked). Merged repeats never re-notify.
+/// first-access alert that later got blocked, or a write after reads). Merged repeats never re-notify.
 ///
 /// The alert's status does not matter: an agent running as the user could mark its own alert
 /// read or ignored before the next poll.
@@ -35,6 +35,9 @@ public final class NotificationPlanner: @unchecked Sendable {
     private struct Seen {
         var createdAt: Date
         var kind: AlertKind
+        /// The coalescer moves it on every escalation (also a new access kind at the same level),
+        /// never on a merged repeat.
+        var firstEventID: Int64
     }
 
     private var notified: [Int64: Seen] = [:]
@@ -54,10 +57,15 @@ public final class NotificationPlanner: @unchecked Sendable {
         }
     }
 
-    /// `launchedAt`: alerts last updated before this are not notified on the first plan.
-    public init(launchedAt: Date = Date()) {
+    /// `launchedAt`: alerts created before this are not notified on the first plan.
+    /// `notifiedTrip`: the latency trip already reported, kept by the app across launches.
+    public init(launchedAt: Date = Date(), notifiedTrip: String? = nil) {
         self.launchedAt = launchedAt
+        self.lastTripReason = notifiedTrip
     }
+
+    /// The latency trip last reported (nil once a status showed none), for the app to keep.
+    public var notifiedTrip: String? { lastTripReason }
 
     /// The first plan only records alerts from before launch (no burst of old notifications);
     /// alerts raised since launch notify even if the daemon was unreachable until now.
@@ -67,18 +75,19 @@ public final class NotificationPlanner: @unchecked Sendable {
         for a in alerts.sorted(by: { $0.updatedAt < $1.updatedAt }) {
             // Same id, different creation time: the daemon reused the id (its alert table was
             // emptied by retention and it restarted). That is a new alert.
-            let previous = notified[a.id].flatMap { abs($0.createdAt.timeIntervalSince(a.createdAt)) < 1 ? $0.kind : nil }
+            let previous = notified[a.id].flatMap { abs($0.createdAt.timeIntervalSince(a.createdAt)) < 1 ? $0 : nil }
             let isNew = previous == nil
-            let escalated = previous.map { a.kind.priority > $0.priority } ?? false
-            let kind = previous.map { $0.priority >= a.kind.priority ? $0 : a.kind } ?? a.kind
-            notified[a.id] = Seen(createdAt: a.createdAt, kind: kind)
-            guard isNew || escalated, seeded || a.updatedAt >= launchedAt else { continue }
+            let escalated = previous.map { a.kind.priority > $0.kind.priority || a.firstEventID != $0.firstEventID } ?? false
+            let kind = previous.map { $0.kind.priority >= a.kind.priority ? $0.kind : a.kind } ?? a.kind
+            notified[a.id] = Seen(createdAt: a.createdAt, kind: kind, firstEventID: a.firstEventID)
+            // Not updatedAt: repeats merged since launch move it on alerts notified before.
+            guard isNew || escalated, seeded || a.createdAt >= launchedAt else { continue }
             guard settings.enabled else { continue }
             guard a.severity >= settings.minimumSeverity || a.kind == .blocked else { continue }
             if a.kind == .wouldBlock && !settings.notifyWouldBlock { continue }
             let title = a.kind == .blocked ? L10n.t(.notifBlockedTitle, formatter.language) : L10n.t(.notifTitle, formatter.language)
             out.append(PlannedNotification(
-                identifier: "alert-\(a.id)-\(Int(a.createdAt.timeIntervalSince1970))-\(a.kind.rawValue)", alertID: a.id, title: title,
+                identifier: "alert-\(a.id)-\(Int(a.createdAt.timeIntervalSince1970))-\(a.kind.rawValue)-\(a.firstEventID)", alertID: a.id, title: title,
                 body: formatter.headline(a) + "\n" + formatter.chainLine(a.chain),
                 categoryIdentifier: NotificationPlanner.category(for: a.kind), threadIdentifier: a.categoryID,
                 actions: a.availableActions))
@@ -86,8 +95,9 @@ public final class NotificationPlanner: @unchecked Sendable {
         return out
     }
 
-    /// Brief §5: when the latency monitor switches enforcement off, tell the user (once per trip).
-    /// Posted whatever the notification settings say: blocking silently stopped.
+    /// Brief §5: when the latency monitor switches enforcement off, tell the user (once per trip;
+    /// the daemon keeps reporting a past trip until enforcement is turned on again). Posted whatever
+    /// the notification settings say: blocking silently stopped.
     public func plan(status: DaemonStatus, language: Language) -> [SystemNotice] {
         defer { lastTripReason = status.latencyTripReason }
         guard let trip = status.latencyTripReason, trip != lastTripReason else { return [] }
@@ -218,12 +228,14 @@ public struct RuleDraft: Equatable, Sendable {
         name = ""
     }
 
-    /// Picking another app drops the previous app's identity pins (team ID, cdhash).
-    public mutating func selectApp(_ key: String) {
-        guard key != appKey else { return }
-        appKey = key
-        appTeamID = ""
-        appCdhash = ""
+    /// Picking an app pins the identity it was last seen with, as "block from now on" does: its
+    /// Team ID, or the cdhash of an unsigned binary (brief §5: path + cdhash). Unpinned, a rule on
+    /// `bin:<path>` would match whatever binary is later written to that path.
+    public mutating func selectApp(_ row: AppRow) {
+        guard row.id != appKey else { return }
+        appKey = row.id
+        appTeamID = row.teamID ?? ""
+        appCdhash = (row.kind == .binary && row.teamID == nil ? row.cdhash : nil) ?? ""
     }
 
     public mutating func setAgent(_ id: String, selected: Bool) {
@@ -278,5 +290,20 @@ public struct RuleDraft: Equatable, Sendable {
                     includePlatformBinaries: includePlatformBinaries, expiresAt: edited?.expiresAt,
                     remainingUses: edited?.remainingUses, createdAt: edited?.createdAt ?? now, template: original?.template,
                     exceptions: exceptions)
+    }
+}
+
+extension Rule {
+    /// This rule as edited in the app, with what the daemon changes on its own taken from its
+    /// current copy: exceptions (a used "allow once", an "always allow" from a banner), use count
+    /// and expiry. The editor shows none of them, and the app's copy can be up to 10 s old.
+    /// Without a current copy (a new rule) it is saved as built.
+    public func keepingDaemonState(of current: Rule?) -> Rule {
+        guard let current else { return self }
+        var r = self
+        r.exceptions = current.exceptions
+        r.remainingUses = current.remainingUses
+        r.expiresAt = current.expiresAt
+        return r
     }
 }

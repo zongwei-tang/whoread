@@ -4,7 +4,8 @@
 # Signing: set DEVELOPMENT_TEAM and BUNDLE_ID_PREFIX in Xcode/Local.xcconfig (not committed),
 # see Xcode/Local.xcconfig.example. Without a team, scripts/build.sh signs every target ad hoc
 # and with no entitlements: the app runs against the dev daemon but cannot install the system
-# extension, and the extension itself cannot run on a normal Mac.
+# extension, and the extension itself cannot run on a normal Mac. A team without the Endpoint
+# Security capability yet builds with WHOREAD_NO_ES=1 (team-signed, no entitlements, same limits).
 name: WhoRead
 minimumXcodeGenVersion: 2.40.0
 configFiles:

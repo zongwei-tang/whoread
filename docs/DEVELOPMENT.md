@@ -30,6 +30,11 @@ Products land in `build/DerivedData/Build/Products/Debug/`; the app embeds the C
 entitlements (restricted ones need a provisioning profile, so the binaries would not launch).
 Such an app runs against the dev daemon but cannot install the system extension.
 
+With a team, `whoreadd` and the embedded extension claim the Endpoint Security entitlement, so
+automatic signing fails until Apple has granted that capability to the team (requested at M6,
+DISTRIBUTION.md §2). Until then build with `WHOREAD_NO_ES=1 scripts/build.sh`: every target is
+team-signed without entitlements, with the same limits as the no-team build.
+
 Regenerating data and fixtures:
 ```bash
 python3 scripts/dev/gen_catalog.py    # Data/catalog.json, agents.json, benign.json
@@ -80,7 +85,8 @@ headlines and process chains of every user. Remove with
 `sudo scripts/uninstall-dev-daemon.sh [--purge]`.
 
 `install-dev-daemon.sh` refuses to run while the WhoRead system extension is active: only one
-daemon may use `/Library/Application Support/WhoRead`.
+daemon may use `/Library/Application Support/WhoRead`. For the same reason
+`uninstall-dev-daemon.sh --purge` removes nothing while the extension is active.
 
 If eslogger reports NOT_PERMITTED although whoreadd has FDA, also add `/usr/bin/eslogger` to Full
 Disk Access. Which process TCC treats as responsible for a LaunchDaemon's child is unverified
@@ -93,7 +99,7 @@ read) only when the daemon recognises its code signature. The dev daemon does th
 given both requirements, and a client requirement also rejects the ad-hoc `swift build` CLI, so
 install the team-signed products of the same Xcode build:
 ```bash
-scripts/build.sh                      # needs DEVELOPMENT_TEAM in Xcode/Local.xcconfig
+WHOREAD_NO_ES=1 scripts/build.sh      # needs DEVELOPMENT_TEAM in Xcode/Local.xcconfig
 P="$PWD/build/DerivedData/Build/Products/Debug"
 TEAM=ABCDE12345 PREFIX=com.yourname   # the values from Xcode/Local.xcconfig
 sudo WHOREAD_BIN="$P" \
@@ -104,6 +110,8 @@ open "$P/WhoRead.app"
 ```
 - The script checks that `$P/whoread` satisfies the client requirement and refuses
   `WHOREAD_APP_REQUIREMENT` without `WHOREAD_CLIENT_REQUIREMENT` (it would have no effect).
+- `WHOREAD_NO_ES=1` is needed until the team has the Endpoint Security capability (see "Build and
+  test"); the app does not need the extension for M3.
 - It re-signs `whoreadd` ad hoc without entitlements for the eslogger source (the ES
   entitlement of the Xcode build needs a provisioning profile). Full Disk Access is probably tied
   to that signature (UNVERIFIED): if eslogger reports NOT_PERMITTED after a reinstall, grant it
@@ -149,7 +157,9 @@ open "$P/WhoRead.app"
    ```bash
    scripts/vm/acceptance-m5.sh [--stop-test]
    ```
-   Record the latencies and the pending-AUTH behaviour in docs/STATUS.md.
+   Record the latencies and the pending-AUTH behaviour in docs/STATUS.md. The SIGKILL step leaves
+   enforcement off on purpose (the daemon died while enforcing); `whoread enforcement on` turns
+   it back on.
 
 ## System extension in development (manual)
 

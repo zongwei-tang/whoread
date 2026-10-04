@@ -37,4 +37,75 @@ seen=""
 for _ in $(seq 20); do W status | grep "kill switch:" | grep -q "PRESENT" && { seen=1; break; }; sleep 0.1; done
 W status | grep "kill switch:"
 [ -n "$seen" ] || { echo "FAIL: the daemon did not observe the kill-switch file" >&2; cat "$TMP/daemon.log" >&2; exit 1; }
+fail() { echo "FAIL: $*" >&2; cat "$TMP/daemon.log" >&2; exit 1; }
+
+echo "== settings set language (zh means zh-Hans; an unknown value is refused, not 'system')"
+W settings set language zh | grep -q '"zh-Hans"' || fail "language zh was not stored as zh-Hans"
+if W settings set language english 2>/dev/null; then fail "language english was accepted"; fi
+W settings | grep -q '"zh-Hans"' || fail "a refused language value changed the setting"
+
+echo "== catalog add-path refuses a home or a folder above one (or the whole disk), however spelled"
+for p in /Users/alice /Users/alice/ /users/ALICE /Users /System/Volumes/Data/Users/alice /System/Volumes/Data/; do
+  if W catalog add-path custom "$p" 2>/dev/null; then fail "add-path $p was accepted"; fi
+done
+W catalog add-path custom "/Users/alice/Tax Docs"
+# Unquoted, the path is two words: refused instead of adding /Users/alice/Tax.
+if W catalog add-path custom /Users/alice/Tax Docs 2>/dev/null; then fail "a stray positional was ignored"; fi
+W catalog export --output "$TMP/catalog.json" && W catalog import "$TMP/catalog.json"
+if command -v python3 >/dev/null; then
+  python3 - "$TMP/catalog.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+next(x for x in c["categories"] if x["id"] == "custom")["paths"].append("/Users/alice")
+json.dump(c, open(sys.argv[1], "w"))
+PY
+  if W catalog import "$TMP/catalog.json" 2>/dev/null; then fail "import of a catalog that monitors a whole home was accepted"; fi
+fi
+
+if command -v python3 >/dev/null; then
+  echo "== export pages past undecodable rows"
+  # Copies of the fixture's rows past the 5000-event export page, then one undecodable body
+  # inside the first page and more than a whole page of them later on.
+  expected=$(python3 - "$TMP/data/whoread.sqlite" <<'PY'
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1], timeout=10)
+cols = [r[1] for r in db.execute("PRAGMA table_info(events)")]
+rows = db.execute("SELECT * FROM events ORDER BY id").fetchall()
+body, first = cols.index("body"), max(r[0] for r in rows) + 1
+copies = []
+for i in range(13000):
+    r = list(rows[i % len(rows)])
+    r[0] = first + i
+    b = json.loads(r[body]); b["id"] = r[0]; r[body] = json.dumps(b).encode()
+    copies.append(r)
+db.executemany("INSERT INTO events(%s) VALUES(%s)" % (",".join(cols), ",".join("?" * len(cols))), copies)
+db.execute("UPDATE events SET body = X'7b7d' WHERE id = ? OR id BETWEEN ? AND ?", (first + 100, first + 6000, first + 11999))
+db.commit()
+print(db.execute("SELECT COUNT(*) FROM events WHERE benign = 0 AND body != X'7b7d'").fetchone()[0])
+PY
+)
+  got=$(W export --format jsonl 2> "$TMP/export.err" | wc -l | tr -d ' ')
+  cat "$TMP/export.err"
+  [ "$got" = "$expected" ] || fail "export wrote $got of $expected decodable events"
+  grep -q "could not decode" "$TMP/export.err" || fail "export did not report the undecodable rows"
+fi
+
+echo "== no daemon vs. a refusal the daemon answered"
+rc=0; "$BIN/whoread" --socket "$TMP/missing.sock" status 2> "$TMP/err" || rc=$?
+cat "$TMP/err"
+[ "$rc" = 69 ] && grep -q "cannot reach" "$TMP/err" || fail "no daemon: rc $rc"
+kill "$DPID"; wait "$DPID" 2>/dev/null || true
+# Without --permissive a non-root peer is refused, and the suggested sudo command must paste back
+# as the same arguments.
+"$BIN/whoreadd" run --source eslogger --eslogger "$TMP/eslogger" --data-dir "$TMP/strict" --defaults "$ROOT/Data" \
+  --home /Users/alice --dev-socket "$TMP/s2.sock" --kill-switch "$TMP/strict/disable-enforcement" --no-seed \
+  2>> "$TMP/daemon.log" &
+DPID=$!
+for _ in $(seq 50); do [ -S "$TMP/s2.sock" ] && break; sleep 0.1; done
+rc=0; "$BIN/whoread" --socket "$TMP/s2.sock" catalog add-path custom "/Users/alice/Tax Docs" 2> "$TMP/err" || rc=$?
+cat "$TMP/err"
+[ "$rc" = 77 ] && ! grep -q "cannot reach" "$TMP/err" || fail "non-root catalog change: rc $rc"
+grep -qF "sudo whoread --socket $TMP/s2.sock catalog add-path custom '/Users/alice/Tax Docs'" "$TMP/err" \
+  || fail "the sudo hint lost the quoting"
+
 echo "== daemon log"; cat "$TMP/daemon.log"

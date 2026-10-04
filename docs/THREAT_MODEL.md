@@ -11,6 +11,8 @@ facts behind it are cited in [`RESEARCH.md`](RESEARCH.md).
 - **rename, clone, copyfile, link, unlink, truncate, exchangedata** (and readdir if enabled) whose
   source or destination is monitored. Endpoint Security delivers a multi-path event if *any* of
   its paths is selected.
+- **New symlinks, directories and device nodes** created inside a monitored directory (e.g.
+  `ln -s … ~/.ssh/authorized_keys`). New regular files are recorded through their creating open.
 - **Directory listings** only when readdir is enabled (off by default). Opening a directory only
   lists it, so it counts as readdir, not as a read of the category.
 - **Moves or clones of a parent directory** of a monitored prefix, e.g. `mv ~/.config /tmp/x`.
@@ -20,6 +22,10 @@ facts behind it are cited in [`RESEARCH.md`](RESEARCH.md).
   files and is recorded in the project-secrets category.
 - **The process**: pid, executable, signing ID, team ID, cdhash, platform-binary flag, argv
   (redacted), its full parent chain, and the attributed responsible app or AI agent.
+- **Links.** A file reached through a symlink is judged at least as strictly as its real location
+  (a link only adds severity, it never changes a file's category for the better). Links from
+  prefixes in a home or under `/Volumes` are followed only to targets that are also in a home or
+  under `/Volumes`: a dotfile linked into `/nix/store` or `/opt` is not monitored at its target.
 
 ## What WhoRead does not see
 
@@ -32,10 +38,10 @@ facts behind it are cited in [`RESEARCH.md`](RESEARCH.md).
 | **Content leaving after a legitimate read** | Out of scope (no network monitoring in v1). | `ssh` reading your key and sending it to a host you typed is "owner behaviour". |
 | **Indirect access through a long-running helper** | Attribution follows the process tree. | If an agent asks an already running process (an editor extension host, a database server, an `ssh-agent`) to read a file, the access is charged to that process, not to the agent. |
 | **Processes detached from their ancestry** | `open -a`, `launchctl submit` or XPC services are started by launchd, not by the requester. | Such processes have no agent in their chain, so agent-chain rules do not apply to them. Their *own* identity rules (signing ID, non-owner) still apply. |
-| **Volumes and paths you did not configure** | The catalog decides what is monitored. | Edit the catalog (Settings → Monitored paths, or `sudo whoread catalog add-path`) or add a custom category. A path rule on an unmonitored path adds that path to the Custom category automatically. |
+| **Volumes and paths you did not configure** | The catalog decides what is monitored. | Edit the catalog (Settings → Monitored paths, or `sudo whoread catalog add-path`) or add a custom category. A path rule on an unmonitored path adds that path to the Custom category automatically; without sudo or the app this only works for paths that really resolve (symlinks followed) inside your home or under `/Volumes`. A catalog edit that would stop monitoring an enabled path rule, or add a whole disk, home or folder of homes, is refused. A path rule placed *above* monitored prefixes (a rule on `~/Documents` while only `~/Documents/secret` is monitored) only filters what is monitored below it. |
 | **iTerm2 session logs** | They go to a folder you choose per profile (Profiles → Session → Automatically log). | Add that folder as a custom path. The catalog only covers iTerm2's saved window state. |
 | **Changes made only through a writable memory mapping** | The close event's `modified` flag is not set for writes through `mmap`. | The open with write intent (`FWRITE`) is still recorded. |
-| **Events the kernel dropped** | Under heavy load ES can drop NOTIFY events (eslogger reports sequence gaps). | `whoread status` shows the drop count. AUTH events are never dropped: the kernel waits for an answer. |
+| **Events the kernel dropped** | Under heavy load ES can drop NOTIFY events (eslogger reports sequence gaps). AUTH messages dropped from a full client queue are *allowed* in the default mode WhoRead uses. | `whoread status` shows the kernel drop count (eslogger and native, from sequence gaps) and the native analysis-queue drops. Under a flood, enforcement therefore has a gap that nothing records; the fail-closed queue mode needs macOS 27 and is not used yet. |
 
 ## Attackers WhoRead does not stop
 
@@ -44,6 +50,11 @@ facts behind it are cited in [`RESEARCH.md`](RESEARCH.md).
   form is harder to stop than a LaunchDaemon, but it is not a security boundary against root.
 - **Code running as you can read what you can read** unless an enforcing rule blocks it. Monitor
   mode only reports.
+- **Load can switch enforcement off.** A process running as you can flood monitored files with
+  opens until AUTH answers get slow. A missed deadline (the kernel kills the client), or a p99 over
+  the threshold that persists, turns enforcement off by design (fail-open), and it stays off until
+  you turn it on again. The alert for the trip tells you it happened; it is not a password-protected
+  switch.
 - **Weak owner identities.** An owner is a process expected to read a category (ssh for SSH keys).
   Owners raise no alert on their own, so how they are recognised matters:
   - Apple platform binaries: location *and* the kernel's platform flag, and the location must be
@@ -112,8 +123,10 @@ AI agents run as you, so WhoRead must not let them switch it off:
 ## Enforcement safety
 
 - **Fail-open.** Internal errors and unknown events are allowed. If the stored rules cannot be
-  read, enforcement stays off and the rules are not overwritten with the templates (only root or
-  the app may replace them). If the daemon hangs past an AUTH deadline, macOS kills the client
+  read, enforcement stays off and single-rule changes are refused for everyone (one would rewrite
+  the table from an empty list). Only an explicit replacement by root or the app
+  (`sudo whoread rules replace --json-file F --confirm`) overwrites them, and it first copies
+  every old row, readable or not, into the `rules_backup` table of `whoread.sqlite`. If the daemon hangs past an AUTH deadline, macOS kills the client
   and the pending operation is implicitly allowed. WhoRead runs in the default deadline mode;
   the macOS 27 fail-open mode is not used yet (RESEARCH.md).
 - **Death while enforcing leaves enforcement off.** While AUTH events are subscribed, a marker file
@@ -122,11 +135,13 @@ AI agents run as you, so WhoRead must not let them switch it off:
   fail-open by design.
 - **Decisions are made in memory on the ES callback** (classifier, process tree, rules). Logging
   and notifications happen afterwards on queues. No disk IO, no XPC, no UI on the callback path.
-- **Never blocked** (hard-coded, by name *and* platform flag): launchd, kernel_task,
+- **Never blocked** (hard-coded, by name, platform flag *and* root-owned location, so a renamed
+  copy of an Apple binary is not exempt): launchd, kernel_task,
   WindowServer, loginwindow, securityd, trustd, opendirectoryd, syspolicyd, tccd, the mds/mdworker
   family, backupd, installd, softwareupdated, endpointsecurityd, and the daemon itself.
-- **Platform binaries** are only blocked by rules that name them explicitly, rules that opt in,
-  or AI-agent-chain rules.
+- **Platform binaries** are exempt only from "anything that isn't an expected owner" rules that do
+  not opt in (`includePlatformBinaries`). Rules that name them, AI-agent-chain rules and app rules
+  (including "block from now on") cover everything the app runs, platform binaries included.
 - **Directory listings are never blocked**, even by a deny rule: they reveal names only, and
   blocking them breaks `ls`, Finder and shells. Creating a new file inside a protected directory
   is blocked (AUTH_CREATE), opening or moving one is blocked (AUTH_OPEN, rename, clone, link…).
@@ -137,12 +152,22 @@ AI agents run as you, so WhoRead must not let them switch it off:
 - **Exceptions are narrow.** "Allow once" covers the path, category and access kind that was
   blocked, and only chains with the same AI agents the alert showed; it expires after 10 minutes
   or one use. "Always allow" is scoped the same way minus the path. A used "allow once" stays used
-  across restarts. Unsigned binaries are pinned to their cdhash in these rules, and a deny on a
-  pinned cdhash follows the code to any path.
+  across clean restarts; after a crash or SIGKILL, a use from the last 30 seconds may come back
+  until the exception expires. Unsigned binaries are pinned to their cdhash in these rules; a deny
+  on a pinned cdhash follows the code to any path and into chains charged to another app. A "block
+  from now on" rule for an AI agent applies wherever that agent is in the chain. Path rules also
+  match the link targets the classifier followed (up to 8 per prefix); allow path rules never
+  follow links.
 - **Latency guard.** Every AUTH response time is recorded, from the event's own timestamp (so time
-  spent queued counts). A missed deadline, or p99 over the threshold (default 50 ms), turns
-  enforcement off automatically; the setting itself is switched off, so it stays off across
-  restarts until you turn it on again (`whoread enforcement on` or the UI switch).
+  spent queued counts). A missed deadline trips at once; p99 over the threshold (default 50 ms)
+  trips when it holds in 3 consecutive 1-second checks with slow responses in each (a burst that
+  ended does not count). Either turns enforcement off automatically, also when it happens while a
+  kill switch already had it off; the setting itself is switched off, so it stays off across
+  restarts until you turn it on again (`whoread enforcement on` or the UI switch). A sustained
+  flood by a process running as you can still trip it (see "Attackers WhoRead does not stop").
+- **Denial floods** are recorded from a bounded backlog: past 1,000 pending, identical repeats
+  (same process instance, operation, targets and rule) are merged; past 10,000 the rest are only
+  counted in `whoread status`. Every one of them is still denied.
 - **Three kill switches**, each effective at once:
   - `sudo whoread enforcement off`;
   - the UI switch, which falls back to an administrator prompt if the daemon refuses;

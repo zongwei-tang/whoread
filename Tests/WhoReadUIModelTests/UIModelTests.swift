@@ -329,7 +329,8 @@ final class AppModelTests: XCTestCase {
         old.updatedAt = launch.addingTimeInterval(-60)
         var recent = model.alerts[0]
         recent.id = 300
-        recent.updatedAt = launch.addingTimeInterval(5)
+        recent.createdAt = launch.addingTimeInterval(5)
+        recent.updatedAt = recent.createdAt
         // The daemon was unreachable at launch; its first answer has both.
         XCTAssertEqual(planner.plan([old, recent], settings: NotificationSettings(), formatter: model.formatter).map(\.alertID), [300])
     }
@@ -434,10 +435,14 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(built.createdAt, created)
         XCTAssertEqual(built.template, "x")
 
-        // Picking another app drops the old app's pins.
-        d.selectApp("app:/Applications/Zoom.app")
+        // Picking another app replaces the old app's pins with its own.
+        func row(_ key: String, team: String?) -> AppRow {
+            AppRow(id: key, name: key, kind: .app, categories: [], firstSeen: created, lastSeen: created, count: 1, denied: 0,
+                   teamID: team, cdhash: nil)
+        }
+        d.selectApp(row("app:/Applications/Zoom.app", team: nil))
         XCTAssertEqual(d.appTeamID, "ZOOMTEAM")
-        d.selectApp("app:/Applications/Slack.app")
+        d.selectApp(row("app:/Applications/Slack.app", team: nil))
         XCTAssertEqual(d.build().subject, .responsible(key: "app:/Applications/Slack.app", teamID: nil))
 
         // From a template: new id, template provenance, fresh creation time.
@@ -507,7 +512,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(c.category("ssh"))
         XCTAssertNotNil(c.category("custom"))
 
-        // "Also monitor this path" from the rule editor; recreates and enables `custom` if needed.
+        // Monitoring a single path; recreates and enables `custom` if needed.
         var noCustom = base
         noCustom.categories.removeAll { $0.id == "custom" }
         let monitored = noCustom.applying([.monitorPath("~/Documents/taxes/")])

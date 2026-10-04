@@ -11,8 +11,11 @@ public protocol EventSource: AnyObject, Sendable {
     /// Parser statistics, when the source parses eslogger JSON.
     var parserStats: EsloggerParser.Stats? { get }
     /// Events discarded before analysis because the source's backlog was full (native NOTIFY
-    /// backpressure). Denials are never dropped.
+    /// backpressure), plus denials not recorded on their own (merged into an identical queued one, or
+    /// past the denial backlog's limit). A denial is still denied.
     var droppedEvents: UInt64 { get }
+    /// Messages the kernel dropped for the source's ES clients (global_seq_num gaps), when known.
+    var kernelDroppedEvents: UInt64? { get }
     func start(sink: EventSink) throws
     func stop()
     /// Monitored prefixes (+ literal ancestors) changed. eslogger: rebuild the prefilter.
@@ -27,6 +30,7 @@ public protocol EventSource: AnyObject, Sendable {
 extension EventSource {
     public var parserStats: EsloggerParser.Stats? { nil }
     public var droppedEvents: UInt64 { 0 }
+    public var kernelDroppedEvents: UInt64? { parserStats?.droppedByKernel }
     public func enforcementChanged(active: Bool) {}
     public func policyChanged() {}
 }

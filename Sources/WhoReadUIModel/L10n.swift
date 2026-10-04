@@ -48,7 +48,7 @@ public enum L: String, CaseIterable, Sendable {
     case sourceCannotEnforceNote
     // Rule editor
     case ruleName, ruleSigningID, ruleTeamID, ruleNoTeamID, ruleProgramPath, ruleCdhash, ruleAgentsNote
-    case rulePathNotMonitored, ruleMonitorPath, ruleBlockAppFormat
+    case rulePathNotMonitored, ruleBlockAppFormat
     case ruleErrCategory, ruleErrPath, ruleErrSigningID, ruleErrTeamID, ruleErrProgramPath, ruleErrCdhash, ruleErrApp
     case tplBlockAgentsCritical, tplAlertAgentsHigh, tplDenyNonOwnerSSH
     // Catalog editing (Settings → Monitored paths)
@@ -257,8 +257,7 @@ public enum L10n {
         .ruleProgramPath: ("Program path", "程序路径"),
         .ruleCdhash: ("cdhash (optional, 40 hex digits)", "cdhash（可选，40 位十六进制）"),
         .ruleAgentsNote: ("None selected means any AI agent.", "不选表示任意 AI agent。"),
-        .rulePathNotMonitored: ("This path is not monitored, so the rule can never match.", "这个路径不在监控范围内，规则永远不会生效。"),
-        .ruleMonitorPath: ("Also monitor this path", "同时监控这个路径"),
+        .rulePathNotMonitored: ("This path is not monitored yet: saving the rule adds it to the Custom category.", "这个路径尚未被监控：保存规则时会把它加入「自定义」类别。"),
         .ruleBlockAppFormat: ("Block %@ from %@", "拦截 %@ 访问 %@"),
         .ruleErrCategory: ("Choose a category.", "请选择类别。"),
         .ruleErrPath: ("The path must start with / or ~/.", "路径必须以 / 或 ~/ 开头。"),

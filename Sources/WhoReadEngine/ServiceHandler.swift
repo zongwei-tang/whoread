@@ -9,7 +9,7 @@ import WhoReadIPC
 /// - reading and *strengthening* requests (enforcement on, new deny/alert rule, "block from now on",
 ///   unpause) are open to the console user;
 /// - *weakening* requests (enforcement off, pause, allow / exceptions, ignore / keep blocking / mark
-///   read — they silence alerts —, rule edits and deletes, settings, catalog, restart learning) need
+///   read — they silence alerts —, rule edits, deletes and replacement, settings, catalog, restart learning) need
 ///   root (`sudo whoread …`) or the signed WhoRead app. An AI agent running as the user can run
 ///   `whoread`, but can neither disable its own guard nor dismiss the alert about itself.
 public final class ServiceHandler: IPCHandler, @unchecked Sendable {
@@ -52,7 +52,7 @@ public final class ServiceHandler: IPCHandler, @unchecked Sendable {
             let exists = daemon.rules.rules.contains { $0.id == rule.id }
             return !exists && rule.enabled && (rule.action == .deny || rule.action == .alert) && rule.exceptions.isEmpty
                 ? .strengthen : .weaken
-        case .deleteRule, .updateSettings, .updateCatalog, .resetCatalog, .restartLearning:
+        case .deleteRule, .replaceRules, .updateSettings, .updateCatalog, .resetCatalog, .restartLearning:
             return .weaken
         }
     }
@@ -128,6 +128,9 @@ public final class ServiceHandler: IPCHandler, @unchecked Sendable {
             return .rules(d.rules.rules)
         case .deleteRule(let id):
             try d.deleteRule(id: id, peer: peer)
+            return .rules(d.rules.rules)
+        case .replaceRules(let list):
+            try d.replaceRules(list, peer: peer, privileged: isPrivileged(peer))
             return .rules(d.rules.rules)
         case .settings:
             return .settings(d.currentSettings)

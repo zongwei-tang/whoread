@@ -59,15 +59,20 @@ truth, generated once by `scripts/dev/gen_catalog.py`. The daemon:
 
 1. **Source.**
    - eslogger: every line first goes through an Aho–Corasick prefilter. It always passes
-     lifecycle and multi-path events (rename, clone, link, exchangedata, copyfile, create), drops
+     lifecycle and multi-path events (rename, clone, link, exchangedata, copyfile; a create when
+     it has a new-path destination or its existing file starts with a monitored prefix), drops
      unmodified closes, and passes lines in which a JSON string value starts with a monitored
      prefix (case-insensitive, `/` or `\/`, with or without `/System/Volumes/Data`) and lines
      with `\u` escapes. Then the JSON is parsed. Malformed lines still advance the kernel-drop
      sequence check, which restarts with each new eslogger.
    - Native: the kernel delivers only monitored-prefix events, thanks to inverted target-path
-     muting over every spelling of each prefix (catalog, on-disk/realpath, NFC and NFD). NOTIFY
-     events go to an analysis queue capped at 50,000; past that they are dropped and counted
-     (`whoread status`).
+     muting over every spelling of each prefix (catalog, on-disk/realpath, NFC and NFD). A realpath
+     spelling is registered only if it is not `/dev`, a home, or a folder containing a home or the
+     prefix, and no spelling containing a NUL is ever registered. NOTIFY events go to an analysis
+     queue capped at 50,000; past that they are dropped and counted (`whoread status`). Kernel
+     drops are counted from `global_seq_num` gaps. NOTIFY_CREATE records new symlinks, directories
+     and nodes (regular files come through their creating NOTIFY_OPEN). Denials are recorded from
+     a bounded backlog that merges identical repeats past 1,000 and only counts past 10,000.
 2. **Process events** update the `ProcessTree`. It is keyed by (pid, fork time), with images keyed
    by pidversion, which changes on exec. Children link to parents by node id, so reparenting to
    launchd and pid reuse do not break chains. Tombstones keep exited ancestors for late events.

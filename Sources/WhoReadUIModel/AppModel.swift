@@ -102,6 +102,9 @@ public struct AppRow: Identifiable, Hashable, Sendable {
     public var lastSeen: Date
     public var count: Int
     public var denied: Int
+    /// Identity as last seen, for rules on this app (`RuleDraft.selectApp`).
+    public var teamID: String?
+    public var cdhash: String?
 }
 
 public struct FileRow: Identifiable, Hashable, Sendable {
@@ -133,10 +136,11 @@ public struct MenuBarState: Equatable, Sendable {
 
     public static func make(status: DaemonStatus?, connected: Bool, language: Language) -> MenuBarState {
         guard connected, let s = status else {
-            // Brief §6 Error state: nothing is being recorded.
+            // Brief §6 Error state: nothing is being recorded, or (connected) nothing the daemon
+            // says can be read; the reason is shown next to it.
             return MenuBarState(symbol: "exclamationmark.triangle",
-                                title: L10n.t(.modeError, language) + " — " + L10n.t(.daemonUnreachable, language),
-                                unread: 0, connected: false)
+                                title: L10n.t(.modeError, language) + (connected ? "" : " — " + L10n.t(.daemonUnreachable, language)),
+                                unread: 0, connected: connected)
         }
         let symbol: String
         switch s.mode {
@@ -194,7 +198,8 @@ public final class AppModel {
         if let e = s.error {
             lastError = e
             connected = e.code != .unavailable
-            if e.code == .versionMismatch { versionProblem = e.message }
+            // The handshake's message (just set) reads better than a decoder dump.
+            if e.code == .versionMismatch, versionProblem == nil { versionProblem = e.message }
             return
         }
         lastError = nil
@@ -253,7 +258,13 @@ public final class AppModel {
     /// Where the next live poll should start.
     public var liveCursor: Int64? { live.lastID }
 
-    public var menuBar: MenuBarState { MenuBarState.make(status: status, connected: connected, language: language) }
+    /// `status` while it describes the running daemon: nil once that daemon answers in a protocol
+    /// this app cannot read (another version replaced it). `status` is kept for restart detection.
+    public var liveStatus: DaemonStatus? {
+        lastError?.code == .versionMismatch ? nil : status
+    }
+
+    public var menuBar: MenuBarState { MenuBarState.make(status: liveStatus, connected: connected, language: language) }
 
     public var formatter: AlertFormatter {
         let homes = catalog?.homeDirectories ?? status?.homeDirectories ?? []
@@ -283,10 +294,14 @@ public final class AppModel {
         return s.enforcementEnabled && !s.killSwitchFilePresent && s.latencyTripReason == nil
     }
 
-    /// "Not active: …" when the switch is on in the settings but enforcement is not live.
+    /// "Not active: …" when the switch is on in the settings but enforcement is not live, or after a
+    /// latency trip (which also turns the setting off, so the switch alone would look user-made).
     public var enforcementInactiveText: String? {
-        guard let s = status, s.enforcementEnabled, !s.enforcementActive else { return nil }
-        let reasons = s.enforcementInactiveReasons.filter { $0 != .disabledByUser }.map { r -> String in
+        guard let s = status, !s.enforcementActive, s.enforcementEnabled || s.latencyTripReason != nil else { return nil }
+        var inactive = s.enforcementInactiveReasons.filter { $0 != .disabledByUser }
+        // After a daemon restart the trip is only the stored reason.
+        if s.latencyTripReason != nil && !inactive.contains(.latencyTripped) { inactive.insert(.latencyTripped, at: 0) }
+        let reasons = inactive.map { r -> String in
             let text = L10n.inactiveReason(r, language)
             guard r == .latencyTripped, let why = s.latencyTripReason else { return text }
             return language == .zhHans ? text + "（\(why)）" : text + " (\(why))"
@@ -320,14 +335,18 @@ public final class AppModel {
         return r.name ?? r.id
     }
 
-    /// Whether everything a rule's path prefix stands for is monitored. Only paths inside the
-    /// catalog's prefixes reach the rule engine, so a rule elsewhere never fires.
+    /// Whether a rule's path prefix is covered by monitoring, as the daemon decides when saving it:
+    /// inside a monitored prefix, or a parent of one (the rule matches the monitored files below).
+    /// Saving a rule on an uncovered path adds that path to the Custom category.
     public func isMonitored(pathPrefix: String) -> Bool {
         guard let info = catalog else { return true }
         let expanded = PathNormalizer(homeDirectories: info.homeDirectories).expand(pathPrefix).map(PathNormalizer.fold)
         guard !expanded.isEmpty else { return false }
         let monitored = info.prefixes.map { PathNormalizer.fold($0.path) }
-        return expanded.allSatisfy { p in monitored.contains { p == $0 || p.hasPrefix($0 + "/") } }
+        return expanded.allSatisfy { p in
+            let key = p.hasSuffix("/") ? String(p.dropLast()) : p
+            return !key.isEmpty && monitored.contains { key == $0 || key.hasPrefix($0 + "/") || $0.hasPrefix(key + "/") }
+        }
     }
 
     // MARK: - Tabs
@@ -351,10 +370,12 @@ public final class AppModel {
         var groups: [String: [UsageSummary]] = [:]
         for s in summaries where showSystemNoise || !s.benign { groups[s.responsible.key, default: []].append(s) }
         return groups.map { key, list in
-            AppRow(id: key, name: list[0].responsible.displayName, kind: list[0].responsible.kind,
-                   categories: Array(Set(list.map(\.categoryID))).map(categoryName).sorted(),
-                   firstSeen: list.map(\.firstSeen).min()!, lastSeen: list.map(\.lastSeen).max()!,
-                   count: list.reduce(0) { $0 + $1.count }, denied: list.reduce(0) { $0 + $1.denied })
+            let latest = list.max { $0.lastSeen < $1.lastSeen }!.responsible
+            return AppRow(id: key, name: list[0].responsible.displayName, kind: list[0].responsible.kind,
+                          categories: Array(Set(list.map(\.categoryID))).map(categoryName).sorted(),
+                          firstSeen: list.map(\.firstSeen).min()!, lastSeen: list.map(\.lastSeen).max()!,
+                          count: list.reduce(0) { $0 + $1.count }, denied: list.reduce(0) { $0 + $1.denied },
+                          teamID: latest.teamID, cdhash: latest.cdhash)
         }.sorted { $0.lastSeen > $1.lastSeen }
     }
 

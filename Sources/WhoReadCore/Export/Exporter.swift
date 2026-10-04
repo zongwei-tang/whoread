@@ -8,10 +8,19 @@ public enum Exporter {
         case csv
     }
 
+    /// Dates RFC3339 can write and read back: years 0000 through 9999, UTC. Anything else is refused
+    /// on both sides, so a stored date always decodes again (and a huge number cannot make
+    /// `RFC3339.format` trap converting it to Int).
+    public static let representableDates: Range<TimeInterval> = -62_167_219_200 ..< 253_402_300_800
+
     public static func encoder(pretty: Bool) -> JSONEncoder {
         let enc = JSONEncoder()
         enc.outputFormatting = pretty ? [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes] : [.sortedKeys, .withoutEscapingSlashes]
         enc.dateEncodingStrategy = .custom { date, encoder in
+            guard representableDates.contains(date.timeIntervalSince1970) else {
+                throw EncodingError.invalidValue(date, EncodingError.Context(
+                    codingPath: encoder.codingPath, debugDescription: "date outside years 0000-9999"))
+            }
             var c = encoder.singleValueContainer()
             try c.encode(RFC3339.format(date, fractionDigits: 6))
         }
@@ -22,8 +31,17 @@ public enum Exporter {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .custom { decoder in
             let c = try decoder.singleValueContainer()
-            if let s = try? c.decode(String.self), let d = RFC3339.parse(s) { return d }
-            return Date(timeIntervalSince1970: try c.decode(Double.self))
+            let t: TimeInterval
+            if let s = try? c.decode(String.self), let d = RFC3339.parse(s) {
+                t = d.timeIntervalSince1970
+            } else {
+                t = try c.decode(Double.self)
+            }
+            // An offset can move a 0000/9999 timestamp out of range too (`9999-12-31T23:30:00-01:00`).
+            guard representableDates.contains(t) else {
+                throw DecodingError.dataCorruptedError(in: c, debugDescription: "date outside years 0000-9999")
+            }
+            return Date(timeIntervalSince1970: t)
         }
         return dec
     }

@@ -15,6 +15,9 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     private let encoder = Exporter.encoder(pretty: false)
     private let decoder = Exporter.decoder()
     public let path: String
+    /// The last loadRules failed: the next saveRules backs the old rows up whatever the cause (after
+    /// an SQLite error at start, rows that decode now were still never loaded).
+    private var rulesLoadFailed = false
 
     public init(path: String) throws {
         self.path = path
@@ -72,6 +75,7 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
                 responsible_key TEXT NOT NULL, category TEXT NOT NULL, access TEXT NOT NULL, body BLOB NOT NULL,
                 PRIMARY KEY(responsible_key, category, access));
             CREATE TABLE IF NOT EXISTS rules(id TEXT PRIMARY KEY, position INTEGER NOT NULL, body BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS rules_backup(id TEXT, position INTEGER, body BLOB, saved_at REAL);
             """)
         try db.prepare("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)")
             .run([.text(String(SQLiteEventStore.schemaVersion))])
@@ -291,13 +295,14 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
 
     public func loadRules() throws -> [Rule]? {
         try locked {
+            rulesLoadFailed = true
             var any = false
             var out: [Rule] = []
             try db.prepare("SELECT body FROM rules ORDER BY position").query { row in
                 any = true
                 // Strict: a row this build cannot read (written by a newer version, or damaged) must not
-                // be dropped silently. The daemon then keeps enforcement off and refuses to overwrite
-                // the rules unless root or the app replaces them.
+                // be dropped silently. The daemon then keeps enforcement off and accepts only an explicit
+                // replacement of the whole list by root or the app (saveRules backs the old rows up).
                 do {
                     out.append(try decoder.decode(Rule.self, from: row.blob(0)))
                 } catch {
@@ -305,14 +310,28 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
                 }
             }
             // An explicit "no rules" state is stored as a marker so templates are not re-added.
-            if !any, try valueLocked("rules_initialized") == nil { return nil }
-            return out
+            let initialized = try any || valueLocked("rules_initialized") != nil
+            rulesLoadFailed = false
+            return initialized ? out : nil
         }
     }
 
     public func saveRules(_ rules: [Rule]) throws {
         try locked {
             try db.transaction {
+                // Replacing rows this build cannot read, or could not load (see loadRules): every old
+                // row, readable or not, goes to rules_backup first, so nothing a newer version wrote is
+                // lost for good.
+                var unreadable = rulesLoadFailed
+                try db.prepare("SELECT body FROM rules").query { row in
+                    if !unreadable && (try? decoder.decode(Rule.self, from: row.blob(0))) == nil { unreadable = true }
+                }
+                if unreadable {
+                    try db.prepare("""
+                        INSERT INTO rules_backup(id, position, body, saved_at)
+                        SELECT id, position, body, ? FROM rules ORDER BY position
+                        """).run([.double(Date().timeIntervalSince1970)])
+                }
                 try db.exec("DELETE FROM rules")
                 let st = try db.prepare("INSERT INTO rules(id, position, body) VALUES(?,?,?)")
                 for (i, r) in rules.enumerated() {
@@ -320,6 +339,7 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
                 }
                 try setValueLocked(Data("1".utf8), forKey: "rules_initialized")
             }
+            rulesLoadFailed = false
         }
     }
 

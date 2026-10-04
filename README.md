@@ -7,7 +7,7 @@ your Mac.
 [中文说明见下方](#whoread-中文)
 
 > **Status:** in development. The core, storage, daemon, eslogger backend and CLI are built and
-> tested (127 tests). The SwiftUI app, the native Endpoint Security client and enforcement are
+> tested (336 tests, two adversarial review rounds). The SwiftUI app, the native Endpoint Security client and enforcement are
 > written but not yet compiled on a Mac. See [docs/STATUS.md](docs/STATUS.md).
 
 ## Why
@@ -26,9 +26,10 @@ terminal and every tool it spawns.
 - **Built-in catalog** of 44 categories, editable: SSH, cloud and developer credentials (AWS,
   gcloud, Azure, kube, Docker, npm, PyPI, netrc, git, gh, GnuPG), keychains, browser profiles,
   password managers, chats (Messages, WeChat, Telegram, Signal…), Mail/Contacts/Calendar/Photos,
-  shell history, cloud drives, iPhone backups, external volumes, each AI agent's transcripts, and
-  `.env`/`*.pem`/`*.key` inside your project folders. Categories that do not exist on your Mac
-  are shown as "not detected".
+  shell history, cloud drives, iPhone backups, external volumes, the transcripts of Claude Code,
+  Codex CLI, Gemini CLI, Cursor and opencode (one category each), and `.env`/`*.pem`/`*.key`
+  inside the project folders you add (Settings, or `whoread settings set project-root-add PATH`).
+  Categories that do not exist on your Mac are shown as "not detected".
 - **Attribution** charges helpers to their `.app`, and interpreters or CLI tools to the app or AI
   agent that started them. Recognised agents: Claude Code, Codex CLI, Gemini CLI, opencode,
   aider, Cursor, the Claude and ChatGPT desktop apps.
@@ -39,8 +40,8 @@ terminal and every tool it spawns.
 - **Optional blocking.** Rules (deny / allow / alert) can target a category, a severity or a path,
   and apply to a signed program, an unsigned program, an app, "anything that isn't an expected
   owner" or **"anything started by an AI agent"**. Off by default. Fail-open. Three instant kill
-  switches (turning enforcement off needs `sudo` or the app, so an agent cannot switch off its
-  own guard).
+  switches (turning enforcement off needs `sudo` or the app, so an agent cannot simply switch
+  off its own guard; a sustained flood that makes AUTH answers slow does trip it, by design).
 - **Menu bar app** with seven tabs (Live, Alerts, Apps, Files, Agents, Rules, Settings),
   notifications with actions ("Allow once · Always allow · Keep blocking"), English and
   Simplified Chinese.
@@ -77,8 +78,8 @@ sudo whoread catalog resolve-owners
 ```
 
 Catalog edits (`whoread catalog add-path|remove-path|add-category|remove-category|set-severity|
-enable|disable|export|import`) and anything else that weakens protection need `sudo` or the
-signed app. With a release build, link the bundled CLI once:
+enable|disable|import`) and anything else that weakens protection need `sudo` or the signed app;
+`whoread catalog show|export` are plain reads. With a release build, link the bundled CLI once:
 `sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/WhoRead.app/Contents/Helpers/whoread /usr/local/bin/whoread`.
 To use the signed app with the dev daemon, see "M3: the signed app against the dev daemon" in
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
@@ -91,6 +92,8 @@ To use the signed app with the dev daemon, see "M3: the signed app against the d
 | Root (daemon only) | Endpoint Security clients run as root. The app and the CLI run as you. |
 | System extension approval | The release build monitors through an Endpoint Security system extension. |
 | Endpoint Security entitlement | Granted by Apple to the developer; needed for the native client and for blocking. |
+| Notifications (app, optional) | Alerts with Allow once / Always allow / Keep blocking actions. |
+| Administrator password (app, occasionally) | Only when the UI creates or removes the kill-switch file because the daemon refused. |
 
 ## Screenshots
 
@@ -109,7 +112,7 @@ Pending: the app has not been run on a Mac yet (M7).
 **谁读了我的 SSH 密钥？** WhoRead 告诉你：哪个 app、哪个进程，在什么时候，读或写了你的哪个敏感文件，又是谁启动了它；并且可以按规则拦截。所有数据都只留在这台 Mac 上。
 
 > **状态：** 开发中。
-> - 已完成并通过测试（127 个测试）：核心逻辑、存储、守护进程、eslogger 后端、CLI。
+> - 已完成并通过测试（336 个测试，经过两轮对抗性审查）：核心逻辑、存储、守护进程、eslogger 后端、CLI。
 > - 代码已写完，但还没在 Mac 上编译：SwiftUI 应用、原生 Endpoint Security 客户端、拦截功能。
 >
 > 详见 [docs/STATUS.md](docs/STATUS.md)。
@@ -127,8 +130,8 @@ macOS 的隐私弹窗（TCC）只保护桌面、文稿、下载等少数位置�
   - 钥匙串、浏览器资料、密码管理器；
   - 聊天记录：信息、微信、Telegram、Signal 等；
   - 邮件、通讯录、日历、照片；
-  - shell 历史、云盘、iPhone 备份、外接卷、各 AI agent 各自的会话记录；
-  - 项目目录下的 `.env`、`*.pem`、`*.key`。
+  - shell 历史、云盘、iPhone 备份、外接卷，以及 Claude Code、Codex CLI、Gemini CLI、Cursor、opencode 各自的会话记录（每个一个类别）；
+  - 你添加的项目目录下的 `.env`、`*.pem`、`*.key`（在设置中添加，或 `whoread settings set project-root-add PATH`）。
 
   本机不存在的类别标记为「未检测到」。
 - **归因**：helper 归到外层 `.app`；解释器和命令行工具归到启动它们的 app 或 AI agent。能识别的 agent：Claude Code、Codex CLI、Gemini CLI、opencode、aider、Cursor、Claude 桌面版、ChatGPT 桌面版。
@@ -141,7 +144,7 @@ macOS 的隐私弹窗（TCC）只保护桌面、文稿、下载等少数位置�
   - 规则动作：拦截、允许或告警；
   - 保护对象：类别、严重程度或路径；
   - 适用对象：已签名程序、未签名程序、某个 app、「任意非 owner 进程」，或**「祖先链中包含 AI agent 的任意进程」**；
-  - 默认关闭，出错时放行（fail-open），有三种立即生效的 kill switch（关闭拦截需要 `sudo` 或应用本身，agent 无法自己关掉）。
+  - 默认关闭，出错时放行（fail-open），有三种立即生效的 kill switch（关闭拦截需要 `sudo` 或应用本身，agent 不能直接关掉；但持续制造大量访问、让 AUTH 响应变慢，会按设计触发自动关闭）。
 - **菜单栏应用**：实时、告警、应用、文件、AI agent、规则、设置七个页签。通知带操作按钮（「允许一次 · 始终允许 · 保持拦截」）。界面提供中英文。
 - **`whoread` 命令行**：查看状态、查询、按天汇总、导出 JSON/CSV、编辑类别、开关拦截、kill switch。
 - **隐私**：从不读取文件内容，不联网，没有遥测，不调用任何 LLM。命令行参数在存储前会脱敏。
@@ -176,7 +179,7 @@ whoread daily --since 30d
 sudo whoread catalog resolve-owners
 ```
 
-编辑类别（`whoread catalog add-path|remove-path|add-category|remove-category|set-severity|enable|disable|export|import`）以及其他任何削弱保护的操作，都需要 `sudo` 或已签名的应用。
+编辑类别（`whoread catalog add-path|remove-path|add-category|remove-category|set-severity|enable|disable|import`）以及其他任何削弱保护的操作，都需要 `sudo` 或已签名的应用；`whoread catalog show|export` 只是读取，不需要。
 
 ## 权限说明
 
@@ -186,6 +189,8 @@ sudo whoread catalog resolve-owners
 | root（仅守护进程） | Endpoint Security 客户端必须以 root 运行；应用和 CLI 以你的身份运行 |
 | 批准系统扩展 | 正式版通过 Endpoint Security 系统扩展监控 |
 | Endpoint Security entitlement | 由 Apple 授予开发者；原生客户端和拦截功能需要它 |
+| 通知（应用，可选） | 告警通知，带「允许一次 · 始终允许 · 保持拦截」操作 |
+| 管理员密码（应用，偶尔） | 仅当守护进程拒绝、需要由界面创建或删除 kill switch 文件时 |
 
 ## 文档
 

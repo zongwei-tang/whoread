@@ -2,36 +2,53 @@ import Foundation
 import WhoReadCore
 import WhoReadIPC
 
-/// Last N events in memory, for the app's live view (no database round trip).
+/// Last N events in memory, for the app's live view (no database round trip). A ring: appending
+/// overwrites the oldest slot in place, so it costs O(1) under the pipeline's order lock.
 public final class LiveBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var ring: [AnalyzedEvent] = []
+    /// Slot of the oldest event once the ring is full (0 until then).
+    private var head = 0
     private let capacity: Int
 
     public init(capacity: Int = 5000) {
-        self.capacity = capacity
-        ring.reserveCapacity(capacity)
+        self.capacity = max(0, capacity)
+        ring.reserveCapacity(self.capacity)
     }
 
     public func append(_ events: [AnalyzedEvent]) {
         lock.lock(); defer { lock.unlock() }
-        ring.append(contentsOf: events)
-        if ring.count > capacity { ring.removeFirst(ring.count - capacity) }
+        guard capacity > 0 else { return }
+        for e in events.suffix(capacity) {
+            if ring.count < capacity {
+                ring.append(e)
+            } else {
+                ring[head] = e
+                head = (head + 1) % capacity
+            }
+        }
     }
+
+    /// The i-th event, oldest first.
+    private func at(_ i: Int) -> AnalyzedEvent { ring[(head + i) % ring.count] }
 
     /// Events with id > afterID, oldest first.
     public func after(_ afterID: Int64?, limit: Int, includeBenign: Bool) -> [AnalyzedEvent] {
         lock.lock(); defer { lock.unlock() }
+        // The newest `limit` matches, collected from the newest end.
         var out: [AnalyzedEvent] = []
-        for e in ring where (afterID.map { e.id > $0 } ?? true) && (includeBenign || !e.isBenign) {
-            out.append(e)
+        var i = ring.count - 1
+        while i >= 0 && out.count < limit {
+            let e = at(i)
+            if (afterID.map { e.id > $0 } ?? true) && (includeBenign || !e.isBenign) { out.append(e) }
+            i -= 1
         }
-        return Array(out.suffix(max(0, limit)))
+        return out.reversed()
     }
 
     public var newest: AnalyzedEvent? {
         lock.lock(); defer { lock.unlock() }
-        return ring.last
+        return ring.isEmpty ? nil : at(ring.count - 1)
     }
 }
 

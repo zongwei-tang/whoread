@@ -24,8 +24,9 @@ near-primary source, quoted verbatim, with URLs, in:
   XcodeGen ProjectSpec and source, and the Apple SystemExtensions docs.
 - [`research/packaging-details.md`](research/packaging-details.md): packaging details for M6.
 
-Nothing in the code relies on an API that is not in those notes. Items marked **UNVERIFIED**
-in the notes are handled defensively (see below).
+Endpoint Security, eslogger, libproc and packaging facts come from those notes; items marked
+**UNVERIFIED** there are handled defensively (see below). Some macOS APIs outside those areas
+are used without being in the notes yet and are listed as pending item 13.
 
 ## Differences between the brief and the sources (sources win)
 
@@ -46,7 +47,7 @@ in the notes are handled defensively (see below).
 | 13 | XcodeGen project. | Target types are `tool` and `system-extension`. A `target:` dependency from the app auto-creates "Embed System Extensions". XcodeGen does **not** generate `CFBundlePackageType` for system extensions. | Set to `$(PRODUCT_BUNDLE_PACKAGE_TYPE)` in `Xcode/project.yml`. |
 | 14 | Kill switch: `whoread enforcement off`. | (Design, not an Apple fact.) AI agents run as the user and can run `whoread`. | Turning enforcement **off** needs `sudo` or the signed app; turning it on does not. The file kill switch needs root too (it lives in a root-owned directory). Root may use any CLI build over XPC. |
 | 15 | (not mentioned) | `es_file_t` carries `stat` (`st_mode`). The documented eslogger sample open has `fflag` 17825793 = `0x1100001`, which reads as `FREAD \| O_DIRECTORY \| O_CLOEXEC`; that the kernel passes `O_DIRECTORY` (`0x0010_0000`) through in `fflag` is inferred from that sample (**UNVERIFIED**). | A target whose `st_mode` is a directory (or, without `stat`, an `fflag` with `0x0010_0000`) opened without write intent is a directory listing: recorded only when readdir is enabled, never blocked. |
-| 16 | (not mentioned) | `AUTH_CREATE` (`es_event_create_t`: `destination_type`, `destination.existing_file` or `destination.new_path {dir, filename, mode}`) does not support caching (header). | Subscribed for AUTH only (NOTIFY_OPEN already records creating opens); answered with `es_respond_auth_result`, never cached. |
+| 16 | (not mentioned) | `AUTH_CREATE` (`es_event_create_t`: `destination_type`, `destination.existing_file` or `destination.new_path {dir, filename, mode}`) does not support caching (header). | AUTH_CREATE answered with `es_respond_auth_result`, never cached. NOTIFY_CREATE is subscribed too: a create of a regular file is skipped (its creating NOTIFY_OPEN records it), and a NEW_PATH notification (another client denied the create) is skipped natively; symlinks, directories and nodes are recorded as writes. Raw event-type values in the stub are not in the notes (**UNVERIFIED**; nothing depends on them). |
 | 17 | (not mentioned) | A copied Apple binary keeps its platform-binary flag: the flag follows the code signature (cdhash), not the path. SDK knowledge, not in the notes (**UNVERIFIED**, assumed true because the opposite assumption would fail open). | Platform owners and benign services count only in root-owned system locations, unless a signing ID is pinned. |
 
 ## Facts the implementation depends on (summary)
@@ -117,3 +118,16 @@ in the notes are handled defensively (see below).
     `stat` is always filled in `es_file_t` for opens.
 12. With the macOS 27 SDK: `es_set_deadline_miss_mode(client, ES_DEADLINE_MISS_MODE_FAIL_OPEN)`
     (row 6), behind a compile-time SDK guard.
+13. APIs used but not yet in `docs/research/` (written from SDK knowledge, **UNVERIFIED** until
+    compiled and exercised on a Mac): `NSXPCConnection.effectiveUserIdentifier` /
+    `processIdentifier` (peer identity for the weaken/strengthen gate), `SecCodeCopyGuestWithAttributes`
+    with `kSecGuestAttributePid`, `SecRequirementCreateWithString` and `SecCodeCheckValidity` (app
+    recognition, PeerVerifier), `task_info(TASK_AUDIT_TOKEN)` (self-muting), `NSAppleScript`
+    "do shell script … with administrator privileges" (UI kill-switch fallback),
+    `x-apple.systempreferences:com.apple.LoginItems-Settings.extension` (onboarding), and
+    `LOCAL_PEERPID` / `getpeereid` on the dev socket.
+14. Native source (VM): `open(O_CREAT)` of a new file emits NOTIFY_OPEN (so skipping regular-file
+    NOTIFY_CREATE loses nothing); with inverted target-path muting the kernel-drop count stays at 0
+    at idle (muted events do not use up `global_seq_num`); whether a relaunched eslogger inherits
+    the daemon's ignored SIGINT/SIGTERM (`ps -o pid,ignored -p <pid>`; the source escalates to
+    SIGKILL either way).

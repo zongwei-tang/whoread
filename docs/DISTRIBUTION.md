@@ -114,6 +114,9 @@ It first creates the kill-switch file, so nothing stays blocked. If `systemexten
 shows the extension, it runs `WhoRead --uninstall-extension`, which submits an
 `OSSystemExtensionRequest` deactivation that the user confirms. If that fails or is cancelled,
 the script stops and keeps the app, since an extension without its app has no UI to turn it off.
+It also stops, keeping the kill switch and the data, when a WhoRead extension is still active
+that it cannot deactivate, for example because the app is no longer in `/Applications`: put the
+app back and rerun.
 Otherwise it removes the dev LaunchDaemon if present, the `/usr/local/bin/whoread` link, the app
 and, with `--purge`, `/Library/Application Support/WhoRead` and the logs.
 `systemextensionsctl uninstall` is not used because it requires SIP to be disabled.

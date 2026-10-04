@@ -354,9 +354,12 @@ final class EnforcementPathTests: XCTestCase {
         s.enforcementEnabled = true
         s.latencyP99ThresholdMs = 1
         try core.update(settings: s, peer: .inProcess)
-        for _ in 0..<100 { core.enforcer.recordResponse(micros: 5000, missedDeadline: false) }
-        XCTAssertTrue(core.enforcement.isActive)
-        core.checkLatency()
+        // Three consecutive checks, each with fresh slow responses.
+        for round in 0..<3 {
+            for _ in 0..<100 { core.enforcer.recordResponse(micros: 5000, missedDeadline: false) }
+            XCTAssertTrue(core.enforcement.isActive, "round \(round)")
+            core.checkLatency()
+        }
         XCTAssertFalse(core.enforcement.isActive)
         XCTAssertNotNil(core.status().latencyTripReason)
     }

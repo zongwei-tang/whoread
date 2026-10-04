@@ -1,4 +1,5 @@
 import Foundation
+import WhoReadCore
 
 /// The native source's target-path mute set. Outside the EndpointSecurity guard so it is unit-tested
 /// on any host.
@@ -15,22 +16,112 @@ enum NativeMutePlan {
     /// Muting applies to the path as VFS sees it (F_GETPATH, after symlink resolution). Register the
     /// catalog spelling, for non-ASCII paths both its NFC and NFD forms (APFS keeps whatever
     /// normalization a name was created with), and the resolved on-disk spelling (realpath: on-disk
-    /// case, symlinks resolved) when the path exists. Never "/" (a link to the root, as PathClassifier
-    /// skips too): an inverted "/" prefix would select every file event on the system.
-    static func variants(_ p: String, resolve: (String) -> String?) -> [String] {
+    /// case, symlinks resolved) when the path exists and `accept` takes it. Never "/" (a link to the
+    /// root, as PathClassifier skips too): an inverted "/" prefix would select every file event on the
+    /// system. Nothing for a path with a NUL: realpath and es_mute_path see the C string cut there, so
+    /// "~/\0x" would select the whole home.
+    static func variants(_ p: String, resolve: (String) -> String?, accept: (String) -> Bool = { _ in true }) -> [String] {
+        guard !p.utf8.contains(0) else { return [] }
         var out = [p]
         if !p.utf8.allSatisfy({ $0 < 0x80 }) {
             out.append(p.decomposedStringWithCanonicalMapping)
             out.append(p.precomposedStringWithCanonicalMapping)
         }
-        if let r = resolve(p), r != "/" { out.append(r) }
+        if let r = resolve(p), r != "/", accept(r) { out.append(r) }
         return out
     }
 
-    static func plan(prefixes: [String], ancestors: [String], resolve: (String) -> String?) -> (prefixes: Set<Path>, literals: Set<Path>) {
-        (Set(prefixes.flatMap { variants($0, resolve: resolve) }.map(Path.init)),
+    /// A prefix's resolved spelling passes the same filters as a link target in PathClassifier: never
+    /// /dev (`~/.zsh_history -> /dev/null` would select every /dev/null open on the system), a home,
+    /// or a directory containing a home or the prefix itself. Literal ancestors match one path only.
+    static func plan(prefixes: [String], ancestors: [String], homes: [String] = [],
+                     resolve: (String) -> String?) -> (prefixes: Set<Path>, literals: Set<Path>) {
+        (Set(prefixes.flatMap { p in
+            variants(p, resolve: resolve) {
+                PathClassifier.isMonitorableTarget($0) && PathClassifier.isUsableLinkTarget($0, inside: p, homes: homes)
+            }
+         }.map(Path.init)),
          Set(ancestors.flatMap { variants($0, resolve: resolve) }.map(Path.init)))
     }
+}
+
+/// Denials queued for recording (the AUTH callback only counts under a lock). Every denial is
+/// recorded while the backlog is short. Past `mergeThreshold`, a denial identical to one still
+/// queued (same process instance, operation, targets with their access, and rule) is merged into it,
+/// so a process looping on a denied open cannot grow the queue without bound; past `limit`, every
+/// further denial is only counted. Neither touches the AUTH response, which is sent before. Outside
+/// the EndpointSecurity guard so it is unit-tested on any host.
+struct NativeDenialBacklog {
+    struct Key: Hashable {
+        let pid: Int32
+        let pidVersion: UInt32?
+        let operation: FileOperation
+        /// Paths with their access: a denied write is not merged into a queued denied read.
+        let targets: [FileTarget]
+        let ruleID: String?
+
+        init(_ activity: FileActivity, _ decision: RuleDecision) {
+            pid = activity.process.pid
+            pidVersion = activity.process.pidVersion
+            operation = activity.operation
+            targets = activity.targets
+            ruleID = decision.ruleID
+        }
+    }
+
+    /// What `finish` needs back once the queued denial was recorded.
+    struct Ticket {
+        let key: Key?
+    }
+
+    static let mergeThreshold = 1_000
+    static let limit = 10_000
+
+    private(set) var pending = 0
+    /// Denials merged or over the limit: never recorded on their own.
+    private(set) var unrecorded: UInt64 = 0
+    private var queued = Set<Key>()
+
+    /// A ticket to queue the denial with, or nil when it is merged or over the limit (counted).
+    /// `key` is only built once the backlog is past the threshold.
+    mutating func admit(_ key: () -> Key) -> Ticket? {
+        if pending >= NativeDenialBacklog.limit {
+            unrecorded &+= 1
+            return nil
+        }
+        guard pending >= NativeDenialBacklog.mergeThreshold else {
+            pending += 1
+            return Ticket(key: nil)
+        }
+        let k = key()
+        guard queued.insert(k).inserted else {
+            unrecorded &+= 1
+            return nil
+        }
+        pending += 1
+        return Ticket(key: k)
+    }
+
+    mutating func finish(_ ticket: Ticket) {
+        pending -= 1
+        if let k = ticket.key { queued.remove(k) }
+    }
+}
+
+/// Messages missing from one ES client's global_seq_num stream (message version >= 4). The handler
+/// block gets messages serially and in order, and a gap means the kernel dropped messages for this
+/// client (docs/research/eslogger-libproc-packaging.md, as for eslogger's own drop count).
+struct NativeSequenceGaps {
+    private(set) var dropped: UInt64 = 0
+    private var last: UInt64?
+
+    mutating func note(_ seq: UInt64) {
+        if let last, seq > last, seq - last > 1 { dropped &+= seq - last - 1 }
+        last = seq
+    }
+
+    /// A new client numbers its messages afresh.
+    mutating func reset() { last = nil }
 }
 
 #if canImport(EndpointSecurity)
@@ -87,6 +178,9 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private var authSubscribed = false
     private var pendingNotify = 0
     private var droppedNotify: UInt64 = 0
+    private var denials = NativeDenialBacklog()
+    private var fileSequence = NativeSequenceGaps()
+    private var processSequence = NativeSequenceGaps()
     // Client thread only.
     private var readdir = false
     private var retryTimer: DispatchSourceTimer?
@@ -119,7 +213,12 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     public var droppedEvents: UInt64 {
         lock.lock(); defer { lock.unlock() }
-        return droppedNotify
+        return droppedNotify &+ denials.unrecorded
+    }
+
+    public var kernelDroppedEvents: UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        return fileSequence.dropped &+ processSequence.dropped
     }
 
     // MARK: - Event lists
@@ -127,7 +226,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     static let notifyFileEvents: [es_event_type_t] = [
         ES_EVENT_TYPE_NOTIFY_OPEN, ES_EVENT_TYPE_NOTIFY_CLOSE, ES_EVENT_TYPE_NOTIFY_RENAME, ES_EVENT_TYPE_NOTIFY_CLONE,
         ES_EVENT_TYPE_NOTIFY_COPYFILE, ES_EVENT_TYPE_NOTIFY_LINK, ES_EVENT_TYPE_NOTIFY_UNLINK, ES_EVENT_TYPE_NOTIFY_TRUNCATE,
-        ES_EVENT_TYPE_NOTIFY_EXCHANGEDATA,
+        ES_EVENT_TYPE_NOTIFY_EXCHANGEDATA, ES_EVENT_TYPE_NOTIFY_CREATE,
     ]
     static let authFileEvents: [es_event_type_t] = [
         ES_EVENT_TYPE_AUTH_OPEN, ES_EVENT_TYPE_AUTH_RENAME, ES_EVENT_TYPE_AUTH_CLONE, ES_EVENT_TYPE_AUTH_COPYFILE,
@@ -213,6 +312,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         mutedPrefixes = []
         mutedLiterals = []
         authSubscribed = false
+        fileSequence.reset()
+        processSequence.reset()
         lock.unlock()
         if let core {
             let c = core.analyzer.classifier
@@ -336,7 +437,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private func applyMuting(prefixes: [String], ancestors: [String]) -> Bool {
         guard let file = fileClient else { return true }
         let resolver = RealpathSymlinkResolver()
-        let plan = NativeMutePlan.plan(prefixes: prefixes, ancestors: ancestors, resolve: resolver.resolve)
+        let homes = core?.analyzer.classifier.normalizer.homeDirectories ?? []
+        let plan = NativeMutePlan.plan(prefixes: prefixes, ancestors: ancestors, homes: homes, resolve: resolver.resolve)
         lock.lock()
         let oldPrefixes = mutedPrefixes
         let oldLiterals = mutedLiterals
@@ -468,6 +570,11 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     private func handleProcess(_ msg: UnsafePointer<es_message_t>) {
         let m = msg.pointee
+        if m.version >= 4 {
+            lock.lock()
+            processSequence.note(m.global_seq_num)
+            lock.unlock()
+        }
         let time = NativeESSource.date(m.time)
         let event: SourceEvent
         switch m.event_type {
@@ -509,23 +616,40 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             } else {
                 decider.recordResponse(micros: micros, missedDeadline: false)
             }
-            if decision.verdict == .deny, let activity {
-                // A denied access produces no NOTIFY: record it off the callback path. Never dropped.
-                deniedQueue.async { [weak self] in self?.sink?.receive(.file(activity), context: .decided(decision)) }
+            // A denied access produces no NOTIFY: record it off the callback path. The backlog merges
+            // repeats and counts the excess instead of growing without bound (NativeDenialBacklog).
+            let denied = decision.verdict == .deny ? activity : nil
+            lock.lock()
+            if m.version >= 4 { fileSequence.note(m.global_seq_num) }
+            let ticket = denied.flatMap { a in denials.admit { NativeDenialBacklog.Key(a, decision) } }
+            lock.unlock()
+            if let denied, let ticket {
+                deniedQueue.async { [weak self] in
+                    guard let self else { return }
+                    self.sink?.receive(.file(denied), context: .decided(decision))
+                    self.lock.lock()
+                    self.denials.finish(ticket)
+                    self.lock.unlock()
+                }
             }
             return
         }
-        guard let activity = NativeESSource.activity(msg) else { return }
-        // `.afterAuth` only when this access really passed an AUTH check: AUTH subscribed, enforcement
-        // live right now (the kill switch and latency trip unsubscribe asynchronously), and an event
-        // with an AUTH counterpart (a close has none; its fd may predate enforcement).
-        let enforcing = m.event_type != ES_EVENT_TYPE_NOTIFY_CLOSE && core?.enforcement.isActive == true
+        let activity = NativeESSource.activity(msg)
+        // `.afterAuth` only when this access really passed an AUTH check: AUTH subscribed and
+        // enforcement live right now (the kill switch and latency trip unsubscribe asynchronously).
+        // A modified close has no AUTH counterpart but is treated the same: its open passed AUTH, or
+        // predates enforcement and a matching deny still alerts. As `.monitorOnly` it would turn a
+        // write allowed once into "would block", and could use up a live "allow once".
+        let enforcing = activity != nil && core?.enforcement.isActive == true
         lock.lock()
+        if m.version >= 4 { fileSequence.note(m.global_seq_num) }
         let context: RuleContext = authSubscribed && enforcing ? .afterAuth : .monitorOnly
-        let full = pendingNotify >= NativeESSource.maxPendingNotify
-        if full { droppedNotify &+= 1 } else { pendingNotify += 1 }
+        let full = activity != nil && pendingNotify >= NativeESSource.maxPendingNotify
+        if activity != nil {
+            if full { droppedNotify &+= 1 } else { pendingNotify += 1 }
+        }
         lock.unlock()
-        guard !full else { return }
+        guard let activity, !full else { return }
         eventQueue.async { [weak self] in
             guard let self else { return }
             self.sink?.receive(.file(activity), context: context)
@@ -675,14 +799,20 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         case ES_EVENT_TYPE_AUTH_READDIR, ES_EVENT_TYPE_NOTIFY_READDIR:
             op = .readdir
             targets = OperationSemantics.readdir(reported(e.readdir.target))
-        case ES_EVENT_TYPE_AUTH_CREATE:
-            // A new file, directory or link. NOTIFY_CREATE is not subscribed: NOTIFY_OPEN already logs
-            // creating opens, so it would only double them.
+        case ES_EVENT_TYPE_AUTH_CREATE, ES_EVENT_TYPE_NOTIFY_CREATE:
+            // A new file, directory, link or node. AUTH: every kind (a new file's open(O_CREAT) has no
+            // AUTH_OPEN). NOTIFY: only what no open records (symlink, mkdir, mknod): a new regular file
+            // comes with a creating NOTIFY_OPEN, and a NEW_PATH destination means an ES client denied
+            // the create (header), so nothing exists; ours are recorded from AUTH.
+            let notify = m.event_type == ES_EVENT_TYPE_NOTIFY_CREATE
             op = .create
             let dst: ReportedPath
             if e.create.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
-                dst = reported(e.create.destination.existing_file)
+                let file = e.create.destination.existing_file
+                if notify && UInt32(file.pointee.stat.st_mode) & 0o170000 == 0o100000 { return nil }
+                dst = reported(file)
             } else {
+                if notify { return nil }
                 dst = newPath(e.create.destination.new_path.dir, e.create.destination.new_path.filename)
             }
             targets = OperationSemantics.create(dst)

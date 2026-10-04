@@ -11,7 +11,7 @@ import Darwin
 /// host (including Linux CI). It is only started when the daemon is given `--dev-socket`.
 /// The socket file is chmod 0600 by default (owner only), and the peer's euid is passed to the
 /// handler, so root-only operations stay root-only. A peer that hangs up early gets EPIPE, never
-/// SIGPIPE, and the server bounds connections, request sizes and idle time.
+/// SIGPIPE, and the server bounds connections, request sizes and the time one frame may take.
 public enum UnixSocket {
     /// Largest reply a client accepts.
     public static let maxFrame = 64 * 1024 * 1024
@@ -58,11 +58,28 @@ public enum UnixSocket {
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, socklen_t(MemoryLayout<timeval>.size))
     }
 
-    static func writeAll(_ fd: Int32, _ data: Data) -> Bool {
+    /// Waits until `fd` is ready for `events` (POLLIN or POLLOUT), or `deadline` passes. The socket
+    /// timeouts bound each read()/send() alone, so a peer moving one byte at a time never trips
+    /// them; checking this before every call bounds the whole frame. Monotonic time, so setting
+    /// the clock back cannot stretch a deadline.
+    static func waitReady(_ fd: Int32, _ events: Int32, until deadline: DispatchTime) -> Bool {
+        while true {
+            let now = DispatchTime.now()
+            guard now < deadline else { return false }
+            let ms = (deadline.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000_000 + 1
+            var pfd = pollfd(fd: fd, events: Int16(events), revents: 0)
+            let r = poll(&pfd, 1, Int32(min(ms, UInt64(Int32.max))))
+            if r < 0 && errno == EINTR { continue }
+            return r > 0
+        }
+    }
+
+    static func writeAll(_ fd: Int32, _ data: Data, deadline: DispatchTime? = nil) -> Bool {
         var offset = 0
         return data.withUnsafeBytes { raw -> Bool in
             guard let base = raw.baseAddress else { return data.isEmpty }
             while offset < data.count {
+                if let deadline, !waitReady(fd, POLLOUT, until: deadline) { return false }
                 let n = send(fd, base + offset, data.count - offset, sendFlags)
                 if n < 0 {
                     if errno == EINTR { continue }
@@ -74,12 +91,13 @@ public enum UnixSocket {
         }
     }
 
-    static func readExactly(_ fd: Int32, _ count: Int) -> Data? {
+    static func readExactly(_ fd: Int32, _ count: Int, deadline: DispatchTime? = nil) -> Data? {
         var buffer = Data(count: count)
         var offset = 0
         let ok = buffer.withUnsafeMutableBytes { raw -> Bool in
             guard let base = raw.baseAddress else { return count == 0 }
             while offset < count {
+                if let deadline, !waitReady(fd, POLLIN, until: deadline) { return false }
                 let n = read(fd, base + offset, count - offset)
                 if n < 0 {
                     if errno == EINTR { continue }
@@ -93,17 +111,17 @@ public enum UnixSocket {
         return ok ? buffer : nil
     }
 
-    static func sendFrame(_ fd: Int32, _ payload: Data) -> Bool {
+    static func sendFrame(_ fd: Int32, _ payload: Data, deadline: DispatchTime? = nil) -> Bool {
         var len = UInt32(payload.count).bigEndian
         let header = Data(bytes: &len, count: 4)
-        return writeAll(fd, header + payload)
+        return writeAll(fd, header + payload, deadline: deadline)
     }
 
-    static func receiveFrame(_ fd: Int32, max: Int = maxFrame) -> Data? {
-        guard let header = readExactly(fd, 4) else { return nil }
+    static func receiveFrame(_ fd: Int32, max: Int = maxFrame, deadline: DispatchTime? = nil) -> Data? {
+        guard let header = readExactly(fd, 4, deadline: deadline) else { return nil }
         let len = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian
         guard Int(len) <= max else { return nil }
-        return readExactly(fd, Int(len))
+        return readExactly(fd, Int(len), deadline: deadline)
     }
 
     /// (pid, euid) of the connected peer.
@@ -131,24 +149,26 @@ public enum UnixSocket {
 }
 
 public final class UnixSocketServer: @unchecked Sendable {
-    /// Connections served at once; more are closed right away (each one holds a GCD worker).
+    /// Non-root connections served at once; more are closed right away (each one holds a thread).
+    /// Root takes no slot, so other local users cannot lock it out.
     public static let maxConnections = 32
-    /// Seconds a connection may sit idle in a read or write.
+    /// Default seconds one request (from waiting for its first byte) or one reply may take.
     public static let ioTimeout = 10
 
     public let path: String
     private let handler: IPCHandler
     private let mode: mode_t
+    private let timeout: Int
     private var listenFD: Int32 = -1
     private var thread: Thread?
-    private let queue = DispatchQueue(label: "whoread.ipc.unix", attributes: .concurrent)
     private let slots = DispatchSemaphore(value: UnixSocketServer.maxConnections)
     private var running = false
 
-    public init(path: String, handler: IPCHandler, mode: mode_t = 0o600) {
+    public init(path: String, handler: IPCHandler, mode: mode_t = 0o600, ioTimeout: Int = UnixSocketServer.ioTimeout) {
         self.path = path
         self.handler = handler
         self.mode = mode
+        self.timeout = ioTimeout
     }
 
     public func start() throws {
@@ -195,21 +215,29 @@ public final class UnixSocketServer: @unchecked Sendable {
                 usleep(10_000)
                 continue
             }
-            guard slots.wait(timeout: .now()) == .success else {
+            // Credentials before a slot: `sudo whoread enforcement off` must get through even while
+            // other users hold every slot.
+            let (pid, euid) = UnixSocket.peerCredentials(client)
+            let takesSlot = euid != 0
+            if takesSlot && slots.wait(timeout: .now()) != .success {
                 close(client)
                 continue
             }
-            UnixSocket.configure(client, receiveTimeout: UnixSocketServer.ioTimeout, sendTimeout: UnixSocketServer.ioTimeout)
-            queue.async { [handler, slots] in
-                defer { slots.signal() }
-                let (pid, euid) = UnixSocket.peerCredentials(client)
+            UnixSocket.configure(client, receiveTimeout: timeout, sendTimeout: timeout)
+            // A thread of its own, not a shared GCD worker: blocked connections must not queue
+            // root's behind them.
+            let connection = Thread { [handler, slots, timeout] in
+                defer { if takesSlot { slots.signal() } }
                 let peer = IPCPeer(pid: pid, euid: euid, isTrustedCode: false)
-                while let frame = UnixSocket.receiveFrame(client, max: UnixSocket.maxRequestFrame) {
+                while let frame = UnixSocket.receiveFrame(client, max: UnixSocket.maxRequestFrame,
+                                                          deadline: .now() + .seconds(timeout)) {
                     let reply = IPCCodec.serve(frame, handler: handler, peer: peer)
-                    if !UnixSocket.sendFrame(client, reply) { break }
+                    if !UnixSocket.sendFrame(client, reply, deadline: .now() + .seconds(timeout)) { break }
                 }
                 close(client)
             }
+            connection.name = "whoread.ipc.connection"
+            connection.start()
         }
     }
 }

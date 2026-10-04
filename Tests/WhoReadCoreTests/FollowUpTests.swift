@@ -27,3 +27,18 @@ final class FollowUpTests: XCTestCase {
         XCTAssertNotEqual(out.alerts.first?.alert.kind, .wouldBlock)
     }
 }
+
+final class CloseDoesNotConsumeTests: XCTestCase {
+    /// A modified close reports a write an earlier open already decided; it must not use up an
+    /// "allow once" meant for the next open (monitor-only path too).
+    func testModifiedCloseKeepsTheAllowOnce() throws {
+        let now = t0
+        var rule = Rule(id: "deny", enabled: true, enforce: true, target: .category("ssh"), subject: .anyNonOwner, access: .any,
+                        action: .deny, includePlatformBinaries: true)
+        rule.exceptions = [RuleException(subject: .anyNonOwner, expiresAt: now.addingTimeInterval(3600), remainingUses: 1, createdAt: now)]
+        let h = try Harness(rules: [rule])
+        let vim = h.spawn(P.terminal, ProcessRecord(pid: 710, ppid: 100, executablePath: "/usr/bin/vim", isPlatformBinary: true), 1)
+        _ = h.file(.close, vim, OperationSemantics.close(path: "/Users/alice/.ssh/config", modified: true), 2)
+        XCTAssertEqual(h.rules.rules[0].exceptions[0].remainingUses, 1)
+    }
+}

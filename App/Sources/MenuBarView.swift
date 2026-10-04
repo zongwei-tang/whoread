@@ -17,10 +17,21 @@ struct MenuBarView: View {
                 Text(L10n.f(.errVersionMismatchFormat, problem)).font(.caption).foregroundStyle(.red)
             }
             Divider()
-            if model.connected, let status = model.status {
+            if model.connected, let status = model.liveStatus {
                 quickToggles(status)
                 Divider()
                 recentAlerts
+            } else if model.connected {
+                // The daemon answers but its state cannot be read (another version): no stale
+                // switches, but enforcement can still be turned off.
+                if model.versionProblem == nil, let e = model.lastError {
+                    Text(L10n.message(for: e)).font(.caption).foregroundStyle(.red)
+                }
+                Button(L10n.t(.killSwitchAdmin)) { connection.engageKillSwitchWithAdminRights() }
+                    .font(.caption)
+                if let err = connection.lastActionError {
+                    Text(err).font(.caption).foregroundStyle(.red)
+                }
             } else {
                 Text(L10n.t(.errUnavailable)).foregroundStyle(.secondary)
                 Button(L10n.t(.openSetup)) {
@@ -46,7 +57,7 @@ struct MenuBarView: View {
             VStack(alignment: .leading) {
                 Text(L10n.t(.appName)).font(.headline)
                 Text(model.menuBar.title).foregroundStyle(.secondary)
-                if let s = model.status, s.learning {
+                if let s = model.liveStatus, s.learning {
                     Text(L10n.f(.learningUntilFormat, s.learningEndsAt.formatted(date: .abbreviated, time: .omitted)))
                         .font(.caption).foregroundStyle(.secondary)
                 }

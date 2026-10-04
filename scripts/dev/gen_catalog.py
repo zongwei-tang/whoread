@@ -2,8 +2,9 @@
 """Generates Data/catalog.json, Data/agents.json and Data/benign.json.
 
 The JSON files are the source of truth that ships and that users edit; this script only exists so
-the defaults are written consistently. Signing IDs / team IDs are deliberately left out: they are
-filled from `codesign -dv` on the user's Mac by `whoread catalog resolve-owners`.
+the defaults are written consistently. Signing IDs / team IDs are deliberately left out: the daemon
+fills them in memory from `codesign -dv` of the apps installed on the user's Mac, at every start
+(`whoread catalog resolve-owners` only shows them).
 """
 import json, os, sys
 
@@ -24,7 +25,7 @@ def apple_app(label, *names):
     return {"label": label, "bundles": [f"/System/**/{n}.app" for n in names], "platformBinary": True}
 
 def app(label, *bundles):
-    """A third-party app. Only trusted once `whoread catalog resolve-owners` pinned its team ID."""
+    """A third-party app. Only trusted once the daemon resolved its team ID with codesign."""
     return {"label": label, "bundles": list(bundles)}
 
 def cli(label, executables=None, argvGlobs=None, names=None, platformBinary=None):
@@ -237,8 +238,11 @@ categories = [
         "owners": [platform("git HTTP transport (Apple)", "git-remote-http", "git-remote-https"),
                    cli("git HTTP transport (Command Line Tools)", platformBinary=True, executables=[
                        "/Library/Developer/CommandLineTools/usr/libexec/git-core/git-remote-http*"]),
+                   # Literal paths: only those can get pinned signing IDs (OwnerResolver), and an unpinned
+                   # platform spec outside the system locations never matches.
                    cli("git HTTP transport (Xcode)", platformBinary=True, executables=[
-                       "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-remote-http*"]),
+                       "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-remote-http",
+                       "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-remote-https"]),
                    cli("git HTTP transport (Homebrew)", executables=[
                        f"{p}/Cellar/git/*/libexec/git-core/git-remote-http*" for p in PREFIXES])],
     },

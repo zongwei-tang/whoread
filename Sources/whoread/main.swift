@@ -26,6 +26,8 @@ Daemon queries (talk to whoreadd over XPC; --socket PATH for the dev socket):
   enforcement on|off|status      off needs sudo (or the WhoRead app)
   pause | resume                 pause needs sudo (or the WhoRead app)
   rules [list|templates|add --json-file F|enable ID|disable ID|enforce ID|dry-run ID|delete ID]
+  rules replace --json-file F --confirm   replace every rule (recovery after stored rules failed to
+                                          load; the old rows are kept in the rules_backup table)
   catalog [show [ID]|export [--output FILE]|resolve-owners]
                                    resolve-owners: show the owner team/signing IDs codesign reports
                                    for installed apps (the daemon applies them in memory at start)
@@ -60,9 +62,22 @@ let language: Language = {
 
 func out(_ s: String) { print(s) }
 
+/// The request never got an answer (no daemon, timeout, connection lost), as opposed to an
+/// `.error` the daemon replied with.
+struct Unreachable: Error { let error: IPCError }
+
+/// Turns the errors a transport throws into `Unreachable`; the daemon's own `.error` replies still
+/// come out of `call` as `IPCError`.
+struct TransportClient: IPCClient {
+    let transport: IPCClient
+    func send(_ request: IPCRequest) throws -> IPCResponse {
+        do { return try transport.send(request) } catch let e as IPCError { throw Unreachable(error: e) }
+    }
+}
+
 func makeClient() throws -> IPCClient {
     if let socket = args.value("socket") ?? ProcessInfo.processInfo.environment["WHOREAD_SOCKET"] {
-        return UnixSocketClient(path: socket)
+        return TransportClient(transport: UnixSocketClient(path: socket))
     }
     #if os(macOS)
     let name = args.value("service")
@@ -70,21 +85,32 @@ func makeClient() throws -> IPCClient {
         ?? (try? String(contentsOfFile: WhoReadPaths.dataDirectory + "/mach-service", encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         ?? WhoReadPaths.machServiceName
-    return XPCClient(machServiceName: name)
+    return TransportClient(transport: XPCClient(machServiceName: name))
     #else
     throw CLIError("no XPC on this platform: pass --socket PATH (whoreadd --dev-socket PATH)")
     #endif
 }
 
+/// `s` as one shell word, so a suggested command can be pasted as is. `~` is quoted too: the shell
+/// would expand it to one home, while whoread takes `~/` to mean every monitored home.
+func shellWord(_ s: String) -> String {
+    let plain = !s.isEmpty && !s.hasPrefix("=")
+        && s.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "-_./=:@%+,".unicodeScalars.contains($0)) }
+    return plain ? s : "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+/// An error the daemon replied with.
 func explain(_ e: IPCError) -> CLIError {
     switch e.code {
     case .notPermitted:
-        return CLIError("not permitted: \(e.message)\n  e.g. sudo whoread \(CommandLine.arguments.dropFirst().joined(separator: " "))", exitCode: 77)
-    case .unavailable:
-        return CLIError("cannot reach the WhoRead daemon: \(e.message)\n  Is whoreadd running? (sudo launchctl print system/com.whoread.daemon)", exitCode: 69)
+        return CLIError("not permitted: \(e.message)\n  e.g. sudo whoread \(CommandLine.arguments.dropFirst().map(shellWord).joined(separator: " "))", exitCode: 77)
     default:
         return CLIError("\(e.code.rawValue): \(e.message)")
     }
+}
+
+func explain(_ u: Unreachable) -> CLIError {
+    CLIError("cannot reach the WhoRead daemon: \(u.error.message)\n  Is whoreadd running? (sudo launchctl print system/com.whoread.daemon)", exitCode: 69)
 }
 
 /// One `.hello` before the first real request, so a whoread/daemon version skew is reported as
@@ -192,7 +218,10 @@ func cmdStatus(_ c: IPCClient) throws {
                    s.latency.p99Micros, s.latency.maxMicros, s.latency.deadlineMisses))
     }
     if s.writerDropped > 0 { out("  WARNING: \(s.writerDropped) events dropped before storage") }
-    if let d = s.sourceDroppedEvents, d > 0 { out("  WARNING: \(d) file events dropped by the source (analysis backlog full)") }
+    if let d = s.sourceDroppedEvents, d > 0 {
+        out("  WARNING: \(d) events dropped or merged by the source (analysis backlog full; denials were still enforced)")
+    }
+    if s.parser == nil, let k = s.sourceKernelDrops, k > 0 { out("  WARNING: \(k) events dropped by the kernel before the source saw them") }
     if let e = s.rulesLoadError { out("  WARNING: stored rules failed to load (\(e)); enforcement stays off") }
 }
 
@@ -215,6 +244,20 @@ func cmdEvents(_ c: IPCClient) throws {
     printEvents(events, context(c))
 }
 
+/// The store applies a page's LIMIT before it drops rows it cannot decode (written by a newer
+/// build, or damaged), so a page can come back short, or empty, with matching events still
+/// beyond it. For a page `q` that came back empty: true when it held only such rows, so every
+/// matching row in (afterID, afterID + limit] is undecodable and can be stepped over. A newer
+/// matching event must exist, and the page must still be empty when read again after that probe
+/// (so an event arriving in between does not pass for a skipped block).
+func onlyUndecodable(_ c: IPCClient, _ q: EventQuery) throws -> Bool {
+    var probe = q
+    probe.limit = 1
+    probe.newestFirst = true
+    guard try !c.events(probe).isEmpty else { return false }
+    return try c.events(q).isEmpty
+}
+
 func cmdTail(_ c: IPCClient) throws {
     let ctx = context(c)
     var after: Int64? = try c.events(EventQuery(includeBenign: true, limit: 1)).first?.id
@@ -224,7 +267,12 @@ func cmdTail(_ c: IPCClient) throws {
     // page is printed in full.
     let page = 1000
     while true {
-        let events = try c.events(EventQuery(includeBenign: args.has("all"), afterID: after, limit: page, newestFirst: false))
+        let q = EventQuery(includeBenign: args.has("all"), afterID: after, limit: page, newestFirst: false)
+        let events = try c.events(q)
+        if events.isEmpty, try onlyUndecodable(c, q) {
+            after = (after ?? 0) + Int64(page)
+            continue
+        }
         for e in events {
             out(ctx.eventLine(e).filter { !$0.isEmpty }.joined(separator: "  "))
             after = e.id
@@ -438,9 +486,21 @@ func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter)
     case .csv: try w.write(Exporter.csvColumns.joined(separator: ",") + "\n")
     }
     var count = 0
+    // Pages shrink when the store drops rows it cannot decode: page on until an empty one, and
+    // say so when rows went missing (a short page with more after it, or a skipped block).
+    var short = false
+    var skipped = false
     while count < total {
         q.limit = min(exportPageSize, total - count)
         let page = try c.events(q)
+        guard let last = page.last else {
+            guard try onlyUndecodable(c, q) else { break }
+            q.afterID = (q.afterID ?? 0) + Int64(q.limit)
+            skipped = true
+            continue
+        }
+        skipped = skipped || short
+        short = page.count < q.limit
         switch f {
         case .json:
             for (i, e) in page.enumerated() {
@@ -458,10 +518,12 @@ func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter)
             if let nl = csv.firstIndex(of: "\n") { try w.write(String(csv[csv.index(after: nl)...])) }
         }
         count += page.count
-        guard page.count == q.limit, let last = page.last else { break }
         q.afterID = last.id
     }
     if f == .json { try w.write(count == 0 ? "]\n" : "\n]\n") }
+    if skipped {
+        FileHandle.standardError.write(Data("warning: the daemon could not decode some stored events (written by a newer build, or damaged); they are not in the export\n".utf8))
+    }
     return count
 }
 
@@ -541,6 +603,11 @@ func cmdRules(_ c: IPCClient) throws {
     switch sub {
     case "list":
         let rules = try c.rules()
+        if let e = try? c.status().rulesLoadError {
+            FileHandle.standardError.write(Data(("warning: the stored rules could not be loaded (\(e)); enforcement is off. "
+                + "Fix with: sudo whoread rules replace --json-file RULES.json --confirm "
+                + "(unreadable rows are kept in the rules_backup table)\n").utf8))
+        }
         if args.json { return out(try Format.json(rules)) }
         out(Format.table(rules.map(describe), header: ["ID", "STATE", "ACTION", "ACCESS", "TARGET", "SUBJECT", "NAME"]))
     case "templates":
@@ -556,6 +623,20 @@ func cmdRules(_ c: IPCClient) throws {
         }
         for r in rules { _ = try c.call(.upsertRule(r)) }
         out("saved \(rules.count) rule(s)")
+    case "replace":
+        guard let file = args.value("json-file") else { throw CLIError("rules replace --json-file RULES.json --confirm") }
+        guard args.has("confirm") else {
+            throw CLIError("rules replace deletes every current rule and stores the file's rules instead; add --confirm")
+        }
+        let data = try Data(contentsOf: URL(fileURLWithPath: file))
+        let rules: [Rule]
+        if let list = try? Exporter.decoder().decode([Rule].self, from: data) {
+            rules = list
+        } else {
+            rules = [try Exporter.decoder().decode(Rule.self, from: data)]
+        }
+        _ = try c.call(.replaceRules(rules))
+        out("replaced: \(rules.count) rule(s)")
     case "enable": try modify(try idArg()) { $0.enabled = true }
     case "disable": try modify(try idArg()) { $0.enabled = false }
     case "enforce": try modify(try idArg()) { $0.enforce = true; $0.enabled = true }
@@ -570,17 +651,30 @@ func cmdRules(_ c: IPCClient) throws {
 
 func idArg() throws -> String {
     guard args.positional.count >= 3 else { throw CLIError("missing rule id") }
+    // A stray extra word is a mistake (an unquoted name with a space), not something to ignore.
+    guard args.positional.count == 3 else { throw CLIError("one rule id at a time: whoread rules \(args.positional[1]) ID") }
     return args.positional[2]
 }
 
 /// A catalog prefix as the classifier expects it: absolute or `~/`, no `.`/`..`, narrower than a
-/// whole disk or home.
-func catalogPath(_ raw: String) throws -> String {
+/// whole disk or home. `homes` are the daemon's monitored homes: a home, or a folder holding one,
+/// is refused however it is spelled (`~/` alone, `/Users/alice`, `/Users`, a firmlinked form).
+func catalogPath(_ raw: String, homes: [String]) throws -> String {
     let p = raw.trimmingCharacters(in: .whitespaces)
     guard p.hasPrefix("/") || p.hasPrefix("~/") else { throw CLIError("path must start with / or ~/: \(raw)") }
     let parts = p.split(separator: "/")
     guard !parts.contains("..") && !parts.contains(".") else { throw CLIError("path must not contain . or ..: \(raw)") }
     guard parts.count > (p.hasPrefix("~/") ? 1 : 0) else { throw CLIError("\(p) is too broad to monitor") }
+    if p.hasPrefix("/") {
+        let normalizer = PathNormalizer(homeDirectories: homes)
+        let key = normalizer.matchKey(p)
+        // The data volume's own spelling (/System/Volumes/Data) is the whole disk too.
+        guard key != "/" else { throw CLIError("\(p) is too broad to monitor") }
+        let homeKeys = normalizer.homeDirectories.map(PathNormalizer.fold) + ["/users"]
+        if homeKeys.contains(where: { $0 == key || $0.hasPrefix(key + "/") }) {
+            throw CLIError("\(p) is too broad to monitor: it is or holds a home folder (use ~/FOLDER for a folder in every home)")
+        }
+    }
     return p
 }
 
@@ -595,6 +689,18 @@ func cmdCatalog(_ c: IPCClient) throws {
         guard args.positional.count > n else { throw CLIError("usage: whoread catalog \(usage)") }
         return args.positional[n]
     }
+    /// Exactly `count` positionals (counting "catalog" and the subcommand): a stray word, such as
+    /// the tail of an unquoted path with a space, must not be silently dropped.
+    func expect(_ count: Int, _ usage: String) throws {
+        guard args.positional.count == count else { throw CLIError("usage: whoread catalog \(usage)") }
+    }
+    var fetched: CatalogInfo?
+    func info() throws -> CatalogInfo {
+        if let fetched { return fetched }
+        let i = try c.catalog()
+        fetched = i
+        return i
+    }
     func index(_ catalog: Catalog, _ id: String) throws -> Int {
         guard let i = catalog.categories.firstIndex(where: { $0.id == id }) else {
             throw CLIError("unknown category \(id) (see whoread catalog show)")
@@ -603,7 +709,7 @@ func cmdCatalog(_ c: IPCClient) throws {
     }
     /// Read-modify-write of the whole catalog (the daemon takes it through `.updateCatalog`).
     func edit(_ change: (inout Catalog) throws -> String) throws {
-        var catalog = try c.catalog().catalog
+        var catalog = try info().catalog
         let message = try change(&catalog)
         _ = try c.call(.updateCatalog(catalog))
         out(message)
@@ -635,8 +741,10 @@ func cmdCatalog(_ c: IPCClient) throws {
         out(Format.table(rows, header: ["ID", language == .zhHans ? "名称" : "NAME", "SEVERITY", "STATE", "PREFIXES", "OWNERS"]))
     case "add-path", "remove-path":
         let usage = "\(sub) CATEGORY PATH"
+        try expect(4, usage)
         let id = try arg(2, usage)
-        let path = sub == "add-path" ? try catalogPath(try arg(3, usage)) : try arg(3, usage).trimmingCharacters(in: .whitespaces)
+        let path = sub == "add-path" ? try catalogPath(try arg(3, usage), homes: try info().homeDirectories)
+            : try arg(3, usage).trimmingCharacters(in: .whitespaces)
         try edit { cat in
             let i = try index(cat, id)
             if cat.categories[i].kind == .projectRoots {
@@ -653,13 +761,15 @@ func cmdCatalog(_ c: IPCClient) throws {
         }
     case "add-category":
         let usage = "add-category ID NAME_EN NAME_ZH medium|high|critical [--path PATH]..."
+        try expect(6, usage)
         let id = try arg(2, usage), en = try arg(3, usage), zh = try arg(4, usage)
         let severity = try severityArg(try arg(5, usage))
         guard id.range(of: "^[a-z0-9][a-z0-9-]*$", options: .regularExpression) != nil else {
             throw CLIError("category id: lowercase letters, digits and -")
         }
         guard !en.trimmingCharacters(in: .whitespaces).isEmpty else { throw CLIError("NAME_EN must not be empty") }
-        let paths = try args.all("path").map(catalogPath)
+        let homes = try info().homeDirectories
+        let paths = try args.all("path").map { try catalogPath($0, homes: homes) }
         try edit { cat in
             guard cat.category(id) == nil else { throw CLIError("category \(id) already exists") }
             cat.categories.append(CategorySpec(id: id, name: LocalizedText(en: en, zhHans: zh), kind: .custom, group: "custom",
@@ -667,6 +777,7 @@ func cmdCatalog(_ c: IPCClient) throws {
             return "added category \(id)" + (paths.isEmpty ? " (no paths yet: whoread catalog add-path \(id) PATH)" : " with \(paths.count) path(s)")
         }
     case "remove-category":
+        try expect(3, "remove-category ID")
         let id = try arg(2, "remove-category ID")
         try edit { cat in
             let i = try index(cat, id)
@@ -676,6 +787,7 @@ func cmdCatalog(_ c: IPCClient) throws {
         }
     case "set-severity":
         let usage = "set-severity ID medium|high|critical"
+        try expect(4, usage)
         let id = try arg(2, usage)
         let severity = try severityArg(try arg(3, usage))
         try edit { cat in
@@ -684,6 +796,7 @@ func cmdCatalog(_ c: IPCClient) throws {
             return "\(id): severity \(severity.rawValue)"
         }
     case "enable", "disable":
+        try expect(3, "\(sub) ID")
         let id = try arg(2, "\(sub) ID")
         try edit { cat in
             let i = try index(cat, id)
@@ -699,6 +812,7 @@ func cmdCatalog(_ c: IPCClient) throws {
             FileHandle.standardOutput.write(data)
         }
     case "import":
+        try expect(3, "import FILE")
         let file = try arg(2, "import FILE")
         let catalog: Catalog
         do {
@@ -708,8 +822,12 @@ func cmdCatalog(_ c: IPCClient) throws {
         }
         let ids = catalog.categories.map(\.id)
         guard Set(ids).count == ids.count else { throw CLIError("\(file): duplicate category ids") }
+        let homes = try info().homeDirectories
+        // Paths already in the catalog are not new breadth (the default /Volumes/ holds a home
+        // that lives on an external disk), so an exported catalog always imports again.
+        let current = Set(try info().catalog.categories.flatMap(\.paths))
         for cat in catalog.categories where cat.kind != .projectRoots {
-            for p in cat.paths { _ = try catalogPath(p) }
+            for p in cat.paths where !current.contains(p) { _ = try catalogPath(p, homes: homes) }
         }
         _ = try c.call(.updateCatalog(catalog))
         out("catalog imported: \(catalog.categories.count) categories")
@@ -740,7 +858,8 @@ func cmdSettings(_ c: IPCClient) throws {
     guard args.positional.dropFirst().first == "set" else {
         return out(try Format.json(s))
     }
-    guard args.positional.count >= 4 else { throw CLIError("settings set KEY VALUE") }
+    // Exactly one VALUE: the tail of an unquoted path with a space must not be dropped.
+    guard args.positional.count == 4 else { throw CLIError("settings set KEY VALUE (quote a VALUE that has spaces)") }
     let key = args.positional[2]
     let value = args.positional[3]
     func bool(_ v: String) throws -> Bool {
@@ -768,7 +887,14 @@ func cmdSettings(_ c: IPCClient) throws {
         guard let sev = Severity(rawValue: value) else { throw CLIError("medium|high|critical") }
         s.notifications.minimumSeverity = sev
     case "latency-p99-ms": s.latencyP99ThresholdMs = try number(value)
-    case "language": s.language = value == "system" ? nil : Language(rawValue: value)
+    case "language":
+        // zh* means Simplified Chinese, as with --lang; an unknown value is an error, not "system".
+        switch value.lowercased() {
+        case "system": s.language = nil
+        case "en": s.language = .en
+        case let v where v.hasPrefix("zh"): s.language = .zhHans
+        default: throw CLIError("language: en|zh-Hans|system")
+        }
     default: throw CLIError("unknown setting \(key)")
     }
     _ = try c.call(.updateSettings(s))
@@ -887,6 +1013,8 @@ do {
             try run(client)
         } catch let e as IPCError {
             throw explain(e)
+        } catch let u as Unreachable {
+            throw explain(u)
         }
     }
 } catch let e as CLIError {

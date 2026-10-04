@@ -26,7 +26,11 @@ final class DaemonConnection {
     @ObservationIgnored private var needsHello = true
     @ObservationIgnored private var daemonRestarts = 0
     @ObservationIgnored private var registeredLanguage: Language?
-    @ObservationIgnored private let planner = NotificationPlanner()
+    @ObservationIgnored private let planner = NotificationPlanner(
+        notifiedTrip: UserDefaults.standard.string(forKey: DaemonConnection.notifiedTripKey))
+    /// The latency trip already notified: the daemon reports a past trip until enforcement is turned
+    /// on again, and a relaunch must not repeat the notice.
+    private static let notifiedTripKey = "NotifiedLatencyTrip"
     @ObservationIgnored private let queue = DispatchQueue(label: "whoread.app.ipc")
 
     init() {
@@ -105,6 +109,10 @@ final class DaemonConnection {
             }
         } else if snapshot.handshake != nil {
             needsHello = false
+        } else if snapshot.error?.code == .versionMismatch, model.versionProblem == nil {
+            // An answer this app cannot read, from a daemon it has not greeted (replaced between
+            // two polls): the handshake gives the reason in words instead of a decoder dump.
+            needsHello = true
         }
         model.apply(snapshot)
         if model.daemonRestarts != daemonRestarts {
@@ -119,15 +127,24 @@ final class DaemonConnection {
             NotificationManager.shared.registerCategories(language: model.language)
         }
         guard snapshot.error == nil else { return }
-        if let status = model.status {
-            for notice in planner.plan(status: status, language: model.language) {
-                NotificationManager.shared.post(notice, tab: .settings)
-            }
-        }
+        if let status = model.status { planNotices(status) }
         if let settings = model.settings {
             for n in planner.plan(model.alerts, settings: settings.notifications, formatter: model.formatter) {
                 NotificationManager.shared.post(n)
             }
+        }
+    }
+
+    private func planNotices(_ status: DaemonStatus) {
+        for notice in planner.plan(status: status, language: model.language) {
+            NotificationManager.shared.post(notice, tab: .settings)
+        }
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: DaemonConnection.notifiedTripKey) != planner.notifiedTrip else { return }
+        if let trip = planner.notifiedTrip {
+            defaults.set(trip, forKey: DaemonConnection.notifiedTripKey)
+        } else {
+            defaults.removeObject(forKey: DaemonConnection.notifiedTripKey)
         }
     }
 
@@ -144,6 +161,9 @@ final class DaemonConnection {
                 } else {
                     self.lastActionError = nil
                     if let response { self.model.apply(response: response) }
+                    // Re-enabling clears a trip; seen here, a trip right after it (same text) is
+                    // notified even if no poll ran in between.
+                    if case .status(let status)? = response { self.planNotices(status) }
                     then?()
                 }
                 self.poll(full: true)
@@ -167,7 +187,24 @@ final class DaemonConnection {
 
     func markAllRead() { perform(.markAlertsRead(ids: nil)) }
     func setPaused(_ paused: Bool) { perform(.setPaused(paused)) }
-    func save(rule: Rule) { perform(.upsertRule(rule)) }
+    /// Applied to the daemon's current rule, fetched right before saving (as catalog edits are):
+    /// the engine changes exceptions and use counts on its own, and the model's copy can be up to
+    /// 10 s old. `then` runs only if the daemon accepted the rule.
+    func save(rule: Rule, then: (() -> Void)? = nil) {
+        run({ client in
+            let current = try client.rules().first { $0.id == rule.id }
+            return try client.call(.upsertRule(rule.keepingDaemonState(of: current)))
+        }, then: then)
+    }
+
+    /// The rule row's switch: flips `enabled` on the daemon's current copy, nothing else.
+    func setEnabled(_ on: Bool, rule id: String) {
+        run { client in
+            guard var r = try client.rules().first(where: { $0.id == id }) else { throw IPCError(.notFound, "no rule \(id)") }
+            r.enabled = on
+            return try client.call(.upsertRule(r))
+        }
+    }
     func delete(rule id: String) { perform(.deleteRule(id: id)) }
     /// `then` runs only if the daemon accepted the settings.
     func save(settings: Settings, then: (() -> Void)? = nil) { perform(.updateSettings(settings), then: then) }

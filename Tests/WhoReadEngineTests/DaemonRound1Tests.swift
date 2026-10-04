@@ -437,7 +437,7 @@ final class RuleRound1DaemonTests: XCTestCase {
         XCTAssertNotNil(core.status().rulesLoadError)
         XCTAssertTrue(core.currentSettings.enforcementEnabled, "the user's setting is kept for when rules load again")
         // An unprivileged client cannot overwrite the unreadable rules.
-        XCTAssertThrowsError(try core.setRules([], privileged: false)) { e in XCTAssertEqual((e as? IPCError)?.code, .unavailable) }
+        XCTAssertThrowsError(try core.setRules([], privileged: false)) { e in XCTAssertEqual((e as? IPCError)?.code, .notPermitted) }
         XCTAssertThrowsError(try core.upsert(rule: denySSH(id: "new"), peer: agentPeer, mustBeNew: true, privileged: false))
         // The stored rows are untouched.
         try sql(core, "DROP TABLE rules; ALTER TABLE rules_saved RENAME TO rules;")
@@ -548,8 +548,10 @@ final class EnforcementRound1Tests: XCTestCase {
             s.latencyP99ThresholdMs = 1
             try core.update(settings: s, peer: .inProcess)
             try enableEnforcement(core)
-            for _ in 0..<100 { core.enforcer.recordResponse(micros: 5000, missedDeadline: false) }
-            core.checkLatency()
+            for _ in 0..<3 {
+                for _ in 0..<100 { core.enforcer.recordResponse(micros: 5000, missedDeadline: false) }
+                core.checkLatency()
+            }
             core.drainPolicyQueue()
             XCTAssertFalse(core.enforcement.isActive)
             XCTAssertFalse(try core.store.settings().enforcementEnabled, "the trip is saved as the setting")

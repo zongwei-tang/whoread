@@ -107,6 +107,7 @@ public final class DaemonCore: @unchecked Sendable {
     /// Limits on what a (possibly unprivileged) client can store; rule evaluation is linear in them.
     static let maxRules = 512
     static let maxExceptions = 256
+    static let maxNameBytes = 256
 
     /// Tests only: runs in `rediscover` between building the new classifier and installing it.
     var rediscoveryHook: (() -> Void)?
@@ -224,7 +225,9 @@ public final class DaemonCore: @unchecked Sendable {
         }
         self.settings = settings
 
-        latency = LatencyMonitor(p99ThresholdMicros: settings.latencyP99ThresholdMs * 1000)
+        // p99 must stay over the threshold for 3 consecutive checks (with fresh slow responses in each),
+        // so a burst that already ended cannot switch enforcement off; a missed deadline trips at once.
+        latency = LatencyMonitor(p99ThresholdMicros: settings.latencyP99ThresholdMs * 1000, breachesToTrip: 3)
         enforcement = EnforcementState(userEnabled: settings.enforcementEnabled, sourceCanEnforce: false)
         if !rulesOK { enforcement.setRulesLoaded(false) }
         writer = EventWriter(store: store)
@@ -427,6 +430,10 @@ public final class DaemonCore: @unchecked Sendable {
             baseline.approve(responsibleKey: r.key, categoryID: alert.categoryID, at: now)
             persistBaseline()
         case .blockFromNowOn:
+            // As upsert(rule:) checks: a rule on a removed category would make every later catalog edit fail.
+            guard data.catalog.category(alert.categoryID) != nil else {
+                throw IPCError(.invalid, "category \(alert.categoryID) is no longer in the catalog")
+            }
             // Owners keep working: blocking the terminal an alert was charged to must not break ssh/git.
             let blockSubject = RuleSubject.responsible(key: r.key, teamID: r.teamID, cdhash: pin, exceptOwners: true)
             let exists = rules.rules.contains {
@@ -434,9 +441,12 @@ public final class DaemonCore: @unchecked Sendable {
             }
             if !exists {
                 let rule = Rule(
-                    name: "Block \(r.displayName) from \(categoryName)", enabled: true, enforce: true,
+                    name: DaemonCore.truncated("Block \(r.displayName) from \(categoryName)", maxBytes: DaemonCore.maxNameBytes),
+                    enabled: true, enforce: true,
                     target: .category(alert.categoryID), subject: blockSubject, access: .any, action: .deny,
                     includePlatformBinaries: true, createdAt: now, template: DaemonCore.blockFromNowOnTemplate)
+                // A rule that validate() refuses could not be edited later (only deleted).
+                try DaemonCore.validate(rule)
                 try saveRuleChange(peer: peer, privileged: privileged) { list in
                     guard list.count < DaemonCore.maxRules else { throw IPCError(.invalid, "too many rules") }
                     list.append(rule)
@@ -492,8 +502,15 @@ public final class DaemonCore: @unchecked Sendable {
         func check(_ ok: Bool, _ what: String) throws { if !ok { throw IPCError(.invalid, "rule \(what) is too long or invalid") } }
         let idChars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
         try check(!r.id.isEmpty && r.id.utf8.count <= 128 && r.id.unicodeScalars.allSatisfy(idChars.contains), "id")
-        try check((r.name?.utf8.count ?? 0) <= 256, "name")
-        if case .pathPrefix(let p) = r.target { try check(!p.isEmpty && p.utf8.count <= 1024, "path") }
+        try check((r.name?.utf8.count ?? 0) <= maxNameBytes, "name")
+        if case .pathPrefix(let p) = r.target { try check(!p.isEmpty && p.utf8.count <= 1024 && isCleanPath(p), "path") }
+        // Dates are stored and sent as RFC 3339 with a four-digit year: one outside 1970-9999 could not
+        // be read back (every rules reply, and the rules at the next start, would fail to decode).
+        func okDate(_ d: Date?) -> Bool {
+            guard let t = d?.timeIntervalSince1970 else { return true }
+            return t >= 0 && t < 253_402_300_800
+        }
+        try check(okDate(r.createdAt) && okDate(r.expiresAt), "date")
         func checkSubject(_ s: RuleSubject) throws {
             switch s {
             case .signed(let sid, let team):
@@ -513,16 +530,27 @@ public final class DaemonCore: @unchecked Sendable {
         try check(r.exceptions.count <= maxExceptions, "exception list")
         for e in r.exceptions {
             try checkSubject(e.subject)
-            try check((e.pathPrefix?.utf8.count ?? 0) <= 1024 && (e.categoryID?.utf8.count ?? 0) <= 128, "exception")
+            // NUL only: exception paths never reach a C API, and the event paths "allow once" copies can
+            // hold other control characters (Finder's "Icon\r").
+            try check((e.pathPrefix?.utf8.count ?? 0) <= 1024 && !(e.pathPrefix ?? "").unicodeScalars.contains("\u{0}")
+                      && (e.categoryID?.utf8.count ?? 0) <= 128, "exception")
             try check((e.chainAgents?.count ?? 0) <= 32 && (e.chainAgents ?? []).allSatisfy { $0.utf8.count <= 64 }, "exception agents")
+            try check(okDate(e.createdAt) && okDate(e.expiresAt), "exception date")
         }
+    }
+
+    /// No NUL or other control characters: C APIs (realpath, es_mute_path) cut a path at a NUL, so
+    /// `~/\0x` would select the whole home.
+    static func isCleanPath(_ p: String) -> Bool {
+        !p.unicodeScalars.contains { $0.value < 0x20 || (0x7F...0x9F).contains($0.value) }
     }
 
     /// Read-modify-write of the rule list: applied atomically in the engine (a consumed "allow once"
     /// is never reverted by a stale copy), then persisted.
-    private func saveRuleChange(peer: IPCPeer?, privileged: Bool, _ f: (inout [Rule]) throws -> Void) throws {
+    private func saveRuleChange(peer: IPCPeer?, privileged: Bool, replacing: Bool = false,
+                                _ f: (inout [Rule]) throws -> Void) throws {
         mutation.lock(); defer { mutation.unlock() }
-        try checkRulesWritable(privileged: privileged)
+        try checkRulesWritable(privileged: privileged, replacing: replacing)
         let list = try rules.mutate { list in
             try f(&list)
             let ids = list.map(\.id)
@@ -532,11 +560,20 @@ public final class DaemonCore: @unchecked Sendable {
         try persistRules(list)
     }
 
-    /// While stored rules could not be read, only root or the app may overwrite them.
-    private func checkRulesWritable(privileged: Bool) throws {
+    /// While stored rules could not be read, the rules in memory are an empty stand-in: a single-rule
+    /// change would rewrite the table from it. Only an explicit replacement of the whole list, by root
+    /// or the app, may overwrite them (the store backs the old rows up).
+    private func checkRulesWritable(privileged: Bool, replacing: Bool = false) throws {
         lock.lock(); let failed = rulesLoadError; lock.unlock()
-        if failed != nil && !privileged {
-            throw IPCError(.unavailable, "the stored rules could not be loaded; only root or the WhoRead app may replace them")
+        guard let failed else { return }
+        if !privileged {
+            throw IPCError(.notPermitted, "the stored rules could not be loaded; only root or the WhoRead app may replace them")
+        }
+        if !replacing {
+            // Not .unavailable: clients read that as "daemon unreachable".
+            throw IPCError(.invalid, "the stored rules could not be loaded (\(failed)); a change to one rule would delete "
+                           + "them all. Replace the whole list instead (sudo whoread rules replace); the old rules are kept "
+                           + "in the database's rules_backup table")
         }
     }
 
@@ -552,14 +589,39 @@ public final class DaemonCore: @unchecked Sendable {
         let wasFailed = rulesLoadError != nil
         rulesLoadError = nil
         lock.unlock()
-        if wasFailed { enforcement.setRulesLoaded(true) }
+        if wasFailed {
+            Log.warning("the rules that could not be loaded were replaced; unreadable rows are kept in the rules_backup table")
+            enforcement.setRulesLoaded(true)
+        }
         policyChanged()
     }
 
+    /// Replaces the whole list: the only rule change accepted while the stored rules cannot be read.
     public func setRules(_ list: [Rule], privileged: Bool = true) throws {
         mutation.lock(); defer { mutation.unlock() }
         for r in list { try DaemonCore.validate(r) }
-        try saveRuleChange(peer: nil, privileged: privileged) { $0 = list }
+        try saveRuleChange(peer: nil, privileged: privileged, replacing: true) { $0 = list }
+    }
+
+    /// `setRules` for clients: with upsert(rule:)'s checks (known categories, path rules monitored).
+    public func replaceRules(_ list: [Rule], peer: IPCPeer, privileged: Bool) throws {
+        mutation.lock(); defer { mutation.unlock() }
+        for r in list {
+            try DaemonCore.validate(r)
+            if case .category(let id) = r.target, data.catalog.category(id) == nil {
+                throw IPCError(.invalid, "unknown category \(id)")
+            }
+        }
+        // The checks saveRuleChange makes, before the catalog changes for a list that would be refused.
+        try checkRulesWritable(privileged: privileged, replacing: true)
+        let ids = list.map(\.id)
+        guard Set(ids).count == ids.count else { throw IPCError(.invalid, "duplicate rule ids") }
+        guard list.count <= DaemonCore.maxRules else { throw IPCError(.invalid, "too many rules (max \(DaemonCore.maxRules))") }
+        for r in list {
+            if case .pathPrefix(let p) = r.target { try ensureMonitored(prefix: p, peer: peer, privileged: privileged) }
+        }
+        try saveRuleChange(peer: peer, privileged: privileged, replacing: true) { $0 = list }
+        Log.info("rules replaced (\(list.count)) by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
     }
 
     /// `mustBeNew`: the caller was authorized for adding a rule (a strengthening change), so it must
@@ -585,12 +647,14 @@ public final class DaemonCore: @unchecked Sendable {
         try saveRuleChange(peer: peer, privileged: privileged) { list in
             if let i = list.firstIndex(where: { $0.id == rule.id }) {
                 if mustBeNew { throw IPCError(.notPermitted, "rule \(rule.id) already exists; changing it needs sudo or the app") }
-                list[i] = rule
+                // A client edits a copy it read earlier: uses consumed since then must stay consumed
+                // ("allow once" never comes back through a stale full copy).
+                list[i] = DaemonCore.keepingConsumedUses(rule, current: list[i])
             } else {
                 list.append(rule)
             }
         }
-        Log.info("rule \(rule.id) saved by pid \(peer.pid.map(String.init) ?? "?")")
+        Log.info("rule \(rule.id) saved by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
     }
 
     /// A path rule only works on monitored paths (the classifier, the eslogger prefilter and ES muting
@@ -599,19 +663,23 @@ public final class DaemonCore: @unchecked Sendable {
         let c = analyzer.classifier
         let expanded = c.normalizer.expand(p)
         guard !expanded.isEmpty else { throw IPCError(.invalid, "\(p): use an absolute path or ~/…") }
-        let covered = expanded.allSatisfy { e in
-            let n = c.normalizer.normalize(e)
-            return c.classify(normalized: n) != nil || c.containingCategory(normalized: n) != nil || !c.categoriesBelow(normalized: n).isEmpty
-        }
-        if covered { return }
+        if DaemonCore.isCovered(expanded, by: c) { return }
         // Editing the catalog is a privileged change. A console-user client (possibly an agent) may
         // only extend monitoring to its own files: inside a home or on an external volume, never
         // system paths (a deny rule there would block every user's processes once enforcement is on).
+        // Checked on the spelling and on what it resolves to on disk, as the classifier follows links:
+        // `~/link -> /usr/lib` and `/Volumes/Macintosh HD/usr/lib` are system paths.
         if !privileged {
-            let homes = c.normalizer.homeDirectories.map { h in PathNormalizer.fold(h.hasSuffix("/") ? h : h + "/") }
-            let own = expanded.allSatisfy { e in
-                let k = PathNormalizer.fold(c.normalizer.normalize(e))
+            let resolver = RealpathSymlinkResolver()
+            let homeDirs = c.normalizer.homeDirectories
+            let homes = (homeDirs + homeDirs.compactMap(resolver.resolve)).map { h in PathNormalizer.fold(h.hasSuffix("/") ? h : h + "/") }
+            func isOwn(_ path: String) -> Bool {
+                let k = PathNormalizer.fold(c.normalizer.normalize(path))
                 return homes.contains { k.hasPrefix($0) && k.count > $0.count } || k.hasPrefix("/volumes/")
+            }
+            let own = expanded.allSatisfy { e in
+                guard isOwn(e), let resolved = DaemonCore.resolveExisting(e, resolver: resolver) else { return false }
+                return isOwn(resolved)
             }
             guard own else {
                 throw IPCError(.notPermitted, "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app")
@@ -627,12 +695,46 @@ public final class DaemonCore: @unchecked Sendable {
         Log.info("added \(p) to the \(catalog.categories[i].id) category for a path rule")
     }
 
+    /// Every expansion of a path rule's prefix is monitored by `c` (at, above or below it).
+    static func isCovered(_ expanded: [String], by c: PathClassifier) -> Bool {
+        !expanded.isEmpty && expanded.allSatisfy { e in
+            let n = c.normalizer.normalize(e)
+            return c.classify(normalized: n) != nil || c.containingCategory(normalized: n) != nil || !c.categoriesBelow(normalized: n).isEmpty
+        }
+    }
+
+    /// realpath(3) of the deepest existing ancestor of `path`, plus the components below it that do
+    /// not exist yet. nil when an existing component cannot be resolved (a dangling or looping link).
+    static func resolveExisting(_ path: String, resolver: SymlinkResolver) -> String? {
+        var head = PathNormalizer.components(path)
+        var missing: [String] = []
+        var st = stat()
+        while !head.isEmpty && lstat("/" + head.joined(separator: "/"), &st) != 0 {
+            missing.insert(head.removeLast(), at: 0)
+        }
+        guard let resolved = resolver.resolve("/" + head.joined(separator: "/")) else { return nil }
+        return missing.isEmpty ? resolved : ([resolved == "/" ? "" : resolved] + missing).joined(separator: "/")
+    }
+
+    /// `s` cut on a character boundary to at most `maxBytes` UTF-8 bytes, marked with "…".
+    static func truncated(_ s: String, maxBytes: Int) -> String {
+        guard s.utf8.count > maxBytes else { return s }
+        var out = ""
+        var bytes = 0
+        for ch in s {
+            bytes += ch.utf8.count
+            if bytes > maxBytes - 3 { break }
+            out.append(ch)
+        }
+        return out + "…"
+    }
+
     public func deleteRule(id: String, peer: IPCPeer) throws {
         try saveRuleChange(peer: peer, privileged: true) { list in
             guard let i = list.firstIndex(where: { $0.id == id }) else { throw IPCError(.notFound, "no rule \(id)") }
             list.remove(at: i)
         }
-        Log.info("rule \(id) deleted by pid \(peer.pid.map(String.init) ?? "?")")
+        Log.info("rule \(id) deleted by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
     }
 
     // MARK: - Settings & catalog
@@ -666,7 +768,15 @@ public final class DaemonCore: @unchecked Sendable {
             Log.info("enforcement switched \(s.enforcementEnabled ? "on" : "off") by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         }
         if old.monitoringPaused != s.monitoringPaused {
-            Log.info("monitoring \(s.monitoringPaused ? "paused" : "resumed") by pid \(peer.pid.map(String.init) ?? "?")")
+            Log.info("monitoring \(s.monitoringPaused ? "paused" : "resumed") by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
+        }
+        let changed = Mirror(reflecting: s).children.compactMap { child -> String? in
+            guard let label = child.label, label != "enforcementEnabled", label != "monitoringPaused",
+                  let before = Mirror(reflecting: old).children.first(where: { $0.label == label }) else { return nil }
+            return "\(before.value)" == "\(child.value)" ? nil : label
+        }
+        if !changed.isEmpty {
+            Log.info("settings changed (\(changed.joined(separator: ", "))) by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         }
         do {
             try store.saveSettings(s)
@@ -708,6 +818,17 @@ public final class DaemonCore: @unchecked Sendable {
         let c = catalog.map { DaemonCore.stripResolvedOwners($0, reference: defaultCatalog) } ?? defaultCatalog
         let ids = c.categories.map(\.id)
         guard Set(ids).count == ids.count else { throw IPCError(.invalid, "duplicate category ids") }
+        for p in c.categories.flatMap(\.paths) where !DaemonCore.isCleanPath(p) {
+            throw IPCError(.invalid, "catalog path \(p.debugDescription) contains control characters")
+        }
+        // A whole disk, a home or a folder holding homes would make every file there "sensitive" (and,
+        // with an agent rule, blocked). Checked for paths this edit adds, however they are spelled.
+        let existing = Set(data.catalog.categories.flatMap(\.paths))
+        for category in c.categories where category.kind != .projectRoots {
+            for p in category.paths where !existing.contains(p) {
+                if let reason = tooBroad(p) { throw IPCError(.invalid, "catalog path \(p) is \(reason)") }
+            }
+        }
         // A rule on a deleted category would silently stop protecting anything.
         let dangling = rules.rules.filter { r in
             if case .category(let id) = r.target { return r.enabled && c.category(id) == nil }
@@ -716,6 +837,22 @@ public final class DaemonCore: @unchecked Sendable {
         if !dangling.isEmpty {
             throw IPCError(.invalid, "rules use categories this catalog removes: "
                            + dangling.map { $0.name ?? $0.id }.joined(separator: ", ") + "; delete or change those rules first")
+        }
+        // So would a path rule whose prefix this catalog stops monitoring (a removed Custom path, a
+        // disabled category, `catalog reset`). Rules that were not covered before do not block edits.
+        let resolved = DaemonCore.resolveOwners(c, config: config)
+        let s = currentSettings
+        let candidate = DaemonCore.makeClassifier(catalog: resolved, normalizer: normalizerBox.value, settings: s,
+                                                  resolveSymlinks: !config.inMemoryStore)
+        let current = analyzer.classifier
+        let orphaned = rules.rules.filter { r in
+            guard r.enabled, case .pathPrefix(let p) = r.target else { return false }
+            return DaemonCore.isCovered(current.normalizer.expand(p), by: current)
+                && !DaemonCore.isCovered(candidate.normalizer.expand(p), by: candidate)
+        }
+        if !orphaned.isEmpty {
+            throw IPCError(.invalid, "path rules would no longer be monitored with this catalog: "
+                           + orphaned.map { $0.name ?? $0.id }.joined(separator: ", ") + "; delete or change those rules first")
         }
         if !config.inMemoryStore {
             if catalog == nil {
@@ -728,14 +865,14 @@ public final class DaemonCore: @unchecked Sendable {
                 chmod(config.userCatalogBasePath, 0o600)
             }
         }
-        let resolved = DaemonCore.resolveOwners(c, config: config)
         lock.lock()
         _data.catalog = c
         effectiveCatalog = resolved
         catalogGeneration += 1
         lock.unlock()
-        recompileClassifier()
-        Log.info("catalog \(catalog == nil ? "reset to defaults" : "updated") by pid \(peer.pid.map(String.init) ?? "?")")
+        // Settings and homes cannot have changed meanwhile: both are replaced under the mutation lock.
+        install(classifier: candidate, readdir: s.readdirEnabled)
+        Log.info("catalog \(catalog == nil ? "reset to defaults" : "updated") by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
     }
 
     public func recompileClassifier() {
@@ -786,12 +923,44 @@ public final class DaemonCore: @unchecked Sendable {
         }
     }
 
+    /// Why a catalog path is too broad to monitor, or nil.
+    func tooBroad(_ p: String) -> String? {
+        let n = normalizerBox.value
+        let homes = n.homeDirectories.map { PathNormalizer.fold(PathClassifier.stripTrailingSlash($0)) }
+        for e in n.expand(p) {
+            let key = PathNormalizer.fold(PathClassifier.stripTrailingSlash(n.normalize(e)))
+            if key == "/" || key.isEmpty { return "the whole disk" }
+            if homes.contains(key) { return "a whole home folder" }
+            if homes.contains(where: { $0.hasPrefix(key + "/") }) { return "a folder that holds home folders" }
+        }
+        return nil
+    }
+
+    static func keepingConsumedUses(_ incoming: Rule, current: Rule) -> Rule {
+        func lower(_ a: Int?, _ b: Int?) -> Int? {
+            switch (a, b) {
+            case let (x?, y?): return min(x, y)
+            case let (x?, nil): return x
+            case let (nil, y?): return y
+            default: return nil
+            }
+        }
+        var r = incoming
+        r.remainingUses = lower(incoming.remainingUses, current.remainingUses)
+        for i in r.exceptions.indices {
+            if let old = current.exceptions.first(where: { $0.id == r.exceptions[i].id }) {
+                r.exceptions[i].remainingUses = lower(r.exceptions[i].remainingUses, old.remainingUses)
+            }
+        }
+        return r
+    }
+
     public func restartLearning(peer: IPCPeer) throws {
         let now = Date()
         baseline.resetLearned(at: now)
         try store.setDate(now, forKey: "learning_started_at")
         persistBaseline()
-        Log.info("learning restarted by pid \(peer.pid.map(String.init) ?? "?")")
+        Log.info("learning restarted by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
     }
 
     /// The catalog as the user edits it (owner identities resolved on this Mac are not included, so
@@ -821,6 +990,9 @@ public final class DaemonCore: @unchecked Sendable {
     /// whole rules table every 30 s for good.
     public func saveConsumableRules(now: Date = Date()) {
         mutation.lock(); defer { mutation.unlock() }
+        // Never over stored rules that could not be read (see checkRulesWritable).
+        lock.lock(); let failed = rulesLoadError != nil; lock.unlock()
+        guard !failed else { return }
         let consumed = rules.takeConsumed()
         let pruned = rules.pruneDeadExceptions(at: now)
         guard consumed || pruned else { return }
@@ -899,6 +1071,7 @@ public final class DaemonCore: @unchecked Sendable {
             latency: latency.evaluateWithoutTripping(), parser: source.parserStats, counts: counts,
             unreadAlerts: counts.unreadAlerts, lastEventAt: stats.lastEventAt, eventsProcessed: stats.processed,
             writerDropped: writer.droppedCount, monitoredPrefixes: analyzer.classifier.prefixes.count,
-            homeDirectories: homes, rulesLoadError: rulesError, sourceDroppedEvents: source.droppedEvents)
+            homeDirectories: homes, rulesLoadError: rulesError, sourceDroppedEvents: source.droppedEvents,
+            sourceKernelDrops: source.kernelDroppedEvents)
     }
 }

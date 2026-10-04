@@ -36,18 +36,22 @@ RULE=""; KILL_SWITCH=""; STOPPED_PID=""
 cleanup() {
   [ -n "$STOPPED_PID" ] && sudo kill -CONT "$STOPPED_PID" 2>/dev/null
   [ -n "$KILL_SWITCH" ] && sudo "$WR" kill-switch release >/dev/null 2>&1
+  # Back to the template's defaults (disabled, dry run), so a later "enable" does not block.
+  sudo "$WR" rules dry-run template.block-agents-critical >/dev/null 2>&1
   sudo "$WR" rules disable template.block-agents-critical >/dev/null 2>&1
   sudo "$WR" rules delete m5-deny-vault >/dev/null 2>&1
   [ -f "$TMPDIR/m5-moved" ] && [ ! -e "$KEY" ] && /bin/mv "$TMPDIR/m5-moved" "$KEY"
-  rm -f ${RULE:+"$RULE"} "$TMPDIR"/m5-*
+  rm -f ${RULE:+"$RULE"} "$TMPDIR"/m5-* "$VAULT/ssh/m5-new"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
+# Left over from an interrupted run, it would turn the AUTH_CREATE check below into an open.
+rm -f "$VAULT/ssh/m5-new"
 RULE=$(mktemp)
 cat > "$RULE" <<JSON
 {"id":"m5-deny-vault","name":"M5: block non-owners from the test vault","enabled":true,"enforce":true,
- "target":{"category":"test-vault"},"subject":{"type":"anyNonOwner"},"access":"read","action":"deny",
+ "target":{"category":"test-vault"},"subject":{"type":"anyNonOwner"},"access":"any","action":"deny",
  "includePlatformBinaries":true}
 JSON
 sudo "$WR" rules add --json-file "$RULE" >/dev/null
@@ -57,6 +61,8 @@ sleep 0.5
 echo "== deny rule"
 denied /bin/cat "$KEY" && ok "cat of the test key → Operation not permitted" || bad "cat was not denied"
 allowed /usr/bin/ssh-keygen -y -f "$KEY" && ok "ssh-keygen -y -f (owner) still works" || bad "owner ssh-keygen was blocked"
+allowed /bin/ls "$VAULT/ssh" && ok "listing the vault still works (listings are never blocked)" || bad "ls of the vault was blocked"
+denied /usr/bin/touch "$VAULT/ssh/m5-new" && ok "new file in the vault denied (AUTH_CREATE)" || bad "creating a file in the vault was not denied"
 
 echo "== bypass attempts"
 rm -f "$TMPDIR"/m5-*
@@ -106,6 +112,17 @@ sudo "$WR" rules disable template.block-agents-critical >/dev/null
 sudo "$WR" rules enable m5-deny-vault >/dev/null
 sleep 0.3
 
+# Now, not at the end: "enforcement on" below starts a new latency window, and the daemon
+# restarted after the SIGKILL starts with an empty one. The checks above are only a few dozen
+# AUTH responses; a burst of denied opens (denials are never cached) gives p99 enough samples.
+for _ in $(seq 200); do /bin/cat "$KEY" >/dev/null 2>&1; done
+echo "== latency"
+"$WR" status --json | python3 -c '
+import json,sys; s=json.load(sys.stdin)["latency"]
+print("  AUTH responses: %d (%d in the window), p50 %.0f µs, p99 %.0f µs, max %.0f µs, deadline misses %d" % (s["totalResponses"], s["samples"], s["p50Micros"], s["p99Micros"], s["maxMicros"], s["deadlineMisses"]))'
+trip=$("$WR" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("latencyTripReason") or "")')
+[ -z "$trip" ] && ok "no latency trip" || bad "latency trip turned enforcement off: $trip"
+
 echo "== kill switches (each must take effect immediately)"
 t() { python3 -c 'import time; print(time.time())'; }
 first_allowed() { local s; s=$(t); for _ in $(seq 100); do allowed /bin/cat "$KEY" && { python3 -c "print(round($(t)-$s,3))"; return 0; }; sleep 0.02; done; echo "timeout"; return 1; }
@@ -129,25 +146,44 @@ echo "  loop results while the daemon was SIGKILLed: $(sort "$TMPDIR/m5-loop" | 
 for _ in $(seq 50); do "$WR" status >/dev/null 2>&1 && break; sleep 0.2; done
 "$WR" status >/dev/null 2>&1 && ok "launchd restarted the daemon" || bad "daemon did not come back"
 uptime >/dev/null && ok "system responsive"
+# The auth-armed marker outlived the SIGKILL: the new instance must leave enforcement off (setting
+# off, reason shown) until an explicit "enforcement on", instead of risking another kill.
+enforcement_state() { "$WR" status --json | python3 -c '
+import json,sys; s=json.load(sys.stdin)
+print("on" if s["enforcementEnabled"] or s["enforcementActive"] else "off", s.get("latencyTripReason") or "(no reason)")'; }
+st=$(enforcement_state)
+case "$st" in
+  "off "*"while enforcing"*) ok "restart left enforcement off: ${st#off }" ;;
+  *) bad "after the SIGKILL, expected enforcement off with a 'stopped while enforcing' reason, got: $st" ;;
+esac
+allowed /bin/cat "$KEY" && ok "cat allowed after the restart (fail open)" || bad "cat still denied after the restart"
 
 if [ "${1:-}" = "--stop-test" ]; then
   echo "== daemon stopped (SIGSTOP): what happens to a pending AUTH?"
-  PID=$(pgrep -x whoreadd | head -1)
-  STOPPED_PID="$PID"
-  sudo kill -STOP "$PID"
-  s=$(t); /bin/cat "$KEY" >/dev/null 2>"$TMPDIR/err"; rc=$?; e=$(t)
-  echo "  cat returned rc=$rc after $(python3 -c "print(round($e-$s,2))") s: $(cat "$TMPDIR/err")"
-  sudo kill -CONT "$PID" 2>/dev/null || true
-  STOPPED_PID=""
-  sleep 2
-  "$WR" status | head -3
-  echo "  (record this in docs/STATUS.md: expected per WWDC20 — client killed at the deadline, implicit allow)"
+  # The restart left enforcement off, so nothing would be pending: turn it back on first.
+  "$WR" enforcement on >/dev/null
+  if ! d=$(first_denied); then
+    bad "stop-test: enforcement did not come back after 'enforcement on': $d"
+  else
+    PID=$(pgrep -x whoreadd | head -1)
+    STOPPED_PID="$PID"
+    sudo kill -STOP "$PID"
+    s=$(t); /bin/cat "$KEY" >/dev/null 2>"$TMPDIR/err"; rc=$?; e=$(t)
+    echo "  cat returned rc=$rc after $(python3 -c "print(round($e-$s,2))") s: $(cat "$TMPDIR/err")"
+    sudo kill -CONT "$PID" 2>/dev/null || true
+    STOPPED_PID=""
+    sleep 2
+    # Killed at the deadline: launchd restarts it, possibly after its respawn throttle.
+    for _ in $(seq 150); do "$WR" status >/dev/null 2>&1 && break; sleep 0.2; done
+    NEW_PID=$(pgrep -x whoreadd | head -1)
+    if [ -n "$NEW_PID" ] && [ "$NEW_PID" = "$PID" ]; then
+      echo "  the daemon survived the stop (pid $PID); enforcement: $(enforcement_state)"
+    else
+      echo "  the daemon was killed (pid $PID, now ${NEW_PID:-not running}); enforcement: $(enforcement_state)"
+    fi
+    echo "  (record this in docs/STATUS.md: expected per WWDC20 — client killed at the deadline, implicit allow)"
+  fi
 fi
-
-echo "== latency"
-"$WR" status --json | python3 -c '
-import json,sys; s=json.load(sys.stdin)["latency"]
-print("  AUTH responses: %d, p50 %.0f µs, p99 %.0f µs, max %.0f µs, deadline misses %d" % (s["totalResponses"], s["p50Micros"], s["p99Micros"], s["maxMicros"], s["deadlineMisses"]))'
 
 echo
 echo "$PASS passed, $FAIL failed"

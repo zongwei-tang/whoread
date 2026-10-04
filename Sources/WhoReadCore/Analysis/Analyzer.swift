@@ -237,7 +237,10 @@ public final class Analyzer: @unchecked Sendable {
                 }
                 eventDecision = d.verdict == .deny ? .denied : .allowed
             case .monitorOnly:
-                decision = rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: false, now: time)
+                // A modified close reports a write that an earlier open already decided: it must not use up
+                // an "allow once" meant for the next open.
+                decision = rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: false, now: time,
+                                          consumeExceptions: activity.operation != .close)
                 eventDecision = decision.wouldDeny ? .wouldDeny : .observed
             case .afterAuth:
                 var d = rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: true,
