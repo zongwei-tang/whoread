@@ -1,0 +1,142 @@
+# XcodeGen spec. Generate with:  scripts/xcodegen.sh   (writes Xcode/WhoRead.xcodeproj)
+# Build with:                    scripts/build.sh [Debug|Release]
+#
+# Signing: set DEVELOPMENT_TEAM and BUNDLE_ID_PREFIX in Xcode/Local.xcconfig (not committed),
+# see Xcode/Local.xcconfig.example. Without a team, targets build ad-hoc signed (fine for the
+# dev LaunchDaemon on a SIP-disabled VM, not for the system extension on a normal Mac).
+name: WhoRead
+minimumXcodeGenVersion: 2.40.0
+configFiles:
+  Debug: Shared.xcconfig
+  Release: Shared.xcconfig
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  defaultConfig: Debug
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+packages:
+  WhoReadKit:
+    path: ..
+    group: ""
+
+targets:
+  # Menu bar app. Runs as the user, talks to the daemon over XPC, never opens the database.
+  WhoRead:
+    type: application
+    platform: macOS
+    sources:
+      - path: ../App/Sources
+      - path: ../App/Resources
+        buildPhase: resources
+      - path: ../Data
+        buildPhase: resources
+        type: folder
+        name: WhoReadData
+    dependencies:
+      - package: WhoReadKit
+        products: [WhoReadCore, WhoReadIPC]
+      - target: WhoReadExtension
+    info:
+      path: ../App/Info.plist
+      properties:
+        CFBundleDisplayName: WhoRead
+        LSUIElement: true
+        LSMinimumSystemVersion: "14.0"
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations: [en, zh-Hans]
+        NSHumanReadableCopyright: ""
+        WhoReadMachServiceName: "$(WHOREAD_MACH_SERVICE)"
+        WhoReadExtensionBundleID: "$(WHOREAD_EXTENSION_BUNDLE_ID)"
+    entitlements:
+      path: ../App/WhoRead.entitlements
+      properties:
+        com.apple.developer.system-extension.install: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(BUNDLE_ID_PREFIX).whoread"
+        PRODUCT_NAME: WhoRead
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_EMIT_LOC_STRINGS: YES
+        LOCALIZATION_PREFERS_STRING_CATALOGS: YES
+    scheme:
+      environmentVariables: {}
+
+  # Endpoint Security system extension (release form of the daemon). Needs the ES entitlement
+  # (Apple approval for distribution; SIP disabled for development).
+  WhoReadExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: ../Extension
+        excludes: ["*.plist", "*.entitlements"]
+      - path: ../Data
+        buildPhase: resources
+        type: folder
+        name: WhoReadData
+    dependencies:
+      - package: WhoReadKit
+        product: WhoReadEngine
+      - sdk: libEndpointSecurity.tbd
+      - sdk: libbsm.tbd
+    info:
+      path: ../Extension/Info.plist
+      properties:
+        CFBundlePackageType: "$(PRODUCT_BUNDLE_PACKAGE_TYPE)"
+        CFBundleDisplayName: WhoRead Extension
+        NSSystemExtensionUsageDescription: "WhoRead watches who opens your sensitive files (SSH keys, cloud credentials, browser data) and can block access you did not allow."
+        NSEndpointSecurityMachServiceName: "$(WHOREAD_MACH_SERVICE)"
+        NSEndpointSecurityEarlyBoot: false
+    entitlements:
+      path: ../Extension/WhoReadExtension.entitlements
+      properties:
+        com.apple.developer.endpoint-security.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(WHOREAD_EXTENSION_BUNDLE_ID)"
+        PRODUCT_NAME: "$(WHOREAD_EXTENSION_BUNDLE_ID)"
+        SKIP_INSTALL: YES
+
+  # Development daemon (LaunchDaemon form). Same engine; eslogger or native ES source.
+  whoreadd:
+    type: tool
+    platform: macOS
+    sources:
+      - path: ../Sources/whoreadd
+    dependencies:
+      - package: WhoReadKit
+        product: WhoReadEngine
+      - sdk: libEndpointSecurity.tbd
+      - sdk: libbsm.tbd
+    entitlements:
+      path: ../Extension/whoreadd.entitlements
+      properties:
+        com.apple.developer.endpoint-security.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(BUNDLE_ID_PREFIX).whoread.daemon"
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        GENERATE_INFOPLIST_FILE: YES
+
+  # Command line client.
+  whoread:
+    type: tool
+    platform: macOS
+    sources:
+      - path: ../Sources/whoread
+    dependencies:
+      - package: WhoReadKit
+        product: WhoReadEngine
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(BUNDLE_ID_PREFIX).whoread.cli"
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        GENERATE_INFOPLIST_FILE: YES
