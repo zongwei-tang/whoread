@@ -45,6 +45,15 @@ public final class EsloggerParser: @unchecked Sendable {
         lock.lock(); f(&_stats); lock.unlock()
     }
 
+    /// Lines skipped by the prefilter still carry a sequence number; feeding it here keeps the
+    /// kernel-drop counter honest (a prefiltered line is not a dropped event).
+    public func noteSequence(_ g: UInt64) {
+        lock.lock()
+        if let last = lastGlobalSeq, g > last + 1 { _stats.droppedByKernel += g - last - 1 }
+        if lastGlobalSeq.map({ g > $0 }) ?? true { lastGlobalSeq = g }
+        lock.unlock()
+    }
+
     public func parse(line: String) -> Result {
         parse(data: Data(line.utf8))
     }

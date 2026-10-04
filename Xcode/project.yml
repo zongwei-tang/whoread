@@ -49,6 +49,8 @@ targets:
       path: ../App/Info.plist
       properties:
         CFBundleDisplayName: WhoRead
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
         CFBundleDevelopmentRegion: en
@@ -92,6 +94,8 @@ targets:
       properties:
         CFBundlePackageType: "$(PRODUCT_BUNDLE_PACKAGE_TYPE)"
         CFBundleDisplayName: WhoRead Extension
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSSystemExtensionUsageDescription: "WhoRead watches who opens your sensitive files (SSH keys, cloud credentials, browser data) and can block access you did not allow."
         NSEndpointSecurityMachServiceName: "$(WHOREAD_MACH_SERVICE)"
         NSEndpointSecurityEarlyBoot: false

@@ -141,6 +141,18 @@ final class EsloggerParserTests: XCTestCase {
         XCTAssertEqual(p.stats.droppedByKernel, 3)
     }
 
+    func testSequenceExtractionWithoutParsing() {
+        let line = #"{"schema_version":1,"global_seq_num":  123456,"event":{"open":{}}}"#
+        let seq = Data(line.utf8).withUnsafeBytes { LinePrefilter.globalSequence($0) }
+        XCTAssertEqual(seq, 123456)
+        XCTAssertNil(Data("{}".utf8).withUnsafeBytes { LinePrefilter.globalSequence($0) })
+        let p = EsloggerParser()
+        p.noteSequence(5)
+        p.noteSequence(6)
+        p.noteSequence(9)
+        XCTAssertEqual(p.stats.droppedByKernel, 2)
+    }
+
     func testNumbersAsStringsAndBoolsAsInts() {
         let p = EsloggerParser()
         let l = #"{"schema_version":"1","process":{"audit_token":{"pid":"42"},"ppid":1,"is_platform_binary":1,"executable":{"path":"\/bin\/cat","path_truncated":0}},"event":{"open":{"fflag":"3","file":{"path":"\/Users\/a\/x"}}}}"#
@@ -239,6 +251,7 @@ final class FixtureReplayTests: XCTestCase {
             XCTAssertEqual(cat.severity, .critical)
             let py = try XCTUnwrap(find(502, "/aws/credentials"), shape)
             XCTAssertEqual(py.chain.map(\.name), ["launchd", "Terminal", "zsh", "Python"], shape)
+            XCTAssertEqual(py.responsible.displayName, "Terminal", "\(shape): framework helper app is not an app")
             let node = try XCTUnwrap(find(503, "/ssh/id_ed25519"), shape)
             XCTAssertEqual(node.responsible.displayName, "Terminal")
             // Agent chain.

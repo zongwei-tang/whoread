@@ -186,7 +186,7 @@ public struct UsageSummary: Codable, Hashable, Sendable {
     }
 
     /// Key that identifies a summary row.
-    public var rowKey: String { responsible.key + "\u{0}" + categoryID + "\u{0}" + (agentID ?? "") }
+    public var rowKey: String { responsible.key + "\u{0}" + categoryID + "\u{0}" + (agentID ?? "") + (benign ? "\u{0}b" : "") }
 
     public mutating func add(_ e: AnalyzedEvent) {
         count += 1

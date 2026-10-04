@@ -203,6 +203,16 @@ final class AttributionTests: XCTestCase {
         XCTAssertEqual(r.key, "app:/applications/zoom.us.app")
         XCTAssertEqual(r.teamID, "TEAM12345")
 
+        // /usr/bin/python3 runs Python3.framework/…/Python.app: not an app; Terminal is responsible.
+        let clt = h.spawn(zsh, proc(530, "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",
+                                    start: 6, platform: true), 6)
+        r = h.attributor.attribute(chain: h.tree.chain(for: clt, at: at(7)))
+        XCTAssertEqual(r.displayName, "Terminal")
+        XCTAssertEqual(BundlePath.outermostApp(in: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/131/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper"),
+                       "/Applications/Google Chrome.app")
+        XCTAssertEqual(BundlePath.outermostApp(in: "/Applications/Xcode.app/Contents/Applications/Simulator.app/Contents/MacOS/Simulator"),
+                       "/Applications/Xcode.app")
+
         // cron → sh → python (homebrew) → cat: nearest non-platform ancestor is python.
         let cron = proc(800, "/usr/sbin/cron", ppid: 1, start: 9, platform: true)
         let sh2 = h.spawn(cron, proc(801, "/bin/sh", start: 9, platform: true), 9)

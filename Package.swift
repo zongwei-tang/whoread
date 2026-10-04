@@ -49,8 +49,8 @@ let package = Package(
                 .linkedLibrary("bsm", .when(platforms: [.macOS])),
             ]
         ),
-        .executableTarget(name: "whoreadd", dependencies: ["WhoReadEngine"]),
-        .executableTarget(name: "whoread", dependencies: ["WhoReadEngine"]),
+        .executableTarget(name: "whoreadd", dependencies: ["WhoReadEngine", "WhoReadIPC", "WhoReadCore"]),
+        .executableTarget(name: "whoread", dependencies: ["WhoReadEngine", "WhoReadIPC", "WhoReadCore"]),
         .testTarget(name: "WhoReadCoreTests", dependencies: ["WhoReadCore"]),
         .testTarget(name: "WhoReadStoreTests", dependencies: ["WhoReadStore"]),
         .testTarget(name: "WhoReadEngineTests", dependencies: ["WhoReadEngine"]),

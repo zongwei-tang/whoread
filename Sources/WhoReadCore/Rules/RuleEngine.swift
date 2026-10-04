@@ -233,6 +233,7 @@ public final class RuleEngine: @unchecked Sendable {
                         let exceptionIndex = c.rule.exceptions.indices.first { ei in
                             let e = c.rule.exceptions[ei]
                             guard e.isLive(at: now) else { return false }
+                            if let cat = e.categoryID, cat != category.id { return false }
                             let prefixes = c.exceptionPrefixKeys[ei]
                             if !prefixes.isEmpty && !prefixes.contains(where: { pathKey == $0 || pathKey.hasPrefix($0 + "/") }) {
                                 return false

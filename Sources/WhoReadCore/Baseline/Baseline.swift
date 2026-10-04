@@ -68,6 +68,16 @@ public final class Baseline: @unchecked Sendable {
         learningStartedAt = now
     }
 
+    /// Forgets everything learned or observed (user approvals stay) and restarts learning.
+    public func resetLearned(at now: Date) {
+        lock.lock(); defer { lock.unlock() }
+        for (key, entry) in entries where entry.source != .approved {
+            entries[key] = nil
+            dirty.insert(key)
+        }
+        learningStartedAt = now
+    }
+
     public func contains(_ key: BaselineKey) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return entries[key] != nil

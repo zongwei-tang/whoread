@@ -66,7 +66,7 @@ public struct ProcessRecord: Codable, Hashable, Sendable {
         return executablePath
     }
 
-    /// Path of the outermost `.app` bundle containing the executable, if any.
+    /// Path of the outermost user-facing `.app` bundle containing the executable, if any.
     public var outermostAppBundle: String? { BundlePath.outermostApp(in: executablePath) }
 
     /// True for launchd and the kernel, which terminate every chain.
@@ -96,7 +96,26 @@ public enum BundlePath {
     /// "/Applications/Xcode.app/Contents/Applications/Simulator.app/Contents/MacOS/Simulator"
     /// -> "/Applications/Xcode.app"
     public static func outermostApp(in path: String) -> String? {
-        appBundles(in: path).first
+        attributableAppBundles(in: path).first
+    }
+
+    /// `.app` bundles that stand for an application. Helper apps embedded in a framework with no
+    /// enclosing app (e.g. `Python3.framework/…/Resources/Python.app`, the interpreter behind
+    /// `/usr/bin/python3`) are runtime plumbing, not the app responsible for an access.
+    public static func attributableAppBundles(in path: String) -> [String] {
+        var out: [String] = []
+        var current = ""
+        var sawFramework = false
+        for component in path.split(separator: "/") {
+            current += current.isEmpty && !path.hasPrefix("/") ? String(component) : "/" + component
+            let lower = component.lowercased()
+            if lower.hasSuffix(".framework") && out.isEmpty { sawFramework = true }
+            if component.count > 4 && lower.hasSuffix(".app") {
+                if out.isEmpty && sawFramework { continue }
+                out.append(current)
+            }
+        }
+        return out
     }
 
     /// Every `.app` bundle on the path, outermost first.

@@ -152,15 +152,18 @@ public struct RuleException: Codable, Hashable, Sendable, Identifiable {
     public var subject: RuleSubject
     /// Narrow the exception to one path prefix; nil = everything the rule targets.
     public var pathPrefix: String?
+    /// Narrow the exception to one category; nil = every category the rule targets.
+    public var categoryID: String?
     public var expiresAt: Date?
     public var remainingUses: Int?
     public var createdAt: Date
 
-    public init(id: String = UUID().uuidString, subject: RuleSubject, pathPrefix: String? = nil,
+    public init(id: String = UUID().uuidString, subject: RuleSubject, pathPrefix: String? = nil, categoryID: String? = nil,
                 expiresAt: Date? = nil, remainingUses: Int? = nil, createdAt: Date = Date()) {
         self.id = id
         self.subject = subject
         self.pathPrefix = pathPrefix
+        self.categoryID = categoryID
         self.expiresAt = expiresAt
         self.remainingUses = remainingUses
         self.createdAt = createdAt

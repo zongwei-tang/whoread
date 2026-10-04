@@ -65,9 +65,12 @@ public final class LatencyMonitor: @unchecked Sendable {
 
     public var isTripped: Bool { trippedReason != nil }
 
+    /// Stats only (status display); never trips.
+    public func evaluateWithoutTripping() -> LatencyStats { evaluate(trip: false) }
+
     /// Computes stats over the window and trips on p99. Returns the stats.
     @discardableResult
-    public func evaluate() -> LatencyStats {
+    public func evaluate(trip: Bool = true) -> LatencyStats {
         lock.lock()
         let samples = Array(ring.prefix(filled))
         let misses = self.misses
@@ -82,7 +85,7 @@ public final class LatencyMonitor: @unchecked Sendable {
         }
         let stats = LatencyStats(samples: sorted.count, p50Micros: percentile(0.50), p99Micros: percentile(0.99),
                                  maxMicros: Double(sorted.last ?? 0), deadlineMisses: misses, totalResponses: total)
-        if sorted.count >= minimumSamples && stats.p99Micros > p99ThresholdMicros {
+        if trip && sorted.count >= minimumSamples && stats.p99Micros > p99ThresholdMicros {
             lock.lock()
             if tripped == nil {
                 tripped = String(format: "p99 latency %.1f ms over %.1f ms", stats.p99Micros / 1000, p99ThresholdMicros / 1000)

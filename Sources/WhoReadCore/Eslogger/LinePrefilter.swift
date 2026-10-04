@@ -96,6 +96,37 @@ public final class LinePrefilter: @unchecked Sendable {
         return .drop
     }
 
+    /// Cheap extraction of `"global_seq_num":<digits>` from a raw line (no JSON parse).
+    public static func globalSequence(_ line: UnsafeRawBufferPointer) -> UInt64? {
+        let key = Array("\"global_seq_num\":".utf8)
+        guard line.count > key.count else { return nil }
+        var i = 0
+        let end = line.count - key.count
+        while i <= end {
+            if line[i] == key[0] {
+                var match = true
+                for j in 1..<key.count where line[i + j] != key[j] {
+                    match = false
+                    break
+                }
+                if match {
+                    var k = i + key.count
+                    while k < line.count && line[k] == 0x20 { k += 1 }
+                    var value: UInt64 = 0
+                    var digits = 0
+                    while k < line.count, line[k] >= 0x30, line[k] <= 0x39 {
+                        value = value &* 10 &+ UInt64(line[k] - 0x30)
+                        k += 1
+                        digits += 1
+                    }
+                    return digits > 0 ? value : nil
+                }
+            }
+            i += 1
+        }
+        return nil
+    }
+
     public func verdict(_ data: Data) -> Verdict {
         data.withUnsafeBytes { verdict($0) }
     }
