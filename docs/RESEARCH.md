@@ -89,4 +89,11 @@ in the notes are handled defensively (see below).
 5. `codesign -dv` the owner / benign / agent apps: `whoread catalog resolve-owners` fills
    signing IDs and team IDs from the installed apps.
 6. Whether `NSXPCConnection.setCodeSigningRequirement` (macOS 13+) works against an ad-hoc
-   signed dev CLI (expected: no, so dev builds use a debug-only flag).
+   signed dev CLI (expected: no; dev builds run without a client requirement).
+7. Whether `audit_token_to_pid` / `_pidversion` / `_euid` (libbsm) are visible from Swift via
+   `import EndpointSecurity`/`Darwin`. If not, add a small C shim module including
+   `<bsm/libbsm.h>`. `NativeESSource` was only type-checked against a stub of the documented
+   Swift API (`scripts/dev/es-typecheck`).
+8. `es_exec_arg` reads data that follows the struct inside the message. `NativeESSource` passes a
+   pointer into the original message (offset of `event`), never a copy. Verify on device that argv
+   comes out right.

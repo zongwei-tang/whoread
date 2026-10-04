@@ -154,7 +154,7 @@ public final class DaemonCore: @unchecked Sendable {
             guard let self else { return }
             Log.info("enforcement is now \(active ? "ACTIVE" : "inactive") \(self.enforcement.inactiveReasons.map(\.rawValue))")
             self.source.enforcementChanged(active: active)
-            self.onPolicyChanged?()
+            self.policyChanged()
         }
     }
 
@@ -185,6 +185,11 @@ public final class DaemonCore: @unchecked Sendable {
     static func makeClassifier(catalog: Catalog, normalizer: PathNormalizer, settings: Settings, resolveSymlinks: Bool) -> PathClassifier {
         PathClassifier(catalog: catalog, normalizer: normalizer, projectRoots: settings.projectRoots,
                        symlinks: resolveSymlinks ? RealpathSymlinkResolver() : NoSymlinkResolver())
+    }
+
+    func policyChanged() {
+        source?.policyChanged()
+        onPolicyChanged?()
     }
 
     public var currentSettings: Settings {
@@ -271,7 +276,7 @@ public final class DaemonCore: @unchecked Sendable {
         rules.replace(rules: list)
         try store.saveRules(list)
         enforcement.setRulesLoaded(true)
-        onPolicyChanged?()
+        policyChanged()
     }
 
     public func upsert(rule: Rule, peer: IPCPeer) throws {
@@ -349,7 +354,7 @@ public final class DaemonCore: @unchecked Sendable {
         let c = DaemonCore.makeClassifier(catalog: catalog, normalizer: normalizer, settings: s, resolveSymlinks: !config.inMemoryStore)
         analyzer.replace(classifier: c)
         source?.updateMonitoring(prefixes: c.prefixes.map(\.path), ancestors: c.ancestors, readdir: s.readdirEnabled)
-        onPolicyChanged?()
+        policyChanged()
     }
 
     public func restartLearning(peer: IPCPeer) throws {

@@ -26,5 +26,9 @@
 	<string>$(WHOREAD_MACH_SERVICE)</string>
 	<key>NSSystemExtensionUsageDescription</key>
 	<string>WhoRead watches who opens your sensitive files (SSH keys, cloud credentials, browser data) and can block access you did not allow.</string>
+	<key>WhoReadAppRequirement</key>
+	<string>identifier "$(BUNDLE_ID_PREFIX).whoread" and anchor apple generic and certificate leaf[subject.OU] = "$(DEVELOPMENT_TEAM)"</string>
+	<key>WhoReadClientRequirement</key>
+	<string>anchor apple generic and certificate leaf[subject.OU] = "$(DEVELOPMENT_TEAM)"</string>
 </dict>
 </plist>

@@ -13,6 +13,7 @@ Tests/Fixtures/eslogger/captured/raw/
 *.sqlite-wal
 *.sqlite-shm
 Xcode/Local.xcconfig
+scripts/dev/es-typecheck/.build/
 
 # Local working notes, never published.
 .local/

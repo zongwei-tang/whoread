@@ -7,6 +7,7 @@
 //   WhoReadStore   SQLite-backed EventStore
 //   WhoReadIPC     daemon <-> app/CLI message protocol + transports
 //   WhoReadEngine  daemon runtime: event sources, pipeline, kill switch, service handler
+//   WhoReadUIModel app view models (no UI framework; tested on any host)
 //   whoreadd       root daemon executable (dev LaunchDaemon form)
 //   whoread        command line client
 // The SwiftUI app and the system extension are Xcode targets generated from project.yml
@@ -22,6 +23,7 @@ let package = Package(
         .library(name: "WhoReadStore", targets: ["WhoReadStore"]),
         .library(name: "WhoReadIPC", targets: ["WhoReadIPC"]),
         .library(name: "WhoReadEngine", targets: ["WhoReadEngine"]),
+        .library(name: "WhoReadUIModel", targets: ["WhoReadUIModel"]),
         .executable(name: "whoreadd", targets: ["whoreadd"]),
         .executable(name: "whoread", targets: ["whoread"]),
     ],
@@ -49,10 +51,13 @@ let package = Package(
                 .linkedLibrary("bsm", .when(platforms: [.macOS])),
             ]
         ),
+        // View models for the SwiftUI app: no SwiftUI/AppKit, so they build and test anywhere.
+        .target(name: "WhoReadUIModel", dependencies: ["WhoReadCore", "WhoReadIPC"]),
         .executableTarget(name: "whoreadd", dependencies: ["WhoReadEngine", "WhoReadIPC", "WhoReadCore"]),
         .executableTarget(name: "whoread", dependencies: ["WhoReadEngine", "WhoReadIPC", "WhoReadCore"]),
         .testTarget(name: "WhoReadCoreTests", dependencies: ["WhoReadCore"]),
         .testTarget(name: "WhoReadStoreTests", dependencies: ["WhoReadStore"]),
         .testTarget(name: "WhoReadEngineTests", dependencies: ["WhoReadEngine"]),
+        .testTarget(name: "WhoReadUIModelTests", dependencies: ["WhoReadUIModel", "WhoReadEngine"]),
     ]
 )

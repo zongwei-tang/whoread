@@ -17,11 +17,14 @@ public protocol EventSource: AnyObject, Sendable {
     func updateMonitoring(prefixes: [String], ancestors: [String], readdir: Bool)
     /// Enforcement turned on/off: native source subscribes / unsubscribes AUTH events.
     func enforcementChanged(active: Bool)
+    /// Rules, catalog or enforcement changed: the native source clears the ES result cache.
+    func policyChanged()
 }
 
 extension EventSource {
     public var parserStats: EsloggerParser.Stats? { nil }
     public func enforcementChanged(active: Bool) {}
+    public func policyChanged() {}
 }
 
 public struct SourceState: Sendable, Codable, Equatable {

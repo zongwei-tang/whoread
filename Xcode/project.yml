@@ -43,7 +43,7 @@ targets:
         name: WhoReadData
     dependencies:
       - package: WhoReadKit
-        products: [WhoReadCore, WhoReadIPC]
+        products: [WhoReadCore, WhoReadIPC, WhoReadUIModel]
       - target: WhoReadExtension
     info:
       path: ../App/Info.plist
@@ -79,7 +79,7 @@ targets:
     platform: macOS
     sources:
       - path: ../Extension
-        excludes: ["*.plist", "*.entitlements"]
+        excludes: ["Info.plist", "*.entitlements"]
       - path: ../Data
         buildPhase: resources
         type: folder
@@ -99,6 +99,8 @@ targets:
         NSSystemExtensionUsageDescription: "WhoRead watches who opens your sensitive files (SSH keys, cloud credentials, browser data) and can block access you did not allow."
         NSEndpointSecurityMachServiceName: "$(WHOREAD_MACH_SERVICE)"
         NSEndpointSecurityEarlyBoot: false
+        WhoReadClientRequirement: "anchor apple generic and certificate leaf[subject.OU] = \"$(DEVELOPMENT_TEAM)\""
+        WhoReadAppRequirement: "identifier \"$(BUNDLE_ID_PREFIX).whoread\" and anchor apple generic and certificate leaf[subject.OU] = \"$(DEVELOPMENT_TEAM)\""
     entitlements:
       path: ../Extension/WhoReadExtension.entitlements
       properties:
