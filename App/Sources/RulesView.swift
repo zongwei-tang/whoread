@@ -98,7 +98,9 @@ struct RuleRow: View {
         case .write: access = L10n.t(.accessWrite)
         case .any: access = L10n.t(.accessAny)
         }
-        return "\(action) · \(access) · \(target) · \(subject)"
+        let line = "\(action) · \(access) · \(target) · \(subject)"
+        // Answers to questions are scoped to the AI agents that were in the chain.
+        return model.chainScope(r).map { line + " · " + $0 } ?? line
     }
 }
 

@@ -15,9 +15,9 @@ public struct BaselineKey: Hashable, Codable, Sendable {
 
 public struct BaselineEntry: Codable, Hashable, Sendable {
     public enum Source: String, Codable, Sendable {
-        /// Seen during the learning period.
+        /// Seen during a learning period (none by default since ask mode).
         case learned
-        /// Seen after learning (it alerted once, then became known).
+        /// Seen outside a learning period (it alerted once, then became known).
         case observed
         /// The user chose "always allow".
         case approved
@@ -38,7 +38,9 @@ public struct BaselineEntry: Codable, Hashable, Sendable {
     }
 }
 
-/// Learned normal behaviour. Thread-safe.
+/// Known (app, category, access) triples: seen before, or approved by the user. Thread-safe.
+/// A learning period (seen accesses become known without alerting) only exists when
+/// `learningDuration` is set: ask mode replaced it, and new triples alert at once.
 public final class Baseline: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [BaselineKey: BaselineEntry]
@@ -47,7 +49,7 @@ public final class Baseline: @unchecked Sendable {
     public private(set) var learningStartedAt: Date
     public var learningDuration: TimeInterval
 
-    public init(learningStartedAt: Date, learningDuration: TimeInterval = 7 * 24 * 3600, entries: [BaselineEntry] = []) {
+    public init(learningStartedAt: Date, learningDuration: TimeInterval = 0, entries: [BaselineEntry] = []) {
         self.learningStartedAt = learningStartedAt
         self.learningDuration = learningDuration
         self.entries = Dictionary(entries.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })

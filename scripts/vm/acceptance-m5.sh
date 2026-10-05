@@ -120,8 +120,9 @@ echo "== latency"
 "$WR" status --json | python3 -c '
 import json,sys; s=json.load(sys.stdin)["latency"]
 print("  AUTH responses: %d (%d in the window), p50 %.0f µs, p99 %.0f µs, max %.0f µs, deadline misses %d" % (s["totalResponses"], s["samples"], s["p50Micros"], s["p99Micros"], s["maxMicros"], s["deadlineMisses"]))'
-trip=$("$WR" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("latencyTripReason") or "")')
-[ -z "$trip" ] && ok "no latency trip" || bad "latency trip turned enforcement off: $trip"
+active=$("$WR" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("enforcementActive"))')
+[ "$active" = "True" ] && ok "enforcement still on after the burst (never switched off automatically)" \
+  || bad "enforcement went off after the burst"
 
 echo "== kill switches (each must take effect immediately)"
 t() { python3 -c 'import time; print(time.time())'; }
@@ -146,21 +147,50 @@ echo "  loop results while the daemon was SIGKILLed: $(sort "$TMPDIR/m5-loop" | 
 for _ in $(seq 50); do "$WR" status >/dev/null 2>&1 && break; sleep 0.2; done
 "$WR" status >/dev/null 2>&1 && ok "launchd restarted the daemon" || bad "daemon did not come back"
 uptime >/dev/null && ok "system responsive"
-# The auth-armed marker outlived the SIGKILL: the new instance must leave enforcement off (setting
-# off, reason shown) until an explicit "enforcement on", instead of risking another kill.
+# The auth-armed marker outlived the SIGKILL: enforcement is never switched off automatically, so
+# the new instance keeps enforcing and only reports the unclean stop.
 enforcement_state() { "$WR" status --json | python3 -c '
 import json,sys; s=json.load(sys.stdin)
-print("on" if s["enforcementEnabled"] or s["enforcementActive"] else "off", s.get("latencyTripReason") or "(no reason)")'; }
+print("on" if s["enforcementActive"] else "off", s.get("uncleanStop") or "(no unclean-stop note)")'; }
 st=$(enforcement_state)
 case "$st" in
-  "off "*"while enforcing"*) ok "restart left enforcement off: ${st#off }" ;;
-  *) bad "after the SIGKILL, expected enforcement off with a 'stopped while enforcing' reason, got: $st" ;;
+  "on "*"while enforcing"*) ok "restart kept enforcing and reported the unclean stop: ${st#on }" ;;
+  *) bad "after the SIGKILL, expected enforcement on with an unclean-stop note, got: $st" ;;
 esac
-allowed /bin/cat "$KEY" && ok "cat allowed after the restart (fail open)" || bad "cat still denied after the restart"
+d=$(first_denied) && ok "cat denied again after the restart (in ${d}s)" || bad "cat not denied after the restart: $d"
+
+echo "== ask mode"
+sudo "$WR" rules disable m5-deny-vault >/dev/null
+sleep 0.3
+# Nobody polls questions (no app in the VM): an undecided access is denied at once.
+s=$(t); denied /bin/cat "$CREDS"; rc=$?; e=$(t)
+[ $rc -eq 0 ] && ok "undecided read denied at once with no answering app ($(python3 -c "print(round($e-$s,2))") s)" \
+  || bad "undecided read was not denied"
+# A stand-in for the app: polling questions makes the daemon hold accesses and wait for an answer.
+( while :; do "$WR" asks --json >/dev/null 2>&1; sleep 1; done ) &
+POLL=$!
+sleep 1.5
+( s=$(t); /bin/cat "$CREDS" >/dev/null 2>&1; rc=$?; echo "rc=$rc after $(python3 -c "print(round($(t)-$s,2))") s" ) > "$TMPDIR/m5-ask" &
+HELD=$!
+sleep 1
+id=$("$WR" asks --json | python3 -c 'import json,sys; a=json.load(sys.stdin); print(a[0]["id"] if a else "")')
+[ -n "$id" ] && ok "question #$id listed while cat waits" || bad "no question listed"
+[ -n "$id" ] && { sudo "$WR" ask "$id" allow-once >/dev/null && ok "answered: allow once" || bad "answering failed"; }
+wait $HELD
+r=$(cat "$TMPDIR/m5-ask")
+case "$r" in rc=0*) ok "the held cat went through after the answer: $r" ;; *) bad "held cat after the answer: $r" ;; esac
+# Unanswered: the access waits for its budget and is then denied. The time it waits is the deadline
+# budget on this Mac (deadline minus 20 %, headroom clamped to 1-5 s): record it in docs/STATUS.md.
+s=$(t); ( echo x >> "$VAULT/ssh/m5-new" ) 2>/dev/null; rc=$?; e=$(t)
+[ $rc -ne 0 ] && ok "unanswered write denied after $(python3 -c "print(round($e-$s,2))") s (the hold budget)" \
+  || bad "unanswered write went through"
+kill $POLL 2>/dev/null; wait $POLL 2>/dev/null
+sudo "$WR" rules enable m5-deny-vault >/dev/null
+sleep 0.3
 
 if [ "${1:-}" = "--stop-test" ]; then
   echo "== daemon stopped (SIGSTOP): what happens to a pending AUTH?"
-  # The restart left enforcement off, so nothing would be pending: turn it back on first.
+  # Enforcement stays on across the restart; make sure, then wait until a read is denied again.
   "$WR" enforcement on >/dev/null
   if ! d=$(first_denied); then
     bad "stop-test: enforcement did not come back after 'enforcement on': $d"

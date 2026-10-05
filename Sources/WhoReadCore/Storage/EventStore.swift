@@ -15,11 +15,15 @@ public struct Settings: Codable, Hashable, Sendable {
     public var latencyP99ThresholdMs: Double
     /// nil = follow the system language.
     public var language: Language?
+    /// Ask mode: Apple programs in system locations are allowed without asking (never when an AI
+    /// agent is in the chain). Off by default; turning it on weakens protection.
+    public var trustApplePrograms: Bool
 
     public init(
         monitoringPaused: Bool = false,
         enforcementEnabled: Bool = false,
-        learningDays: Double = 7,
+        // Ask mode replaced the learning period: first accesses are asked (or alerted) at once.
+        learningDays: Double = 0,
         retentionDays: Int = 30,
         detailDays: Int = 7,
         coalesceMinutes: Double = 10,
@@ -27,7 +31,8 @@ public struct Settings: Codable, Hashable, Sendable {
         projectRoots: [String] = [],
         notifications: NotificationSettings = NotificationSettings(),
         latencyP99ThresholdMs: Double = 50,
-        language: Language? = nil
+        language: Language? = nil,
+        trustApplePrograms: Bool = false
     ) {
         self.monitoringPaused = monitoringPaused
         self.enforcementEnabled = enforcementEnabled
@@ -40,11 +45,12 @@ public struct Settings: Codable, Hashable, Sendable {
         self.notifications = notifications
         self.latencyP99ThresholdMs = latencyP99ThresholdMs
         self.language = language
+        self.trustApplePrograms = trustApplePrograms
     }
 
     enum CodingKeys: String, CodingKey {
         case monitoringPaused, enforcementEnabled, learningDays, retentionDays, detailDays, coalesceMinutes
-        case readdirEnabled, projectRoots, notifications, latencyP99ThresholdMs, language
+        case readdirEnabled, projectRoots, notifications, latencyP99ThresholdMs, language, trustApplePrograms
     }
 
     /// Missing keys fall back to defaults so old settings blobs keep decoding.
@@ -54,6 +60,9 @@ public struct Settings: Codable, Hashable, Sendable {
         monitoringPaused = try c.decodeIfPresent(Bool.self, forKey: .monitoringPaused) ?? d.monitoringPaused
         enforcementEnabled = try c.decodeIfPresent(Bool.self, forKey: .enforcementEnabled) ?? d.enforcementEnabled
         learningDays = try c.decodeIfPresent(Double.self, forKey: .learningDays) ?? d.learningDays
+        // Saved before ask mode (no `trustApplePrograms` yet) on the old 7-day default: ask mode replaced
+        // the learning period, so an upgrade does not keep one.
+        if learningDays == 7 && !c.contains(.trustApplePrograms) { learningDays = d.learningDays }
         retentionDays = try c.decodeIfPresent(Int.self, forKey: .retentionDays) ?? d.retentionDays
         detailDays = try c.decodeIfPresent(Int.self, forKey: .detailDays) ?? d.detailDays
         coalesceMinutes = try c.decodeIfPresent(Double.self, forKey: .coalesceMinutes) ?? d.coalesceMinutes
@@ -62,6 +71,7 @@ public struct Settings: Codable, Hashable, Sendable {
         notifications = try c.decodeIfPresent(NotificationSettings.self, forKey: .notifications) ?? d.notifications
         latencyP99ThresholdMs = try c.decodeIfPresent(Double.self, forKey: .latencyP99ThresholdMs) ?? d.latencyP99ThresholdMs
         language = try c.decodeIfPresent(Language.self, forKey: .language)
+        trustApplePrograms = try c.decodeIfPresent(Bool.self, forKey: .trustApplePrograms) ?? d.trustApplePrograms
     }
 
     /// Clamps values to sane ranges.

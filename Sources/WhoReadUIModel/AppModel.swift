@@ -17,6 +17,9 @@ public struct Snapshot: Sendable {
     public var handshake: Handshake?
     public var status: DaemonStatus?
     public var alerts: [Alert] = []
+    /// Ask mode: questions waiting for an answer (fetched on every poll; fetching them also tells
+    /// the daemon an answering app is present).
+    public var asks: [AskRequest] = []
     /// Live events after `liveAfter` (the cursor this poll was fetched with).
     public var newLive: [AnalyzedEvent] = []
     public var liveAfter: Int64?
@@ -31,9 +34,10 @@ public struct Snapshot: Sendable {
 }
 
 public enum SnapshotFetcher {
-    /// Fast poll (every second): status, alerts, live tail. Full poll (every ~10 s, or after a
-    /// change) adds summaries, rules, settings and the catalog. `hello` starts with the version
-    /// handshake, so a mismatched daemon is reported as such rather than as decoding errors.
+    /// Fast poll (every second; while questions are open, the ticks in between fetch only them):
+    /// status, open questions, alerts, live tail. Full poll (every ~10 s, or after a change) adds summaries, rules, settings
+    /// and the catalog. `hello` starts with the version handshake, so a mismatched daemon is
+    /// reported as such rather than as decoding errors.
     public static func fetch(_ client: IPCClient, liveAfter: Int64?, includeBenign: Bool, full: Bool, hello: Bool = false) -> Snapshot {
         var s = Snapshot()
         s.liveAfter = liveAfter
@@ -49,6 +53,7 @@ public enum SnapshotFetcher {
                 }
             }
             s.status = try client.status()
+            if case .asks(let a) = try client.call(.asks) { s.asks = a }
             s.alerts = try client.alerts(AlertQuery(limit: 300))
             if case .events(let e) = try client.call(.live(afterID: liveAfter, limit: 500, includeBenign: includeBenign)) {
                 s.newLive = e
@@ -69,6 +74,13 @@ public enum SnapshotFetcher {
             s.error = IPCError(.unavailable, "\(error)")
         }
         return s
+    }
+
+    /// Only the open questions (`PollSchedule.Kind.asks`); nil when they cannot be fetched (the
+    /// next fast poll reports why).
+    public static func fetchAsks(_ client: IPCClient) -> [AskRequest]? {
+        guard case .asks(let a)? = try? client.call(.asks) else { return nil }
+        return a
     }
 }
 
@@ -127,30 +139,47 @@ public struct AgentRow: Identifiable, Hashable, Sendable {
 }
 
 public struct MenuBarState: Equatable, Sendable {
+    /// The mode's symbol (popover header, window toolbar).
     public var symbol: String
+    /// The mode's name.
     public var title: String
     public var unread: Int
     public var connected: Bool
+    /// Ask mode: questions waiting for an answer.
+    public var openAsks: Int = 0
+    var language: Language = .en
 
-    public var badge: String? { unread > 0 ? (unread > 99 ? "99+" : String(unread)) : nil }
+    /// Open questions come first: they hold an access that is denied unless answered soon.
+    public var badge: String? {
+        let n = openAsks > 0 ? openAsks : unread
+        return n > 0 ? (n > 99 ? "99+" : String(n)) : nil
+    }
 
-    public static func make(status: DaemonStatus?, connected: Bool, language: Language) -> MenuBarState {
+    /// The menu bar icon: a question mark while questions are open, the mode otherwise.
+    public var labelSymbol: String { openAsks > 0 ? "questionmark.circle.fill" : symbol }
+
+    public var accessibilityLabel: String {
+        openAsks > 0 ? L10n.f(.asksWaitingFormat, openAsks, language: language) + " — " + title : title
+    }
+
+    public static func make(status: DaemonStatus?, connected: Bool, openAsks: Int = 0, language: Language) -> MenuBarState {
         guard connected, let s = status else {
             // Brief §6 Error state: nothing is being recorded, or (connected) nothing the daemon
             // says can be read; the reason is shown next to it.
             return MenuBarState(symbol: "exclamationmark.triangle",
                                 title: L10n.t(.modeError, language) + (connected ? "" : " — " + L10n.t(.daemonUnreachable, language)),
-                                unread: 0, connected: connected)
+                                unread: 0, connected: connected, language: language)
         }
         let symbol: String
         switch s.mode {
-        case .learning: symbol = "graduationcap"
-        case .monitoring: symbol = "eye"
+        // Ask mode replaced the learning period: never shown as a state of its own.
+        case .learning, .monitoring: symbol = "eye"
         case .enforcing: symbol = "lock.shield"
         case .paused: symbol = "pause.circle"
         case .error: symbol = "exclamationmark.triangle"
         }
-        return MenuBarState(symbol: symbol, title: L10n.mode(s.mode, language), unread: s.unreadAlerts, connected: true)
+        return MenuBarState(symbol: symbol, title: L10n.mode(s.mode, language), unread: s.unreadAlerts, connected: true,
+                            openAsks: openAsks, language: language)
     }
 }
 
@@ -166,6 +195,8 @@ public final class AppModel {
     public private(set) var connected = false
     public private(set) var lastError: IPCError?
     public private(set) var alerts: [Alert] = []
+    /// Ask mode: questions waiting for an answer, oldest first. Empty while the daemon cannot be read.
+    public private(set) var asks: [AskRequest] = []
     public private(set) var live = LiveFeed()
     public private(set) var summaries: [UsageSummary] = []
     public private(set) var rules: [Rule] = []
@@ -198,6 +229,8 @@ public final class AppModel {
         if let e = s.error {
             lastError = e
             connected = e.code != .unavailable
+            // Nobody can answer them through a daemon that does not answer (or cannot be read).
+            asks = []
             // The handshake's message (just set) reads better than a decoder dump.
             if e.code == .versionMismatch, versionProblem == nil { versionProblem = e.message }
             return
@@ -205,6 +238,7 @@ public final class AppModel {
         lastError = nil
         connected = true
         if let v = s.status { setStatus(v) }
+        asks = s.asks
         alerts = s.alerts
         // A batch fetched with an older cursor (the feed was reset meanwhile) is dropped.
         if !feedPaused && s.liveAfter == live.lastID { live.append(s.newLive) }
@@ -222,6 +256,7 @@ public final class AppModel {
         case .settings(let v): setSettings(v)
         case .catalog(let v): catalog = v
         case .status(let v): setStatus(v)
+        case .asks(let v): asks = v
         default: break
         }
     }
@@ -241,8 +276,9 @@ public final class AppModel {
         language = v.language ?? systemLanguage
     }
 
-    /// A Settings form draft, with the fields that have their own switches (enforcement, pause)
-    /// taken from the daemon's current state: saving an old draft must not undo a kill switch.
+    /// A Settings form draft, with the fields that have their own switches (enforcement, pause,
+    /// trust Apple programs) taken from the daemon's current state: saving an old draft must not
+    /// undo a kill switch, or an "allow all Apple programs" answered since.
     public func preparedForSave(_ draft: Settings) -> Settings {
         var d = draft
         if let s = status {
@@ -252,6 +288,7 @@ public final class AppModel {
             d.enforcementEnabled = s.enforcementEnabled
             d.monitoringPaused = s.monitoringPaused
         }
+        if let s = settings { d.trustApplePrograms = s.trustApplePrograms }
         return d
     }
 
@@ -264,7 +301,27 @@ public final class AppModel {
         lastError?.code == .versionMismatch ? nil : status
     }
 
-    public var menuBar: MenuBarState { MenuBarState.make(status: liveStatus, connected: connected, language: language) }
+    public var menuBar: MenuBarState {
+        MenuBarState.make(status: liveStatus, connected: connected, openAsks: asks.count, language: language)
+    }
+
+    /// Open questions as listed (menu bar, Alerts tab): those holding an access first, the one
+    /// denied soonest on top, then the others oldest first. The menu bar shows only the first few,
+    /// and old questions that hold nothing must not hide one that is about to be denied.
+    public var asksByUrgency: [AskRequest] {
+        asks.enumerated().sorted { a, b in
+            switch (a.element.answerBy, b.element.answerBy) {
+            case let (x?, y?) where x != y: return x < y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return a.offset < b.offset
+            }
+        }.map(\.element)
+    }
+
+    /// How long until the next poll: questions are answered (and their notifications withdrawn)
+    /// within a quarter second while any is open.
+    public var pollInterval: TimeInterval { PollSchedule.interval(openAsks: asks.count) }
 
     public var formatter: AlertFormatter {
         let homes = catalog?.homeDirectories ?? status?.homeDirectories ?? []
@@ -287,26 +344,43 @@ public final class AppModel {
 
     // MARK: - Enforcement
 
-    /// The enforcement switch as the user experiences it: off after the kill-switch file or a
-    /// latency trip, even though the daemon's setting is still on.
+    /// The enforcement switch as the user experiences it: off after the kill-switch file, even
+    /// though the daemon's setting is still on. Nothing else switches it off: WhoRead never turns
+    /// enforcement off on its own.
     public var enforcementSwitchOn: Bool {
         guard let s = status else { return false }
-        return s.enforcementEnabled && !s.killSwitchFilePresent && s.latencyTripReason == nil
+        return s.enforcementEnabled && !s.killSwitchFilePresent
     }
 
-    /// "Not active: …" when the switch is on in the settings but enforcement is not live, or after a
-    /// latency trip (which also turns the setting off, so the switch alone would look user-made).
+    /// "Not active: …" when the switch is on in the settings but enforcement is not live.
     public var enforcementInactiveText: String? {
-        guard let s = status, !s.enforcementActive, s.enforcementEnabled || s.latencyTripReason != nil else { return nil }
-        var inactive = s.enforcementInactiveReasons.filter { $0 != .disabledByUser }
-        // After a daemon restart the trip is only the stored reason.
-        if s.latencyTripReason != nil && !inactive.contains(.latencyTripped) { inactive.insert(.latencyTripped, at: 0) }
-        let reasons = inactive.map { r -> String in
-            let text = L10n.inactiveReason(r, language)
-            guard r == .latencyTripped, let why = s.latencyTripReason else { return text }
-            return language == .zhHans ? text + "（\(why)）" : text + " (\(why))"
-        }
+        guard let s = status, !s.enforcementActive, s.enforcementEnabled else { return nil }
+        let reasons = s.enforcementInactiveReasons.filter { $0 != .disabledByUser }.map { L10n.inactiveReason($0, language) }
         return reasons.isEmpty ? nil : L10n.f(.enforcementInactiveFormat, reasons.joined(separator: language == .zhHans ? "，" : ", "), language: language)
+    }
+
+    /// p99 is judged only over this many responses (as the daemon's latency monitor does).
+    static let slowMinimumSamples = 50
+
+    /// "Slow responses: …" when the status shows missed kernel deadlines or a p99 over the
+    /// threshold in Settings. Shown, never acted on: enforcement stays as the user set it.
+    public var slowResponsesText: String? {
+        guard let l = liveStatus?.latency else { return nil }
+        let thresholdMs = (settings ?? Settings()).latencyP99ThresholdMs
+        var parts: [String] = []
+        if l.deadlineMisses > 0 { parts.append(L10n.f(.slowMissesFormat, l.deadlineMisses, language: language)) }
+        if l.samples >= AppModel.slowMinimumSamples && l.p99Micros > thresholdMs * 1000 {
+            parts.append(L10n.f(.slowP99Format, String(format: "%.1f", l.p99Micros / 1000), String(format: "%.0f", thresholdMs),
+                                language: language))
+        }
+        guard !parts.isEmpty else { return nil }
+        return L10n.f(.slowResponsesFormat, parts.joined(separator: language == .zhHans ? "，" : ", "), language: language)
+    }
+
+    /// The daemon's previous instance stopped while it could block (killed for a missed deadline,
+    /// a crash, power loss). Enforcement was left as the user set it.
+    public var uncleanStopText: String? {
+        liveStatus?.uncleanStop.map { L10n.f(.uncleanStopFormat, $0, language: language) }
     }
 
     /// Why block rules (and "block from now on") do not block right now; nil when they do.
@@ -335,6 +409,15 @@ public final class AppModel {
         return r.name ?? r.id
     }
 
+    /// The AI agents a rule is scoped to (`Rule.chainAgents`, set by answers to questions); nil
+    /// for a rule that applies to any chain. Without it, an answer for Terminal and one for Claude
+    /// Code inside Terminal would read the same in the Rules tab.
+    public func chainScope(_ r: Rule) -> String? {
+        guard let agents = r.chainAgents else { return nil }
+        if agents.isEmpty { return L10n.t(.ruleChainNoAgent, language) }
+        return L10n.f(.ruleChainAgentsFormat, agents.map(agentName).joined(separator: ", "), language: language)
+    }
+
     /// Whether a rule's path prefix is covered by monitoring, as the daemon decides when saving it:
     /// inside a monitored prefix, or a parent of one (the rule matches the monitored files below).
     /// Saving a rule on an uncovered path adds that path to the Custom category.
@@ -358,6 +441,11 @@ public final class AppModel {
         return rows.filter {
             $0.path.lowercased().contains(q) || $0.responsible.displayName.lowercased().contains(q) || $0.process.name.lowercased().contains(q)
         }
+    }
+
+    /// Button title for an alert action: `ask` alerts use the question's answer wording.
+    public func actionTitle(_ action: AlertAction, for kind: AlertKind) -> String {
+        kind == .ask ? L10n.askActionTitle(action, language) : formatter.actionTitle(action)
     }
 
     public var visibleAlerts: [Alert] {

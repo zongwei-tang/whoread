@@ -37,12 +37,21 @@ public final class Analyzer: @unchecked Sendable {
     private var _benign: BenignClassifier
     private var _readdirEnabled = false
     private var _ignoredPIDs: Set<Int32> = []
+    private var _trustApplePrograms = false
     private var nextEventID: Int64
 
     /// Record directory listings (and opens of directories). Off by default.
     public var readdirEnabled: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _readdirEnabled }
         set { lock.lock(); _readdirEnabled = newValue; lock.unlock() }
+    }
+
+    /// `Settings.trustApplePrograms`: Apple programs in system locations with no AI agent in their
+    /// chain raise no first-access or unexpected-access alert (ask mode allows them without asking;
+    /// monitor-only mode stays as quiet). Rule alerts, would-block and blocks are unaffected.
+    public var trustApplePrograms: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _trustApplePrograms }
+        set { lock.lock(); _trustApplePrograms = newValue; lock.unlock() }
     }
 
     /// Our own processes (the daemon). Their events are dropped.
@@ -107,6 +116,14 @@ public final class Analyzer: @unchecked Sendable {
         case .file(let activity):
             return handleFile(activity, context: context)
         }
+    }
+
+    /// Ask mode: a benign system service chain (Spotlight, Time Machine…) is never asked.
+    public func isBenignChain(_ chain: [ProcessNode]) -> Bool {
+        lock.lock()
+        let benign = _benign
+        lock.unlock()
+        return benign.classify(chain: chain) != nil
     }
 
     /// Operations that carry a source's content (and, for directories, everything below it).
@@ -176,6 +193,7 @@ public final class Analyzer: @unchecked Sendable {
         let readdirOn = _readdirEnabled
         let ignored = _ignoredPIDs.contains(activity.process.pid)
         let benign = _benign
+        let trustApple = _trustApplePrograms
         lock.unlock()
         if activity.operation == .readdir && !readdirOn { return AnalysisOutput() }
         if ignored { return AnalysisOutput() }
@@ -188,6 +206,8 @@ public final class Analyzer: @unchecked Sendable {
         let responsible = attributor.attribute(chain: chain)
         let agentID = chain.nearestAgent
         let benignID = benign.classify(chain: chain)
+        // Offers "allow all Apple programs" on the alert (and is what that setting covers).
+        let appleProgram = AskPolicy.isTrustableAppleProgram(process, chain: chain)
         let classifier = self.classifier
         // Stored chains are capped (nearest 64 links); rules, attribution and agentID use the full chain.
         let chainLinks = Array(chain.prefix(64).reversed()).map { ChainLink(node: $0) }
@@ -218,11 +238,21 @@ public final class Analyzer: @unchecked Sendable {
         // denied any more (rules changed since the AUTH decision), all keep the AUTH decision.
         var ownDenials: [RuleDecision]?
         if case .decided(let d) = context, d.verdict == .deny, groups.count > 1 {
-            let own = groups.map {
-                rules.evaluate(process: process, chain: chain, targets: evaluationTargets($0), enforcementActive: true,
-                               now: time, consumeExceptions: false)
+            if d.reason == .askUser {
+                // Ask mode: no rule denied it. The asked category gets the ask alert ("allow" on it
+                // answers that question); the others were only denied along with it.
+                if let asked = d.askKey?.categoryID, groups.contains(where: { $0.category.id == asked }) {
+                    ownDenials = groups.map {
+                        $0.category.id == asked ? d : RuleDecision(verdict: .deny, reason: .askUser, suppressAlert: true)
+                    }
+                }
+            } else {
+                let own = groups.map {
+                    rules.evaluate(process: process, chain: chain, targets: evaluationTargets($0), enforcementActive: true,
+                                   now: time, consumeExceptions: false)
+                }
+                if own.contains(where: { $0.verdict == .deny }) { ownDenials = own }
             }
-            if own.contains(where: { $0.verdict == .deny }) { ownDenials = own }
         }
         for (gi, group) in groups.enumerated() {
             let targets = evaluationTargets(group)
@@ -235,6 +265,8 @@ public final class Analyzer: @unchecked Sendable {
                 } else {
                     decision = d
                 }
+                // Asked and not answered in time (or answered "deny"): denied, but by no rule.
+                if decision.reason == .askUser { decision.ruleID = nil }
                 eventDecision = d.verdict == .deny ? .denied : .allowed
             case .monitorOnly:
                 // A modified close reports a write that an earlier open already decided: it must not use up
@@ -273,11 +305,14 @@ public final class Analyzer: @unchecked Sendable {
 
             let keys = access.kinds.map { BaselineKey(responsibleKey: responsible.key, categoryID: group.category.id, access: $0) }
             let firstTime = !learning && benignID == nil && keys.contains { !baseline.contains($0) }
-            let kind = alertKind(for: event, decision: decision, learning: learning)
+            let kind = alertKind(for: event, decision: decision, learning: learning, trustedApple: trustApple && appleProgram)
             if benignID == nil && eventDecision != .denied {
                 for k in keys { baseline.record(k, at: time, learning: learning) }
             }
-            if benignID == nil, let update = coalescer.ingest(event, kind: kind, firstTime: firstTime) {
+            // "Allow all Apple programs" is offered where it would have decided: questions and
+            // first/unexpected accesses (it never overrides a rule).
+            let offersTrust = appleProgram && (kind == .ask || kind == .firstAccess || kind == .criticalNonOwner)
+            if benignID == nil, let update = coalescer.ingest(event, kind: kind, firstTime: firstTime, appleProgram: offersTrust) {
                 event.alertID = update.alert.id
                 output.alerts.append(update)
             }
@@ -286,23 +321,33 @@ public final class Analyzer: @unchecked Sendable {
         return output
     }
 
-    /// The anomaly policy. Evaluated before the event is recorded in the baseline.
-    func alertKind(for event: AnalyzedEvent, decision: RuleDecision, learning: Bool) -> AlertKind? {
+    /// The anomaly policy. Evaluated before the event is recorded in the baseline. There is no
+    /// learning period by default (`learning` is false unless `learningDays` was set): a new
+    /// (app, category, access) alerts at once. `trustedApple`: "trust Apple programs" covers it.
+    func alertKind(for event: AnalyzedEvent, decision: RuleDecision, learning: Bool, trustedApple: Bool = false) -> AlertKind? {
         if event.isBenign { return nil }
         switch event.decision {
         // A category that was only denied along with another one: that one's alert covers it.
-        case .denied: return decision.suppressAlert ? nil : .blocked
+        case .denied:
+            if decision.suppressAlert { return nil }
+            return decision.reason == .askUser ? .ask : .blocked
         case .wouldDeny: return .wouldBlock
         default: break
         }
         if decision.suppressAlert { return nil }
         if decision.forceAlert { return .ruleAlert }
-        if event.isOwner { return nil }
+        // As in ask mode, an owner is only expected with no AI agent in its chain (an agent can drive
+        // ssh or git to read a key).
+        if event.isOwner && event.agentID == nil { return nil }
+        if trustedApple { return nil }
         let keys = event.access.kinds.map {
             BaselineKey(responsibleKey: event.responsible.key, categoryID: event.categoryID, access: $0)
         }
         if keys.isEmpty { return nil }
-        if event.severity == .critical && !keys.allSatisfy(baseline.isApproved) {
+        // Approvals are keyed by the responsible app only. An AI agent running a program charged to an
+        // app (a tool inside its bundle, such as Xcode's git) is not what the user approved for that app.
+        let agentDriven = event.agentID != nil && event.responsible.kind != .agent
+        if event.severity == .critical && (agentDriven || !keys.allSatisfy(baseline.isApproved)) {
             return .criticalNonOwner
         }
         if !learning && keys.contains(where: { !baseline.contains($0) }) {

@@ -20,6 +20,8 @@ chmod +x "$TMP/eslogger"
   2> "$TMP/daemon.log" &
 DPID=$!
 for _ in $(seq 50); do [ -S "$TMP/s.sock" ] && break; sleep 0.1; done
+# The checks below match the English output.
+export WHOREAD_LANG=en
 W() { "$BIN/whoread" --socket "$TMP/s.sock" "$@"; }
 sleep 0.5
 echo "== status";  W status
@@ -43,6 +45,28 @@ echo "== settings set language (zh means zh-Hans; an unknown value is refused, n
 W settings set language zh | grep -q '"zh-Hans"' || fail "language zh was not stored as zh-Hans"
 if W settings set language english 2>/dev/null; then fail "language english was accepted"; fi
 W settings | grep -q '"zh-Hans"' || fail "a refused language value changed the setting"
+
+echo "== status: no learning period, enforcement never switched off automatically"
+# Captured first: a failing `W status` must stop the script, not pass for "no match".
+st=$(W status)
+if grep -qiE "learning|trip" <<< "$st"; then fail "status still mentions learning or a latency trip"; fi
+
+echo "== asks (ask mode; eslogger cannot hold an access, so nothing is waiting)"
+W asks | tee "$TMP/asks.out"
+grep -q "No questions waiting" "$TMP/asks.out" || fail "asks did not report an empty list"
+[ "$(W asks --json | tr -d '[:space:]')" = "[]" ] || fail "asks --json is not an empty list"
+rc=0; W ask 999999 deny 2> "$TMP/err" || rc=$?
+cat "$TMP/err"
+[ "$rc" = 1 ] && grep -q "notFound" "$TMP/err" || fail "answering an unknown question: rc $rc"
+if W ask 999999 maybe 2>/dev/null; then fail "an unknown answer was accepted"; fi
+
+echo "== settings set trust-apple on|off (round trip)"
+W settings set trust-apple on | grep -Eq '"trustApplePrograms" *: *true' || fail "trust-apple on was not stored"
+W status | grep -q "trust Apple:  on" || fail "status does not show trust-apple on"
+W settings set trust-apple off | grep -Eq '"trustApplePrograms" *: *false' || fail "trust-apple off was not stored"
+W settings | grep -Eq '"trustApplePrograms" *: *false' || fail "trust-apple off did not persist"
+st=$(W status)
+if grep -q "trust Apple" <<< "$st"; then fail "status still shows trust-apple after turning it off"; fi
 
 echo "== catalog add-path refuses a home or a folder above one (or the whole disk), however spelled"
 for p in /Users/alice /Users/alice/ /users/ALICE /Users /System/Volumes/Data/Users/alice /System/Volumes/Data/; do
@@ -107,5 +131,12 @@ cat "$TMP/err"
 [ "$rc" = 77 ] && ! grep -q "cannot reach" "$TMP/err" || fail "non-root catalog change: rc $rc"
 grep -qF "sudo whoread --socket $TMP/s2.sock catalog add-path custom '/Users/alice/Tax Docs'" "$TMP/err" \
   || fail "the sudo hint lost the quoting"
+# Allowing a question needs root or the app. (On Linux /dev/console is root's, so the daemon refuses
+# every non-root peer; AskCLITests checks the wording the console user gets.)
+rc=0; "$BIN/whoread" --socket "$TMP/s2.sock" ask 1 allow 2> "$TMP/err" || rc=$?
+cat "$TMP/err"
+[ "$rc" = 77 ] && grep -qF "sudo whoread --socket $TMP/s2.sock ask 1 allow" "$TMP/err" || fail "non-root ask allow: rc $rc"
+rc=0; "$BIN/whoread" --socket "$TMP/s2.sock" settings set trust-apple on 2> "$TMP/err" || rc=$?
+[ "$rc" = 77 ] || fail "non-root trust-apple on: rc $rc"
 
 echo "== daemon log"; cat "$TMP/daemon.log"

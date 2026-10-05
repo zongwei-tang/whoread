@@ -51,14 +51,14 @@ struct SettingsView: View {
                     .disabled(CatalogEdit.validPath(newRoot) == nil)
                 }
             }
-            Section(L10n.t(.setLearning)) {
-                Stepper(value: s.learningDays, in: 0...90, step: 1) {
-                    Text("\(L10n.t(.setLearningDays)): \(Int(s.wrappedValue.learningDays))")
-                }
-                Button(L10n.t(.setRestartLearning)) { connection.restartLearning() }
-                Stepper(value: s.coalesceMinutes, in: 1...240, step: 1) {
-                    Text("\(L10n.t(.setCoalesce)): \(Int(s.wrappedValue.coalesceMinutes))")
-                }
+            Section(L10n.t(.setAsk)) {
+                Text(L10n.t(.setAskNote)).font(.caption).foregroundStyle(.secondary)
+                // Its own request on the daemon's current settings, not part of the draft (as the
+                // "allow all Apple programs" answer). Turning it on needs the signed app or root.
+                Toggle(L10n.t(.setTrustApple), isOn: Binding(
+                    get: { model.settings?.trustApplePrograms ?? false },
+                    set: { connection.setTrustApplePrograms($0) }))
+                Text(L10n.t(.setTrustAppleNote)).font(.caption).foregroundStyle(.secondary)
             }
             Section(L10n.t(.setRetention)) {
                 Stepper(value: s.retentionDays, in: 1...365) { Text("\(L10n.t(.setRetentionDays)): \(s.wrappedValue.retentionDays)") }
@@ -71,6 +71,9 @@ struct SettingsView: View {
                     ForEach(Severity.allCases, id: \.self) { Text(L10n.severity($0)).tag($0) }
                 }
                 Toggle(L10n.t(.setNotifyWouldBlock), isOn: s.notifications.notifyWouldBlock)
+                Stepper(value: s.coalesceMinutes, in: 1...240, step: 1) {
+                    Text("\(L10n.t(.setCoalesce)): \(Int(s.wrappedValue.coalesceMinutes))")
+                }
             }
             Section(L10n.t(.setEnforcement)) {
                 // Its own request, not part of the draft. Shows what is in effect.
@@ -80,9 +83,16 @@ struct SettingsView: View {
                 if let inactive = model.enforcementInactiveText {
                     Text(inactive).font(.caption).foregroundStyle(.orange)
                 }
+                if let stop = model.uncleanStopText {
+                    Text(stop).font(.caption).foregroundStyle(.orange)
+                }
                 Text(L10n.t(.setEnforcementNote)).font(.caption).foregroundStyle(.secondary)
+                // Only a warning threshold: slow responses never switch enforcement off.
                 Stepper(value: s.latencyP99ThresholdMs, in: 1...1000, step: 5) {
                     Text("\(L10n.t(.setLatency)): \(Int(s.wrappedValue.latencyP99ThresholdMs))")
+                }
+                if let slow = model.slowResponsesText {
+                    Text(slow).font(.caption).foregroundStyle(.orange)
                 }
             }
             Section(L10n.t(.setLanguage)) {
@@ -98,8 +108,8 @@ struct SettingsView: View {
                 Button(L10n.t(.revert)) { draft = nil }.disabled(draft == nil)
                 Button(L10n.t(.save)) {
                     guard let d = draft else { return }
-                    // Enforcement and pause come from the daemon's current state, not the draft;
-                    // the draft is kept if the daemon refuses.
+                    // Enforcement, pause and trust Apple programs come from the daemon's current
+                    // state, not the draft; the draft is kept if the daemon refuses.
                     connection.save(settings: model.preparedForSave(d)) { draft = nil }
                 }
                 .keyboardShortcut(.defaultAction)

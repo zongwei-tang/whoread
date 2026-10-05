@@ -2,35 +2,36 @@ import XCTest
 @testable import WhoReadCore
 
 final class LatencyMonitorTests: XCTestCase {
-    func testPercentilesAndP99Trip() {
+    // Ask mode: statistics only. Slow responses are reported (isSlow), never a trip.
+    func testPercentilesAndP99Warning() {
         let m = LatencyMonitor(capacity: 1000, p99ThresholdMicros: 5000, minimumSamples: 50)
         for i in 0..<100 { m.record(micros: UInt64(100 + i), missedDeadline: false) }
         var s = m.evaluate()
         XCTAssertEqual(s.samples, 100)
         XCTAssertEqual(s.p50Micros, 150, accuracy: 1)
         XCTAssertEqual(s.p99Micros, 199, accuracy: 1)
-        XCTAssertFalse(m.isTripped)
+        XCTAssertFalse(m.isSlow)
         for _ in 0..<5 { m.record(micros: 80_000, missedDeadline: false) }
         s = m.evaluate()
         XCTAssertGreaterThan(s.p99Micros, 5000)
-        XCTAssertTrue(m.isTripped)
-        XCTAssertTrue(m.trippedReason!.contains("p99"))
+        XCTAssertTrue(m.isSlow)
         m.reset()
-        XCTAssertFalse(m.isTripped)
+        XCTAssertFalse(m.isSlow)
     }
 
-    func testDeadlineMissTripsImmediately() {
+    func testDeadlineMissIsCountedOnly() {
         let m = LatencyMonitor()
         m.record(micros: 10, missedDeadline: true)
-        XCTAssertEqual(m.trippedReason, "deadline missed")
+        XCTAssertFalse(m.isSlow)
         XCTAssertEqual(m.evaluate().deadlineMisses, 1)
+        XCTAssertFalse(m.isSlow)
     }
 
-    func testFewSamplesDoNotTrip() {
+    func testFewSamplesAreNotSlow() {
         let m = LatencyMonitor(p99ThresholdMicros: 10, minimumSamples: 50)
         for _ in 0..<10 { m.record(micros: 1_000_000, missedDeadline: false) }
         m.evaluate()
-        XCTAssertFalse(m.isTripped)
+        XCTAssertFalse(m.isSlow)
     }
 }
 
@@ -46,10 +47,10 @@ final class EnforcementStateTests: XCTestCase {
         XCTAssertFalse(s.isActive)
         XCTAssertEqual(s.inactiveReasons, [.killSwitchFile])
         s.setKillSwitchFilePresent(false)
-        s.tripLatency("p99")
-        XCTAssertFalse(s.isActive)
-        XCTAssertEqual(s.inactiveReasons, [.latencyTripped])
-        // Re-enabling by the user clears a latency trip.
+        XCTAssertTrue(s.isActive)
+        // Ask mode: only the manual switches turn it off.
+        s.setUserEnabled(false)
+        XCTAssertEqual(s.inactiveReasons, [.disabledByUser])
         s.setUserEnabled(true)
         XCTAssertTrue(s.isActive)
         s.setRulesLoaded(false)

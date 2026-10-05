@@ -72,9 +72,12 @@ public struct AnalyzedEvent: Codable, Hashable, Sendable, Identifiable {
 }
 
 public enum AlertKind: String, Codable, Sendable, CaseIterable {
-    /// Post-learning: this app had never touched this category with this access.
+    /// This app had never touched this category with this access (monitor only, or an access that
+    /// went through without a question). There is no learning period by default.
     case firstAccess
-    /// A non-owner touched a critical file (also during learning).
+    /// A non-owner (or an owner driven by an AI agent) touched a critical file the user has not
+    /// approved for this app (an app's approval never covers it driven by an agent); repeats alert
+    /// again after each coalescing window.
     case criticalNonOwner
     /// An alert rule matched.
     case ruleAlert
@@ -82,6 +85,9 @@ public enum AlertKind: String, Codable, Sendable, CaseIterable {
     case wouldBlock
     /// Blocked.
     case blocked
+    /// Ask mode: an access was denied for want of an answer to its question (none in time, no app
+    /// to ask, or "deny"). Answering the alert is answering the question.
+    case ask
 
     /// Higher wins when coalescing.
     public var priority: Int {
@@ -91,6 +97,7 @@ public enum AlertKind: String, Codable, Sendable, CaseIterable {
         case .criticalNonOwner: return 2
         case .wouldBlock: return 3
         case .blocked: return 4
+        case .ask: return 5
         }
     }
 }
@@ -112,6 +119,8 @@ public enum AlertAction: String, Codable, Sendable, CaseIterable {
     /// Blocked: keep the rule as is.
     case keepBlocking
     case ignore
+    /// Ask mode: allow Apple programs in system locations without asking (not under an AI agent).
+    case trustApplePrograms
 }
 
 /// One alert, possibly standing for many coalesced events.
@@ -138,14 +147,18 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
     public var ruleID: String?
     public var status: AlertStatus
     public var resolution: AlertAction?
-    /// The (app, category, access) combination had never been seen before (after learning).
+    /// The (app, category, access) combination had never been seen before (outside a learning
+    /// period, which is off by default).
     public var firstTime: Bool
+    /// The requester was an Apple program in a system location with no AI agent in its chain
+    /// (offers "trust Apple programs").
+    public var appleProgram: Bool
 
     public init(id: Int64, kind: AlertKind, createdAt: Date, updatedAt: Date, windowEndsAt: Date,
                 responsible: ResponsibleEntity, categoryID: String, severity: Severity, count: Int, accesses: AccessSet,
                 firstPath: String, firstEventID: Int64, lastEventID: Int64, paths: [String], chain: [ChainLink],
                 agentID: String?, ruleID: String?, status: AlertStatus = .unread, resolution: AlertAction? = nil,
-                firstTime: Bool = false) {
+                firstTime: Bool = false, appleProgram: Bool = false) {
         self.id = id
         self.kind = kind
         self.createdAt = createdAt
@@ -166,11 +179,12 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
         self.status = status
         self.resolution = resolution
         self.firstTime = firstTime
+        self.appleProgram = appleProgram
     }
 
     enum CodingKeys: String, CodingKey {
         case id, kind, createdAt, updatedAt, windowEndsAt, responsible, categoryID, severity, count, accesses, firstPath
-        case firstEventID, lastEventID, paths, chain, agentID, ruleID, status, resolution, firstTime
+        case firstEventID, lastEventID, paths, chain, agentID, ruleID, status, resolution, firstTime, appleProgram
     }
 
     public init(from decoder: Decoder) throws {
@@ -195,13 +209,18 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
         status = try c.decodeIfPresent(AlertStatus.self, forKey: .status) ?? .unread
         resolution = try c.decodeIfPresent(AlertAction.self, forKey: .resolution)
         firstTime = try c.decodeIfPresent(Bool.self, forKey: .firstTime) ?? false
+        appleProgram = try c.decodeIfPresent(Bool.self, forKey: .appleProgram) ?? false
     }
 
     /// Actions offered for this alert, in display order.
     public var availableActions: [AlertAction] {
         switch kind {
         case .blocked: return [.allowOnce, .alwaysAllow, .keepBlocking]
+        case .ask: return [.allowOnce, .alwaysAllow, .keepBlocking, .blockFromNowOn] + (appleProgram ? [.trustApplePrograms] : [])
         case .wouldBlock: return [.alwaysAllow, .ignore]
+        // Monitor-only stand-ins for a question: the same "allow all Apple programs" answer.
+        case .firstAccess, .criticalNonOwner:
+            return [.alwaysAllow, .blockFromNowOn, .ignore] + (appleProgram ? [.trustApplePrograms] : [])
         default: return [.alwaysAllow, .blockFromNowOn, .ignore]
         }
     }

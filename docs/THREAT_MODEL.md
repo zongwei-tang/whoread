@@ -48,13 +48,23 @@ facts behind it are cited in [`RESEARCH.md`](RESEARCH.md).
 - **Root-level malware** can stop the dev LaunchDaemon, edit the database or settings, or remove
   the kill-switch file. It can also delete the TCC grant when SIP is off. The system extension
   form is harder to stop than a LaunchDaemon, but it is not a security boundary against root.
-- **Code running as you can read what you can read** unless an enforcing rule blocks it. Monitor
-  mode only reports.
-- **Load can switch enforcement off.** A process running as you can flood monitored files with
-  opens until AUTH answers get slow. A missed deadline (the kernel kills the client), or a p99 over
-  the threshold that persists, turns enforcement off by design (fail-open), and it stays off until
-  you turn it on again. The alert for the trip tells you it happened; it is not a password-protected
-  switch.
+- **Code running as you can read what you can read** unless enforcement is on. With enforcement
+  off (or the eslogger backend), WhoRead only records and alerts.
+- **Load still opens gaps.** WhoRead never switches enforcement off by itself, but the kernel does
+  two things it cannot change: an AUTH message dropped from a full client queue is *allowed*, and a
+  client that misses a deadline is killed (that access is allowed) and restarted by launchd. A
+  process running as you that floods monitored files can provoke both. If it happens repeatedly,
+  Endpoint Security may refuse new connections; only the manual kill switches stop that loop.
+- **"Allow all Apple programs" trusts Apple's shells and interpreters too.** With the setting on, a
+  chain made only of Apple programs in system locations (e.g. `Terminal → zsh → python3`, or a user
+  LaunchAgent that has launchd start `/bin/cat`) is never asked, unless an AI agent is in it. A
+  third-party app in the chain (`Zoom → sh → cat`) still asks. Off by default.
+- **Answers are per app, not per program.** "Always allow" for Terminal covers every program you run
+  in Terminal without an AI agent, for that category and access (the cdhash pin applies only when an
+  unsigned binary is charged to itself).
+- **Agent scoping follows the process tree.** An agent that gets launchd to start something for it
+  (`open -a`, `osascript` telling Terminal to run a command, `launchctl submit`) breaks the chain; the
+  started process is judged without the agent.
 - **Weak owner identities.** An owner is a process expected to read a category (ssh for SSH keys).
   Owners raise no alert on their own, so how they are recognised matters:
   - Apple platform binaries: location *and* the kernel's platform flag, and the location must be
@@ -92,8 +102,13 @@ AI agents run as you, so WhoRead must not let them switch it off:
   - allow rules and exceptions ("allow once", "always allow");
   - ignore, keep blocking and mark read (they silence an alert);
   - editing or deleting rules;
-  - settings and catalog;
-  - restarting learning.
+  - settings and catalog (turning "trust Apple programs" *off* is open to the console user);
+  - answering a question with "allow once", "always allow" or "allow all Apple programs".
+
+  Denying a question (once or always) is open to the console user, so an agent can see questions
+  and deny them, but never allow them. Turning enforcement on is open to the console user too: with
+  no app answering, every undecided access is then denied at once (a nuisance an agent could cause,
+  not a way in).
 
   The daemon checks the peer's euid. It recognises the app by code signature (team-pinned
   requirement), not by name. An agent can run the `whoread` CLI, but it can neither turn the
@@ -122,17 +137,24 @@ AI agents run as you, so WhoRead must not let them switch it off:
 
 ## Enforcement safety
 
-- **Fail-open.** Internal errors and unknown events are allowed. If the stored rules cannot be
-  read, enforcement stays off and single-rule changes are refused for everyone (one would rewrite
-  the table from an empty list). Only an explicit replacement by root or the app
+- **Ask mode (fail-closed for undecided sensitive accesses).** With enforcement on, an access to a
+  monitored file that no rule, owner (without an AI agent), benign service or "trust Apple programs"
+  decides is held and you are asked (docs/ASK_MODE.md). If you do not answer before the access's
+  deadline budget, if no app has polled questions in the last 5 seconds (app not running), or if more
+  256 accesses are already waiting, it is **denied**. Your answer is saved as a rule.
+- **Fail-open elsewhere.** Internal errors and unknown events on every other path are allowed, so
+  a WhoRead bug cannot lock up the Mac. If the stored rules cannot be read, enforcement stays off
+  (with no rules every access would be asked, and answers could not be saved), and single-rule
+  changes are refused for everyone (one would rewrite the table from an empty list). Only an explicit replacement by root or the app
   (`sudo whoread rules replace --json-file F --confirm`) overwrites them, and it first copies
   every old row, readable or not, into the `rules_backup` table of `whoread.sqlite`. If the daemon hangs past an AUTH deadline, macOS kills the client
   and the pending operation is implicitly allowed. WhoRead runs in the default deadline mode;
   the macOS 27 fail-open mode is not used yet (RESEARCH.md).
-- **Death while enforcing leaves enforcement off.** While AUTH events are subscribed, a marker file
-  exists. If the next start finds it (the kernel killed the daemon for a missed deadline, or it
-  crashed, or the Mac lost power), enforcement stays off until you turn it on again. That is
-  fail-open by design.
+- **Never switched off automatically.** Slow answers and missed deadlines are counted and shown, not
+  acted on. While AUTH events are subscribed a marker file exists; if the next start finds it (the
+  kernel killed the daemon for a missed deadline, a crash, power loss), enforcement stays as you set
+  it and `whoread status` and the app report the unclean stop. Turning enforcement off (any kill
+  switch) releases every held access as allowed.
 - **Decisions are made in memory on the ES callback** (classifier, process tree, rules). Logging
   and notifications happen afterwards on queues. No disk IO, no XPC, no UI on the callback path.
 - **Never blocked** (hard-coded, by name, platform flag *and* root-owned location, so a renamed
@@ -151,20 +173,22 @@ AI agents run as you, so WhoRead must not let them switch it off:
   owners, so blocking the terminal an alert was charged to does not break your own `ssh`/`git`.
 - **Exceptions are narrow.** "Allow once" covers the path, category and access kind that was
   blocked, and only chains with the same AI agents the alert showed; it expires after 10 minutes
-  or one use. "Always allow" is scoped the same way minus the path. A used "allow once" stays used
+  or one use. "Always allow" is scoped the same way minus the path, and also saves the app ×
+category × access answer rule (so that app is not asked about other files of the category). A used "allow once" stays used
   across clean restarts; after a crash or SIGKILL, a use from the last 30 seconds may come back
   until the exception expires. Unsigned binaries are pinned to their cdhash in these rules; a deny
   on a pinned cdhash follows the code to any path and into chains charged to another app. A "block
   from now on" rule for an AI agent applies wherever that agent is in the chain. Path rules also
   match the link targets the classifier followed (up to 8 per prefix); allow path rules never
   follow links.
-- **Latency guard.** Every AUTH response time is recorded, from the event's own timestamp (so time
-  spent queued counts). A missed deadline trips at once; p99 over the threshold (default 50 ms)
-  trips when it holds in 3 consecutive 1-second checks with slow responses in each (a burst that
-  ended does not count). Either turns enforcement off automatically, also when it happens while a
-  kill switch already had it off; the setting itself is switched off, so it stays off across
-  restarts until you turn it on again (`whoread enforcement on` or the UI switch). A sustained
-  flood by a process running as you can still trip it (see "Attackers WhoRead does not stop").
+- **Latency is measured, never acted on.** Every immediately answered AUTH response is timed from
+  the event's own timestamp (held questions are excluded). p99 over the threshold (default 50 ms)
+  for 3 consecutive checks logs a warning at most once a minute; deadline misses are counted.
+- **Held accesses are answered exactly once.** The message is retained, answered by the user's answer
+  or the budget timer, and released; a backstop denies it before the kernel deadline if nothing else
+  did; before the ES clients are deleted every held access is denied. A held access the answer allows
+  is re-decided against the new rules first, so an answer about one category never lets through an
+  operation that also touches another undecided category.
 - **Denial floods** are recorded from a bounded backlog: past 1,000 pending, identical repeats
   (same process instance, operation, targets and rule) are merged; past 10,000 the rest are only
   counted in `whoread status`. Every one of them is still denied.

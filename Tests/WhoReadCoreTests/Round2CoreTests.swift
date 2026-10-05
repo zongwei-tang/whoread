@@ -289,8 +289,9 @@ final class LatencyRound2Tests: XCTestCase {
     private func slow(_ m: LatencyMonitor, _ n: Int = 60) { for _ in 0..<n { m.record(micros: 80_000, missedDeadline: false) } }
     private func fast(_ m: LatencyMonitor, _ n: Int = 60) { for _ in 0..<n { m.record(micros: 100, missedDeadline: false) } }
 
-    func testP99TripNeedsABreachThatPersists() {
-        let m = LatencyMonitor(p99ThresholdMicros: 50_000, minimumSamples: 50, breachesToTrip: 3)
+    // Ask mode: the monitor only reports (isSlow, a log warning); it never trips.
+    func testP99WarningNeedsABreachThatPersists() {
+        let m = LatencyMonitor(p99ThresholdMicros: 50_000, minimumSamples: 50, breachesToWarn: 3)
         // One burst: it stays in the window, but nothing slow happens afterwards.
         slow(m)
         m.evaluate()
@@ -299,52 +300,58 @@ final class LatencyRound2Tests: XCTestCase {
             m.evaluate()
         }
         m.evaluate()
-        XCTAssertFalse(m.isTripped, "a burst that ended does not trip")
-        XCTAssertGreaterThan(m.evaluateWithoutTripping().p99Micros, 50_000, "although the window's p99 is still over")
+        XCTAssertFalse(m.isSlow, "a burst that ended is not slow")
+        XCTAssertGreaterThan(m.snapshot().p99Micros, 50_000, "although the window's p99 is still over")
         // Slow in two evaluations, then a quiet one: the streak starts over.
         slow(m); m.evaluate()
         slow(m); m.evaluate()
         fast(m, 500); m.evaluate()
         slow(m); m.evaluate()
-        XCTAssertFalse(m.isTripped)
+        XCTAssertFalse(m.isSlow)
         // Three in a row.
         slow(m); m.evaluate()
-        XCTAssertFalse(m.isTripped)
+        XCTAssertFalse(m.isSlow)
         slow(m); m.evaluate()
-        XCTAssertTrue(m.trippedReason?.contains("p99") == true)
+        XCTAssertTrue(m.isSlow)
+        // Not latched: the next quiet evaluation clears it.
+        fast(m, 500); m.evaluate()
+        XCTAssertFalse(m.isSlow)
+        slow(m); m.evaluate(); slow(m); m.evaluate(); slow(m); m.evaluate()
+        XCTAssertTrue(m.isSlow)
         m.reset()
-        XCTAssertFalse(m.isTripped)
+        XCTAssertFalse(m.isSlow)
         slow(m); m.evaluate()
-        XCTAssertFalse(m.isTripped, "reset clears the streak")
+        XCTAssertFalse(m.isSlow, "reset clears the streak")
     }
 
-    func testStatusReadsDoNotCountAndDeadlineMissesStillTripAtOnce() {
-        let m = LatencyMonitor(p99ThresholdMicros: 50_000, minimumSamples: 50, breachesToTrip: 2)
+    func testStatusReadsDoNotCountAndDeadlineMissesAreOnlyCounted() {
+        let m = LatencyMonitor(p99ThresholdMicros: 50_000, minimumSamples: 50, breachesToWarn: 2)
         slow(m)
-        for _ in 0..<5 { _ = m.evaluateWithoutTripping() }
-        XCTAssertFalse(m.isTripped)
+        for _ in 0..<5 { _ = m.snapshot() }
+        XCTAssertFalse(m.isSlow)
         m.evaluate()
-        XCTAssertFalse(m.isTripped)
+        XCTAssertFalse(m.isSlow)
         slow(m)
         m.evaluate()
-        XCTAssertTrue(m.isTripped)
+        XCTAssertTrue(m.isSlow)
 
-        let d = LatencyMonitor(breachesToTrip: 5)
+        let d = LatencyMonitor(breachesToWarn: 5)
         d.record(micros: 10, missedDeadline: true)
-        XCTAssertEqual(d.trippedReason, "deadline missed")
+        XCTAssertFalse(d.isSlow)
+        XCTAssertEqual(d.snapshot().deadlineMisses, 1)
         // After a burst, a handful of slow responses among many fast ones is under p99 for the interval
         // (the window, still holding the burst, is not).
-        let tail = LatencyMonitor(p99ThresholdMicros: 50_000, minimumSamples: 50, breachesToTrip: 2)
+        let tail = LatencyMonitor(p99ThresholdMicros: 50_000, minimumSamples: 50, breachesToWarn: 2)
         slow(tail)
         tail.evaluate()
         slow(tail, 5)
         fast(tail, 1000)
         XCTAssertGreaterThan(tail.evaluate().p99Micros, 50_000)
-        XCTAssertFalse(tail.isTripped)
+        XCTAssertFalse(tail.isSlow)
         slow(tail)
         tail.evaluate()
-        XCTAssertFalse(tail.isTripped, "the streak started over")
-        XCTAssertEqual(LatencyMonitor(breachesToTrip: 0).breachesToTrip, 1)
+        XCTAssertFalse(tail.isSlow, "the streak started over")
+        XCTAssertEqual(LatencyMonitor(breachesToWarn: 0).breachesToWarn, 1)
     }
 }
 
@@ -472,11 +479,11 @@ final class Round2FollowUpTests: XCTestCase {
         let m = LatencyMonitor(p99ThresholdMicros: 50_000, minimumSamples: 50)
         for _ in 0..<60 { m.record(micros: 20_000, missedDeadline: false) }
         m.evaluate()
-        XCTAssertFalse(m.isTripped)
+        XCTAssertFalse(m.isSlow)
         m.p99ThresholdMicros = 10_000
         XCTAssertEqual(m.p99ThresholdMicros, 10_000)
         for _ in 0..<60 { m.record(micros: 20_000, missedDeadline: false) }
         m.evaluate()
-        XCTAssertEqual(m.trippedReason, "p99 latency 20.0 ms over 10.0 ms")
+        XCTAssertTrue(m.isSlow)
     }
 }

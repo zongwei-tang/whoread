@@ -49,3 +49,49 @@ final class FollowUpDaemonTests: XCTestCase {
         XCTAssertNil(core.status().sourceKernelDrops, "the fake source reports none")
     }
 }
+
+final class AskPrivilegeFollowUpTests: XCTestCase {
+    func testTurningAppleTrustOffIsStrengtheningAndOnIsNot() throws {
+        var current = Settings()
+        current.trustApplePrograms = true
+        var off = current
+        off.trustApplePrograms = false
+        XCTAssertTrue(DaemonCore.onlyTurnsOffAppleTrust(off, current: current))
+        var offAndMore = off
+        offAndMore.retentionDays = 5
+        XCTAssertFalse(DaemonCore.onlyTurnsOffAppleTrust(offAndMore, current: current), "other changes still need privilege")
+        XCTAssertFalse(DaemonCore.onlyTurnsOffAppleTrust(current, current: off), "turning it on weakens")
+    }
+}
+
+final class AskIDFollowUpTests: XCTestCase {
+    func request() -> AskRequest {
+        AskRequest(id: 0, key: AskKey(responsibleKey: "app:/x", categoryID: "ssh", access: .read, chainAgents: []),
+                   responsible: ResponsibleEntity(kind: .app, key: "app:/x", displayName: "X"), severity: .critical,
+                   path: "/Users/alice/.ssh/id_ed25519", process: ProcessRecord(pid: 1, ppid: 0, executablePath: "/bin/cat"),
+                   chain: [], agentID: nil, appleProgram: false, firstAt: Date(), lastAt: Date())
+    }
+
+    /// Ids start where the caller says (DaemonCore passes a millisecond timestamp), so they never repeat
+    /// across daemon instances.
+    func testQuestionIDsStartAtTheGivenValue() {
+        let broker = AskBroker(firstID: 1_760_000_000_000)
+        broker.noteAnsweringClient()
+        let d = broker.hold(request(), budget: 5) { _ in }
+        guard case .held(let id) = d else { return XCTFail("\(d)") }
+        XCTAssertEqual(id, 1_760_000_000_000)
+        broker.denyAll()
+    }
+
+    func testDaemonQuestionIDsAreTimestampBased() throws {
+        let dir = TempDir()
+        var c = baseConfig(dir)
+        c.resolveOwners = false
+        let core = try DaemonCore(config: c, makeSource: { _ in FakeSource(canEnforce: true) })
+        core.askBroker.noteAnsweringClient()
+        let d = core.askBroker.hold(request(), budget: 5) { _ in }
+        guard case .held(let id) = d else { return XCTFail("\(d)") }
+        XCTAssertGreaterThan(id, 1_700_000_000_000)
+        core.askBroker.denyAll()
+    }
+}

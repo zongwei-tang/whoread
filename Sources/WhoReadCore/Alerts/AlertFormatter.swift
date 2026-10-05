@@ -54,6 +54,12 @@ public struct AlertFormatter: Sendable {
             text = "已拦截：\(app) 试图\(verbZH) \(path)"
         case (.en, .blocked):
             text = "Blocked: \(app) tried to \(verbENBase) \(path)"
+        // An ask alert exists once an access was denied for want of an answer; later accesses are held
+        // (or denied) the same way until an answer saves a rule.
+        case (.zhHans, .ask):
+            text = "\(app) 想要\(verbZH) \(path)，你决定之前不会放行"
+        case (.en, .ask):
+            text = "\(app) wants to \(verbENBase) \(path): not allowed until you decide"
         }
         if alert.count > 1 {
             text += language == .zhHans ? "（\(alert.count) 次）" : " (×\(alert.count))"
@@ -64,6 +70,19 @@ public struct AlertFormatter: Sendable {
     public func chainLine(_ chain: [ChainLink]) -> String {
         let names = chain.map(\.name).joined(separator: " → ")
         return language == .zhHans ? "调用链：\(names)" : "Chain: \(names)"
+    }
+
+    /// Titles for the answers to a question (docs/ASK_MODE.md): "deny" saves nothing, "always deny"
+    /// saves a deny rule. Other kinds use the plain titles.
+    public func actionTitle(_ action: AlertAction, kind: AlertKind) -> String {
+        guard kind == .ask else { return actionTitle(action) }
+        switch (language, action) {
+        case (.zhHans, .keepBlocking): return "拒绝"
+        case (.en, .keepBlocking): return "Deny"
+        case (.zhHans, .blockFromNowOn): return "始终拒绝"
+        case (.en, .blockFromNowOn): return "Always deny"
+        default: return actionTitle(action)
+        }
     }
 
     public func actionTitle(_ action: AlertAction) -> String {
@@ -78,13 +97,15 @@ public struct AlertFormatter: Sendable {
         case (.en, .keepBlocking): return "Keep blocking"
         case (.zhHans, .ignore): return "忽略"
         case (.en, .ignore): return "Ignore"
+        case (.zhHans, .trustApplePrograms): return "允许所有 Apple 程序"
+        case (.en, .trustApplePrograms): return "Allow all Apple programs"
         }
     }
 
     /// Full one-line form used by the CLI and as notification fallback.
     public func line(_ alert: Alert) -> String {
         let sep = language == .zhHans ? "｜" : " | "
-        let actions = alert.availableActions.map(actionTitle).joined(separator: " · ")
+        let actions = alert.availableActions.map { actionTitle($0, kind: alert.kind) }.joined(separator: " · ")
         return headline(alert) + sep + chainLine(alert.chain) + sep + actions
     }
 
@@ -100,6 +121,8 @@ public struct AlertFormatter: Sendable {
         case (.en, .wouldBlock): return "Would block"
         case (.zhHans, .blocked): return "已拦截"
         case (.en, .blocked): return "Blocked"
+        case (.zhHans, .ask): return "等你决定"
+        case (.en, .ask): return "Needs your decision"
         }
     }
 }

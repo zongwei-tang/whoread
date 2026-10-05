@@ -20,7 +20,7 @@ public final class Daemon: @unchecked Sendable {
 
     public init(configuration: DaemonConfiguration, makeSource: ((DaemonCore) throws -> EventSource)? = nil) throws {
         // Locked before the core opens the store: building it consumes the auth-armed marker (and may
-        // turn enforcement off, rewrite the user catalog or seed rules). A second instance must not do
+        // record an unclean stop, rewrite the user catalog or seed rules). A second instance must not do
         // that to the store of the one that is running.
         let fd = try Daemon.acquireLock(configuration)
         let c: DaemonCore
@@ -122,6 +122,8 @@ public final class Daemon: @unchecked Sendable {
         core.persistBaseline()
         // A used "allow once" must not work again after a restart.
         core.saveConsumableRules()
+        // A clean stop: an earlier unclean one (DaemonStatus.uncleanStop) is no longer reported.
+        core.noteCleanStop()
         if lockFD >= 0 {
             close(lockFD)
             lockFD = -1

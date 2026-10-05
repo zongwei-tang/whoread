@@ -7,12 +7,17 @@ import Foundation
 /// Enforcement is active only if all hold:
 /// - the user enabled it (setting / `whoread enforcement on` / UI switch),
 /// - `/Library/Application Support/WhoRead/disable-enforcement` does not exist,
-/// - the latency monitor has not tripped,
-/// - rules loaded successfully.
+/// - rules loaded successfully,
+/// - the source can enforce.
+///
+/// Nothing switches it off automatically (ask mode): slow responses and missed deadlines are only
+/// counted (LatencyMonitor). The user's switch and the kill-switch file are the manual off switches.
 public final class EnforcementState: @unchecked Sendable {
     public enum InactiveReason: String, Codable, Sendable {
         case disabledByUser
         case killSwitchFile
+        /// Never reported since ask mode (no automatic switch-off); kept so statuses from older
+        /// daemons still decode.
         case latencyTripped
         case rulesFailedToLoad
         case sourceCannotEnforce
@@ -21,11 +26,9 @@ public final class EnforcementState: @unchecked Sendable {
     private let lock = NSLock()
     private var userEnabled: Bool
     private var killFile = false
-    private var latencyTrip: String?
     private var rulesOK = true
     private var sourceCanEnforce: Bool
     private var observers: [(Bool) -> Void] = []
-    private var tripObservers: [(String) -> Void] = []
 
     public init(userEnabled: Bool, sourceCanEnforce: Bool) {
         self.userEnabled = userEnabled
@@ -38,7 +41,7 @@ public final class EnforcementState: @unchecked Sendable {
     }
 
     private var activeLocked: Bool {
-        userEnabled && !killFile && latencyTrip == nil && rulesOK && sourceCanEnforce
+        userEnabled && !killFile && rulesOK && sourceCanEnforce
     }
 
     public var inactiveReasons: [InactiveReason] {
@@ -46,7 +49,6 @@ public final class EnforcementState: @unchecked Sendable {
         var out: [InactiveReason] = []
         if !userEnabled { out.append(.disabledByUser) }
         if killFile { out.append(.killSwitchFile) }
-        if latencyTrip != nil { out.append(.latencyTripped) }
         if !rulesOK { out.append(.rulesFailedToLoad) }
         if !sourceCanEnforce { out.append(.sourceCannotEnforce) }
         return out
@@ -55,11 +57,6 @@ public final class EnforcementState: @unchecked Sendable {
     public var userEnabledSetting: Bool {
         lock.lock(); defer { lock.unlock() }
         return userEnabled
-    }
-
-    public var latencyTripReason: String? {
-        lock.lock(); defer { lock.unlock() }
-        return latencyTrip
     }
 
     public var killSwitchFilePresent: Bool {
@@ -73,13 +70,6 @@ public final class EnforcementState: @unchecked Sendable {
         lock.lock(); observers.append(observer); lock.unlock()
     }
 
-    /// Called with the reason when the latency monitor trips, whether or not enforcement was active
-    /// at that moment (a trip during a kill-switch window must still be kept). Same threading rules
-    /// as `onChange`: hand the work to a queue.
-    public func onTrip(_ observer: @escaping (String) -> Void) {
-        lock.lock(); tripObservers.append(observer); lock.unlock()
-    }
-
     private func mutate(_ f: () -> Void) {
         lock.lock()
         let before = activeLocked
@@ -90,25 +80,8 @@ public final class EnforcementState: @unchecked Sendable {
         if before != after { obs.forEach { $0(after) } }
     }
 
-    public func setUserEnabled(_ v: Bool) {
-        mutate {
-            userEnabled = v
-            // Re-enabling is an explicit decision to try again after a latency trip.
-            if v { latencyTrip = nil }
-        }
-    }
-
+    public func setUserEnabled(_ v: Bool) { mutate { userEnabled = v } }
     public func setKillSwitchFilePresent(_ v: Bool) { mutate { killFile = v } }
-    public func tripLatency(_ reason: String) {
-        var trips: [(String) -> Void] = []
-        mutate {
-            if latencyTrip == nil {
-                latencyTrip = reason
-                trips = tripObservers
-            }
-        }
-        trips.forEach { $0(reason) }
-    }
     public func setRulesLoaded(_ ok: Bool) { mutate { rulesOK = ok } }
     public func setSourceCanEnforce(_ v: Bool) { mutate { sourceCanEnforce = v } }
 }

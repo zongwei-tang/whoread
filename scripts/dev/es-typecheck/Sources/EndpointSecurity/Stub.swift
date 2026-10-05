@@ -197,6 +197,9 @@ public func es_unsubscribe(_ client: OpaquePointer, _ events: UnsafePointer<es_e
 public func es_unsubscribe_all(_ client: OpaquePointer) -> es_return_t { ES_RETURN_SUCCESS }
 public func es_respond_auth_result(_ client: OpaquePointer, _ message: UnsafePointer<es_message_t>, _ result: es_auth_result_t, _ cache: Bool) -> es_respond_result_t { ES_RESPOND_RESULT_SUCCESS }
 public func es_respond_flags_result(_ client: OpaquePointer, _ message: UnsafePointer<es_message_t>, _ authorized_flags: UInt32, _ cache: Bool) -> es_respond_result_t { ES_RESPOND_RESULT_SUCCESS }
+// macOS 11.0 (docs/research/endpoint-security-api.md §4).
+public func es_retain_message(_ msg: UnsafePointer<es_message_t>) {}
+public func es_release_message(_ msg: UnsafePointer<es_message_t>) {}
 public func es_clear_cache(_ client: OpaquePointer) -> es_clear_cache_result_t { ES_CLEAR_CACHE_RESULT_SUCCESS }
 public func es_mute_process(_ client: OpaquePointer, _ audit_token: UnsafePointer<audit_token_t>) -> es_return_t { ES_RETURN_SUCCESS }
 public func es_mute_path(_ client: OpaquePointer, _ path: UnsafePointer<CChar>, _ type: es_mute_path_type_t) -> es_return_t { ES_RETURN_SUCCESS }

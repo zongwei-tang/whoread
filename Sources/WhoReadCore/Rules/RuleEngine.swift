@@ -27,6 +27,9 @@ public struct EvaluationTarget: Sendable {
 public enum Verdict: String, Codable, Sendable {
     case allow
     case deny
+    /// Ask mode, enforcement active: nothing decides this access yet. The native source holds the
+    /// access and asks the user (AskBroker); unanswered by the deadline budget, it is denied.
+    case ask
 }
 
 public enum DecisionReason: String, Codable, Sendable {
@@ -41,6 +44,14 @@ public enum DecisionReason: String, Codable, Sendable {
     case defaultAllow
     case notSensitive
     case failOpen
+    /// Ask mode: no rule, owner or trust decides; the user is asked (verdict .ask), or was asked and
+    /// did not answer in time (verdict .deny).
+    case askUser
+    /// A benign system service chain (Spotlight, Time Machine…): never asked.
+    case benign
+    /// "Trust Apple programs" is on and this is an Apple program in a system location, with no AI
+    /// agent in its chain.
+    case trustedApple
 }
 
 public struct RuleDecision: Codable, Hashable, Sendable {
@@ -56,9 +67,12 @@ public struct RuleDecision: Codable, Hashable, Sendable {
     public var suppressAlert: Bool
     /// Safe to let Endpoint Security cache (keyed on executable file + target file).
     public var cacheable: Bool
+    /// Set with verdict .ask (and on the .deny an unanswered ask becomes): what the answer applies to.
+    public var askKey: AskKey?
 
     public init(verdict: Verdict, policyDenied: AccessSet = [], wouldDeny: Bool = false, reason: DecisionReason,
-                ruleID: String? = nil, forceAlert: Bool = false, suppressAlert: Bool = false, cacheable: Bool = false) {
+                ruleID: String? = nil, forceAlert: Bool = false, suppressAlert: Bool = false, cacheable: Bool = false,
+                askKey: AskKey? = nil) {
         self.verdict = verdict
         self.policyDenied = policyDenied
         self.wouldDeny = wouldDeny
@@ -67,6 +81,7 @@ public struct RuleDecision: Codable, Hashable, Sendable {
         self.forceAlert = forceAlert
         self.suppressAlert = suppressAlert
         self.cacheable = cacheable
+        self.askKey = askKey
     }
 
     public static func failOpen() -> RuleDecision {
@@ -78,6 +93,12 @@ public struct RuleDecision: Codable, Hashable, Sendable {
 ///
 /// Priority: explicit deny > explicit allow > owner > default. `alert` rules do not change the
 /// verdict, they force an alert when nothing above suppressed it.
+///
+/// Ask mode (`AskPolicy.enabled`, enforcement active) replaces "default allow" with a question
+/// (docs/ASK_MODE.md): every (path, category) of the access must be decided by an enforced deny, by
+/// allow rules covering the requested access kinds, or by an owner with no AI agent in its chain;
+/// failing that, a benign service chain or a trusted Apple program allows the whole access, and
+/// anything else is `.ask`. Alert rules and dry-run denies do not decide (they still alert).
 public final class RuleEngine: @unchecked Sendable {
     private let lock = NSLock()
     private var compiled: [CompiledRule] = []
@@ -96,6 +117,8 @@ public final class RuleEngine: @unchecked Sendable {
         /// Folded, normalized program path for `.unsigned` subjects (computed once, not per event).
         var unsignedKey: String?
         var exceptionUnsignedKeys: [String?]
+        /// `rule.chainAgents` as a set (computed once).
+        var chainAgents: Set<String>?
     }
 
     public init(rules: [Rule], classifier: PathClassifier, attributor: Attributor? = nil, neverBlock: NeverBlockList = NeverBlockList()) {
@@ -132,7 +155,8 @@ public final class RuleEngine: @unchecked Sendable {
         if case .pathPrefix(let p) = rule.target { prefixKeys = keys(p, links: rule.action != .allow, linksBelow: true) }
         return CompiledRule(rule: rule, prefixKeys: prefixKeys, prefixKeysSlash: prefixKeys.map { $0 + "/" },
                             exceptionPrefixKeys: rule.exceptions.map { keys($0.pathPrefix, links: true, linksBelow: false) },
-                            unsignedKey: unsignedKey(rule.subject), exceptionUnsignedKeys: rule.exceptions.map { unsignedKey($0.subject) })
+                            unsignedKey: unsignedKey(rule.subject), exceptionUnsignedKeys: rule.exceptions.map { unsignedKey($0.subject) },
+                            chainAgents: rule.chainAgents.map(Set.init))
     }
 
     public func replace(rules: [Rule], classifier: PathClassifier? = nil) {
@@ -175,7 +199,8 @@ public final class RuleEngine: @unchecked Sendable {
         targets: [EvaluationTarget],
         enforcementActive: Bool,
         now: Date,
-        consumeExceptions: Bool = true
+        consumeExceptions: Bool = true,
+        ask: AskPolicy = .off
     ) -> RuleDecision {
         lock.lock(); defer { lock.unlock() }
 
@@ -261,6 +286,12 @@ public final class RuleEngine: @unchecked Sendable {
                 }
             }
         }
+        /// Ask mode: an approval scoped to a path answers for what is inside it, not for moving one of
+        /// its parent directories (which carries everything else in there too).
+        func coversWhole(_ c: CompiledRule, _ key: String) -> Bool {
+            guard case .pathPrefix = c.rule.target else { return true }
+            return c.prefixKeys.indices.contains { key == c.prefixKeys[$0] || key.hasPrefix(c.prefixKeysSlash[$0]) }
+        }
 
         var enforcedDenied: AccessSet = []
         var enforcedDeny: Rule?
@@ -271,17 +302,26 @@ public final class RuleEngine: @unchecked Sendable {
         var dynamicCovering = false
         var consumedExceptions: [(rule: Int, exception: Int)] = []
 
-        for target in sensitive {
+        let asking = ask.enabled && enforcementActive
+        // Ask mode, per sensitive target and category: the requested kinds that allow rules (or a deny
+        // rule's exception) let through, and every kind static allow rules cover (cacheability).
+        var allowed: [[AccessSet]] = asking ? sensitive.map { Array(repeating: [], count: $0.categories.count) } : []
+        var allowedKinds = allowed
+
+        for (ti, target) in sensitive.enumerated() {
             let pathKey = PathNormalizer.fold(target.path)
             let pathKeySlash = pathKey + "/"
-            for category in target.categories {
+            for (ci, category) in target.categories.enumerated() {
                 for (ri, c) in compiled.enumerated() where c.rule.isLive(at: now) {
                     guard targetMatches(c, pathKey, pathKeySlash, category) else { continue }
                     let requested = c.rule.access.intersect(target.access)
                     anyCovering = true
-                    if c.rule.subject.isChainDependent || c.rule.isTimeDependent || c.rule.hasChainDependentExceptions {
+                    if c.rule.subject.isChainDependent || c.rule.isTimeDependent || c.rule.hasChainDependentExceptions
+                        || c.chainAgents != nil {
                         dynamicCovering = true
                     }
+                    // Scoped to the AI agents the user saw: a chain with any other agent is not covered.
+                    if let scope = c.chainAgents, !chainAgents.isSubset(of: scope) { continue }
                     guard subjectMatches(c.rule.subject, category: category.id, unsignedKey: c.unsignedKey,
                                          widenForDeny: c.rule.action == .deny) else { continue }
 
@@ -309,6 +349,8 @@ public final class RuleEngine: @unchecked Sendable {
                             if !requested.isEmpty, c.rule.exceptions[ei].remainingUses != nil {
                                 consumedExceptions.append((ri, ei))
                             }
+                            // The user approved this subject here ("allow once" / "always allow" on a block).
+                            if asking && coversWhole(c, pathKey) { allowed[ti][ci].formUnion(requested) }
                             if enforcementActive && c.rule.enforce, let a = c.rule.exceptions[ei].access {
                                 // Access kinds outside the approval stay denied (keeps AUTH_OPEN caching honest).
                                 enforcedDenied.formUnion(c.rule.access.intersect(.readWrite).subtracting(a.intersect(.readWrite)))
@@ -325,6 +367,10 @@ public final class RuleEngine: @unchecked Sendable {
                         }
                     case .allow:
                         if !requested.isEmpty && allowHit == nil { allowHit = c.rule }
+                        if asking && coversWhole(c, pathKey) {
+                            allowed[ti][ci].formUnion(requested)
+                            allowedKinds[ti][ci].formUnion(c.rule.access.intersect(.readWrite))
+                        }
                     case .alert:
                         if !requested.isEmpty && alertHit == nil { alertHit = c.rule }
                     }
@@ -339,17 +385,90 @@ public final class RuleEngine: @unchecked Sendable {
             return RuleDecision(verdict: .deny, policyDenied: enforcedDenied, reason: .explicitDeny,
                                 ruleID: rule.id, forceAlert: true, cacheable: cacheable)
         }
-        for (ri, ei) in consumedExceptions where consumeExceptions {
-            if let uses = compiled[ri].rule.exceptions[ei].remainingUses {
-                compiled[ri].rule.exceptions[ei].remainingUses = uses - 1
-                consumed = true
+        func consume() {
+            for (ri, ei) in consumedExceptions where consumeExceptions {
+                if let uses = compiled[ri].rule.exceptions[ei].remainingUses {
+                    compiled[ri].rule.exceptions[ei].remainingUses = uses - 1
+                    consumed = true
+                }
             }
         }
+        if asking {
+            // Every (path, category) with a requested read or write needs a decision. An owner only
+            // counts with no AI agent in the chain: an agent can drive ssh or git to read a key.
+            var undecided: [(target: Int, category: Int)] = []
+            var byOwner = false
+            // ES caches an AUTH_OPEN allow for this executable and file whatever the later open's
+            // flags, so only an allow static rules give for every access kind may be cached.
+            var staticAllow = true
+            for (ti, t) in sensitive.enumerated() {
+                let needed = t.access.intersection(.readWrite)
+                for (ci, category) in t.categories.enumerated() {
+                    if allowedKinds[ti][ci] != .readWrite { staticAllow = false }
+                    if allowed[ti][ci].isSuperset(of: needed) { continue }
+                    if chainAgents.isEmpty && isOwner(category.id) {
+                        byOwner = true
+                        continue
+                    }
+                    undecided.append((ti, ci))
+                }
+            }
+            let trusted = ask.trustApplePrograms && AskPolicy.isTrustableAppleProgram(process, chain: chain)
+            if !undecided.isEmpty && !ask.benignChain && !trusted {
+                // One question per access, about its most severe undecided category (ties: the first).
+                // Not consumed: an "allow once" on another category waits for the answer.
+                var pick = undecided[0]
+                for u in undecided.dropFirst()
+                where sensitive[u.target].categories[u.category].severity > sensitive[pick.target].categories[pick.category].severity {
+                    pick = u
+                }
+                let categoryID = sensitive[pick.target].categories[pick.category].id
+                let access = sensitive.reduce(AccessSet()) { acc, t in
+                    t.categories.contains { $0.id == categoryID } ? acc.union(t.access) : acc
+                }.intersection(.readWrite)
+                // The daemon always has an attributor; without one, the program stands for itself.
+                let key = AskKey(responsibleKey: responsible()?.key ?? "bin:" + PathNormalizer.fold(process.executablePath),
+                                 categoryID: categoryID, access: access, chainAgents: Array(chainAgents))
+                return RuleDecision(verdict: .ask, policyDenied: enforcedDenied, reason: .askUser, cacheable: false, askKey: key)
+            }
+            consume()
+            let askCacheable = cacheable && undecided.isEmpty && staticAllow
+            if let rule = dryRunDeny {
+                return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, wouldDeny: true, reason: .wouldDeny,
+                                    ruleID: rule.id, forceAlert: true, cacheable: askCacheable)
+            }
+            if !undecided.isEmpty {
+                // A benign service chain or a trusted Apple program: depends on the chain, never cached.
+                return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: ask.benignChain ? .benign : .trustedApple,
+                                    ruleID: alertHit?.id, forceAlert: alertHit != nil)
+            }
+            if let rule = allowHit {
+                // An answer only answers the question: an alert rule you enabled still alerts.
+                if rule.template == RuleTemplates.askAnswer, let alert = alertHit {
+                    return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: .alertRule,
+                                        ruleID: alert.id, forceAlert: true, cacheable: askCacheable)
+                }
+                return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: .explicitAllow,
+                                    ruleID: rule.id, suppressAlert: true, cacheable: askCacheable)
+            }
+            if let rule = alertHit {
+                return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: .alertRule,
+                                    ruleID: rule.id, forceAlert: true, cacheable: askCacheable)
+            }
+            // Owners (no agent), or nothing read or written (a metadata-only open).
+            return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: byOwner ? .owner : .defaultAllow,
+                                cacheable: askCacheable)
+        }
+        consume()
         if let rule = dryRunDeny {
             return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, wouldDeny: true, reason: .wouldDeny,
                                 ruleID: rule.id, forceAlert: true, cacheable: cacheable)
         }
         if let rule = allowHit {
+            if rule.template == RuleTemplates.askAnswer, let alert = alertHit {
+                return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: .alertRule,
+                                    ruleID: alert.id, forceAlert: true, cacheable: cacheable)
+            }
             return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: .explicitAllow,
                                 ruleID: rule.id, suppressAlert: true, cacheable: cacheable)
         }
@@ -374,12 +493,21 @@ public final class RuleEngine: @unchecked Sendable {
         lock.lock(); consumed = true; lock.unlock()
     }
 
-    /// Drops exceptions that can never match again (used up or expired). Returns true if any was dropped.
+    /// Drops exceptions that can never match again (used up or expired), and expired answers to
+    /// ask-mode questions ("allow once" is a 10-minute allow rule: otherwise every such answer would
+    /// stay in the list for good, slowing the AUTH path and filling the rule limit). A rule that is
+    /// only disabled is kept. Returns true if anything was dropped.
     @discardableResult
     public func pruneDeadExceptions(at now: Date) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard compiled.contains(where: { $0.rule.exceptions.contains { !$0.isLive(at: now) } }) else { return false }
-        compiled = compiled.map { c in
+        func deadAnswer(_ r: Rule) -> Bool {
+            guard r.template == RuleTemplates.askAnswer else { return false }
+            return (r.expiresAt.map { now >= $0 } ?? false) || (r.remainingUses.map { $0 <= 0 } ?? false)
+        }
+        guard compiled.contains(where: { deadAnswer($0.rule) || $0.rule.exceptions.contains { !$0.isLive(at: now) } }) else {
+            return false
+        }
+        compiled = compiled.filter { !deadAnswer($0.rule) }.map { c in
             var r = c.rule
             r.exceptions.removeAll { !$0.isLive(at: now) }
             return RuleEngine.compile(r, classifier)

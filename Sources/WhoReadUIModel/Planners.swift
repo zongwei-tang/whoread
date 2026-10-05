@@ -13,7 +13,27 @@ public struct PlannedNotification: Equatable, Sendable {
     public var actions: [AlertAction]
 }
 
-/// A notification about the daemon itself rather than an alert (e.g. enforcement switched off).
+/// Ask mode: a question to post (UNUserNotificationCenter in the app), with the answers as buttons.
+public struct PlannedAskNotification: Equatable, Sendable {
+    /// "ask-<id>": withdrawn by this identifier once the question is no longer open.
+    public var identifier: String
+    public var askID: Int64
+    public var title: String
+    public var body: String
+    public var categoryIdentifier: String
+    public var actions: [AlertAction]
+}
+
+/// What to change in the delivered question notifications after a poll.
+public struct AskNotificationPlan: Equatable, Sendable {
+    public var post: [PlannedAskNotification] = []
+    /// Identifiers of questions no longer open (answered here or elsewhere, expired, daemon restarted).
+    public var remove: [String] = []
+
+    public init() {}
+}
+
+/// A notification about the daemon itself rather than an alert (e.g. it stopped unexpectedly).
 public struct SystemNotice: Equatable, Sendable {
     public var identifier: String
     public var title: String
@@ -31,6 +51,9 @@ public struct SystemNotice: Equatable, Sendable {
 ///
 /// The alert's status does not matter: an agent running as the user could mark its own alert
 /// read or ignored before the next poll.
+///
+/// Ask mode: every open question gets one notification with the answers as buttons (`plan(asks:)`);
+/// `ask` alerts are not notified on their own.
 public final class NotificationPlanner: @unchecked Sendable {
     private struct Seen {
         var createdAt: Date
@@ -43,29 +66,39 @@ public final class NotificationPlanner: @unchecked Sendable {
     private var notified: [Int64: Seen] = [:]
     private var seeded = false
     private let launchedAt: Date
-    private var lastTripReason: String?
+    private var lastUncleanStop: String?
+    /// Questions notified: id → first asked (a restarted daemon reuses ids).
+    private var askNotified: [Int64: Date] = [:]
 
     public static let categoryBlocked = "whoread.blocked"
     public static let categoryAlert = "whoread.alert"
     public static let categoryWouldBlock = "whoread.wouldblock"
+    public static let categoryAsk = "whoread.ask"
+    /// Adds "Allow all Apple programs".
+    public static let categoryAskApple = "whoread.ask.apple"
 
-    public static func category(for kind: AlertKind) -> String {
+    public static func askIdentifier(_ id: Int64) -> String { "ask-\(id)" }
+    public static func isAskIdentifier(_ identifier: String) -> Bool { identifier.hasPrefix("ask-") }
+
+    public static let categoryAlertApple = "whoread.alert.apple"
+
+    public static func category(for kind: AlertKind, appleProgram: Bool = false) -> String {
         switch kind {
         case .blocked: return categoryBlocked
         case .wouldBlock: return categoryWouldBlock
-        default: return categoryAlert
+        default: return appleProgram ? categoryAlertApple : categoryAlert
         }
     }
 
     /// `launchedAt`: alerts created before this are not notified on the first plan.
-    /// `notifiedTrip`: the latency trip already reported, kept by the app across launches.
-    public init(launchedAt: Date = Date(), notifiedTrip: String? = nil) {
+    /// `notifiedUncleanStop`: the unclean stop already reported, kept by the app across launches.
+    public init(launchedAt: Date = Date(), notifiedUncleanStop: String? = nil) {
         self.launchedAt = launchedAt
-        self.lastTripReason = notifiedTrip
+        self.lastUncleanStop = notifiedUncleanStop
     }
 
-    /// The latency trip last reported (nil once a status showed none), for the app to keep.
-    public var notifiedTrip: String? { lastTripReason }
+    /// The unclean stop last reported (nil once a status showed none), for the app to keep.
+    public var notifiedUncleanStop: String? { lastUncleanStop }
 
     /// The first plan only records alerts from before launch (no burst of old notifications);
     /// alerts raised since launch notify even if the daemon was unreachable until now.
@@ -82,6 +115,8 @@ public final class NotificationPlanner: @unchecked Sendable {
             notified[a.id] = Seen(createdAt: a.createdAt, kind: kind, firstEventID: a.firstEventID)
             // Not updatedAt: repeats merged since launch move it on alerts notified before.
             guard isNew || escalated, seeded || a.createdAt >= launchedAt else { continue }
+            // The question itself is notified (`plan(asks:)`), with the answers as buttons.
+            guard a.kind != .ask else { continue }
             guard settings.enabled else { continue }
             guard a.severity >= settings.minimumSeverity || a.kind == .blocked else { continue }
             if a.kind == .wouldBlock && !settings.notifyWouldBlock { continue }
@@ -89,20 +124,50 @@ public final class NotificationPlanner: @unchecked Sendable {
             out.append(PlannedNotification(
                 identifier: "alert-\(a.id)-\(Int(a.createdAt.timeIntervalSince1970))-\(a.kind.rawValue)-\(a.firstEventID)", alertID: a.id, title: title,
                 body: formatter.headline(a) + "\n" + formatter.chainLine(a.chain),
-                categoryIdentifier: NotificationPlanner.category(for: a.kind), threadIdentifier: a.categoryID,
+                categoryIdentifier: NotificationPlanner.category(for: a.kind, appleProgram: a.appleProgram), threadIdentifier: a.categoryID,
                 actions: a.availableActions))
         }
         return out
     }
 
-    /// Brief §5: when the latency monitor switches enforcement off, tell the user (once per trip;
-    /// the daemon keeps reporting a past trip until enforcement is turned on again). Posted whatever
-    /// the notification settings say: blocking silently stopped.
+    /// The daemon's previous instance stopped while it could block (likely killed by the kernel for
+    /// a missed deadline). Enforcement was left as the user set it; tell them once (the daemon keeps
+    /// reporting it while that instance runs). Posted whatever the notification settings say.
     public func plan(status: DaemonStatus, language: Language) -> [SystemNotice] {
-        defer { lastTripReason = status.latencyTripReason }
-        guard let trip = status.latencyTripReason, trip != lastTripReason else { return [] }
-        return [SystemNotice(identifier: "whoread.enforcement-tripped", title: L10n.t(.notifEnforcementTrippedTitle, language),
-                             body: L10n.f(.notifEnforcementTrippedBodyFormat, trip, language: language))]
+        defer { lastUncleanStop = status.uncleanStop }
+        guard let stop = status.uncleanStop, stop != lastUncleanStop else { return [] }
+        return [SystemNotice(identifier: "whoread.unclean-stop", title: L10n.t(.notifUncleanStopTitle, language),
+                             body: L10n.f(.uncleanStopFormat, stop, language: language))]
+    }
+
+    /// One notification per open question, the first time it is seen (also questions opened
+    /// before launch: they still wait for an answer); removals for questions no longer open.
+    /// Posted whatever the notification settings say: an unanswered question denies the access.
+    /// `agentName`: display name of an AI agent id (`AppModel.agentName`).
+    /// `complete`: the reply listed every open question. The daemon caps the list (200), so a question
+    /// missing from a capped reply may still be open: only a complete reply withdraws banners.
+    public func plan(asks: [AskRequest], formatter: AlertFormatter, complete: Bool = true,
+                     agentName: (String) -> String = { $0 }) -> AskNotificationPlan {
+        var plan = AskNotificationPlan()
+        var open: [Int64: Date] = [:]
+        for a in asks.sorted(by: { ($0.firstAt, $0.id) < ($1.firstAt, $1.id) }) {
+            open[a.id] = a.firstAt
+            // Same id, other first time: a restarted daemon's new question (replaces the old banner).
+            if let seen = askNotified[a.id], abs(seen.timeIntervalSince(a.firstAt)) < 1 { continue }
+            plan.post.append(PlannedAskNotification(
+                identifier: NotificationPlanner.askIdentifier(a.id), askID: a.id, title: L10n.t(.notifAskTitle, formatter.language),
+                body: [formatter.headline(a.asAlert), a.agentsLine(formatter.language, agentName: agentName),
+                       formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
+                categoryIdentifier: a.appleProgram ? NotificationPlanner.categoryAskApple : NotificationPlanner.categoryAsk,
+                actions: AskAnswers.actions(for: a)))
+        }
+        if complete {
+            plan.remove = askNotified.keys.filter { open[$0] == nil }.sorted().map(NotificationPlanner.askIdentifier)
+            askNotified = open
+        } else {
+            askNotified.merge(open) { $1 }
+        }
+        return plan
     }
 }
 
@@ -284,12 +349,14 @@ public struct RuleDraft: Equatable, Sendable {
         case .agentChain: subject = .agentAncestor(agentIDs: agentIDs.isEmpty ? nil : agentIDs, exceptOwners: exceptOwners)
         }
         // Editing keeps expiry, use count and creation time; a template only lends its provenance.
+        // The chain scope (not shown in the editor) is kept: an answer that allowed an app without an
+        // AI agent must not become an allow for that app driven by any agent once edited.
         let edited = id != nil && original?.id == id ? original : nil
         return Rule(id: id ?? UUID().uuidString, name: name.isEmpty ? nil : name, enabled: enabled, enforce: enforce,
                     target: target, subject: subject, access: access, action: action,
                     includePlatformBinaries: includePlatformBinaries, expiresAt: edited?.expiresAt,
                     remainingUses: edited?.remainingUses, createdAt: edited?.createdAt ?? now, template: original?.template,
-                    exceptions: exceptions)
+                    exceptions: exceptions, chainAgents: original?.chainAgents)
     }
 }
 

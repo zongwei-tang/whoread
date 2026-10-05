@@ -77,6 +77,9 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
     /// Carve-outs from a deny rule ("allow once", "always allow" on a blocked access). Deny keeps the
     /// highest priority; exceptions narrow what it covers instead of being overridden by allows.
     public var exceptions: [RuleException]
+    /// The rule applies only to chains whose AI agents are all in this list; nil = any chain. Answers
+    /// to ask-mode questions set it (an approval for an app never covers it driven by another agent).
+    public var chainAgents: [String]?
 
     public init(
         id: String = UUID().uuidString,
@@ -92,7 +95,8 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
         remainingUses: Int? = nil,
         createdAt: Date = Date(),
         template: String? = nil,
-        exceptions: [RuleException] = []
+        exceptions: [RuleException] = [],
+        chainAgents: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -108,6 +112,7 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
         self.createdAt = createdAt
         self.template = template
         self.exceptions = exceptions
+        self.chainAgents = chainAgents
     }
 
     /// Decisions depend on time, a use counter, or exceptions that do.
@@ -126,7 +131,7 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, enabled, enforce, target, subject, access, action, includePlatformBinaries
-        case expiresAt, remainingUses, createdAt, template, exceptions
+        case expiresAt, remainingUses, createdAt, template, exceptions, chainAgents
     }
 
     public init(from decoder: Decoder) throws {
@@ -145,6 +150,7 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(timeIntervalSince1970: 0)
         template = try c.decodeIfPresent(String.self, forKey: .template)
         exceptions = try c.decodeIfPresent([RuleException].self, forKey: .exceptions) ?? []
+        chainAgents = try c.decodeIfPresent([String].self, forKey: .chainAgents)
     }
 }
 
@@ -271,6 +277,10 @@ extension RuleSubject: Codable {
 
 /// Built-in rule templates. All ship disabled and in dry-run.
 public enum RuleTemplates {
+    /// `Rule.template` of rules saved from answers to ask-mode questions (docs/ASK_MODE.md). Expired
+    /// ones ("allow once") are dropped by `RuleEngine.pruneDeadExceptions`.
+    public static let askAnswer = "ask-answer"
+
     /// "禁止任何祖先链中包含 AI agent 的进程读取 critical 类别"
     public static func blockAgentsFromCritical() -> Rule {
         Rule(

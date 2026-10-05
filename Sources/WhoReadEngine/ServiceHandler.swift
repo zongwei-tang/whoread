@@ -7,11 +7,12 @@ import WhoReadIPC
 /// Permission policy (see docs/THREAT_MODEL.md):
 /// - non-root peers must be the console user, and both must be known (fail closed);
 /// - reading and *strengthening* requests (enforcement on, new deny/alert rule, "block from now on",
-///   unpause) are open to the console user;
-/// - *weakening* requests (enforcement off, pause, allow / exceptions, ignore / keep blocking / mark
-///   read — they silence alerts —, rule edits, deletes and replacement, settings, catalog, restart learning) need
-///   root (`sudo whoread …`) or the signed WhoRead app. An AI agent running as the user can run
-///   `whoread`, but can neither disable its own guard nor dismiss the alert about itself.
+///   denying a question, unpause) are open to the console user;
+/// - *weakening* requests (enforcement off, pause, allow / exceptions — also as answers to questions —,
+///   ignore / keep blocking / mark read on alerts — they silence alerts —, rule edits, deletes and
+///   replacement, settings, catalog, restart learning) need root (`sudo whoread …`) or the signed
+///   WhoRead app. An AI agent running as the user can run `whoread`, but can neither disable its own
+///   guard nor dismiss the alert about itself; it can list questions and deny them, never allow.
 public final class ServiceHandler: IPCHandler, @unchecked Sendable {
     public enum Policy: Sendable {
         case strict
@@ -34,19 +35,31 @@ public final class ServiceHandler: IPCHandler, @unchecked Sendable {
 
     func privilege(of request: IPCRequest) -> Privilege {
         switch request {
-        case .hello, .status, .events, .live, .alerts, .summaries, .dailyAggregates, .rules, .settings, .catalog, .agents, .baseline:
+        case .hello, .status, .events, .live, .alerts, .summaries, .dailyAggregates, .rules, .settings, .catalog, .agents, .baseline,
+             .asks:
             return .read
+        case .answerAsk(_, let action):
+            // Denying is strengthening; allowing (once, always, all Apple programs) weakens protection.
+            switch action {
+            case .keepBlocking, .blockFromNowOn: return .strengthen
+            case .allowOnce, .alwaysAllow, .trustApplePrograms, .ignore: return .weaken
+            }
         case .markAlertsRead:
             return .weaken
         case .setEnforcement(let on):
             return on ? .strengthen : .weaken
         case .setPaused(let paused):
             return paused ? .weaken : .strengthen
+        case .alertAction(let id, .keepBlocking) where (try? daemon.store.alert(id: id))?.kind == .ask:
+            // On a question's alert, "deny" only denies (like answerAsk's keepBlocking).
+            return .strengthen
+        case .updateSettings(let s) where DaemonCore.onlyTurnsOffAppleTrust(s, current: daemon.currentSettings):
+            return .strengthen
         case .alertAction(_, let action):
             switch action {
             // An unprivileged "block from now on" adds the rule but leaves the alert open (DaemonCore.apply).
             case .blockFromNowOn: return .strengthen
-            case .keepBlocking, .ignore, .allowOnce, .alwaysAllow: return .weaken
+            case .keepBlocking, .ignore, .allowOnce, .alwaysAllow, .trustApplePrograms: return .weaken
             }
         case .upsertRule(let rule):
             let exists = daemon.rules.rules.contains { $0.id == rule.id }
@@ -132,6 +145,11 @@ public final class ServiceHandler: IPCHandler, @unchecked Sendable {
         case .replaceRules(let list):
             try d.replaceRules(list, peer: peer, privileged: isPrivileged(peer))
             return .rules(d.rules.rules)
+        case .asks:
+            return .asks(d.asks(peer: peer))
+        case .answerAsk(let id, let action):
+            try d.answerAsk(id: id, action: action, peer: peer, privileged: isPrivileged(peer))
+            return .asks(d.asks(peer: peer))
         case .settings:
             return .settings(d.currentSettings)
         case .updateSettings(var s):

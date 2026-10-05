@@ -18,7 +18,8 @@ final class DaemonConnection {
     private(set) var machServiceName: String
     @ObservationIgnored private var client: XPCClient
     @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private var tick = 0
+    @ObservationIgnored private var timerInterval: TimeInterval = 0
+    @ObservationIgnored private var schedule = PollSchedule()
     @ObservationIgnored private var inFlight = false
     /// A full refresh was asked for while a poll was running: run it right after.
     @ObservationIgnored private var pendingFull = false
@@ -27,10 +28,12 @@ final class DaemonConnection {
     @ObservationIgnored private var daemonRestarts = 0
     @ObservationIgnored private var registeredLanguage: Language?
     @ObservationIgnored private let planner = NotificationPlanner(
-        notifiedTrip: UserDefaults.standard.string(forKey: DaemonConnection.notifiedTripKey))
-    /// The latency trip already notified: the daemon reports a past trip until enforcement is turned
-    /// on again, and a relaunch must not repeat the notice.
-    private static let notifiedTripKey = "NotifiedLatencyTrip"
+        notifiedUncleanStop: UserDefaults.standard.string(forKey: DaemonConnection.notifiedUncleanStopKey))
+    /// The unclean stop already notified: the daemon reports it while that instance runs, and a
+    /// relaunch must not repeat the notice.
+    private static let notifiedUncleanStopKey = "NotifiedUncleanStop"
+    /// Question banners left by a previous run of the app are withdrawn after the first poll.
+    @ObservationIgnored private var staleAsksWithdrawn = false
     @ObservationIgnored private let queue = DispatchQueue(label: "whoread.app.ipc")
 
     init() {
@@ -64,15 +67,28 @@ final class DaemonConnection {
 
     func start() {
         poll(full: true)
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        armTimer()
+    }
+
+    /// Polls every second, every 250 ms while questions are open; re-armed when that changes.
+    private func armTimer() {
+        let interval = model.pollInterval
+        guard timer == nil || interval != timerInterval else { return }
+        timer?.invalidate()
+        timerInterval = interval
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.timerFired() }
         }
     }
 
     private func timerFired() {
-        tick += 1
         // Until settings arrive, every poll is full: notifications are planned only with settings.
-        poll(full: tick % 10 == 0 || model.settings == nil)
+        switch schedule.kind(now: Date(), openAsks: model.asks.count, needsFull: model.settings == nil) {
+        case .full: poll(full: true)
+        // Only between successful polls: a handshake or an error is left to the fast poll.
+        case .asks where !needsHello && model.lastError == nil: pollAsks()
+        case .fast, .asks: poll(full: false)
+        }
     }
 
     func poll(full: Bool) {
@@ -83,6 +99,7 @@ final class DaemonConnection {
         let full = full || pendingFull
         pendingFull = false
         inFlight = true
+        if full { schedule.fullStarted(at: Date()) } else { schedule.fastStarted(at: Date()) }
         let client = self.client
         let cursor = model.liveCursor
         let benign = model.showSystemNoise
@@ -92,6 +109,26 @@ final class DaemonConnection {
             Task { @MainActor in
                 self.inFlight = false
                 self.received(snapshot)
+                if self.pendingFull { self.poll(full: true) }
+            }
+        }
+    }
+
+    /// Only the open questions (the 250 ms ticks between fast polls): answered ones disappear and
+    /// their banners are withdrawn without fetching the alerts four times a second.
+    private func pollAsks() {
+        guard !inFlight else { return }
+        inFlight = true
+        let client = self.client
+        queue.async {
+            let asks = SnapshotFetcher.fetchAsks(client)
+            Task { @MainActor in
+                self.inFlight = false
+                if let asks {
+                    self.model.apply(response: .asks(asks))
+                    self.planAsks()
+                    self.armTimer()
+                }
                 if self.pendingFull { self.poll(full: true) }
             }
         }
@@ -126,8 +163,10 @@ final class DaemonConnection {
             registeredLanguage = model.language
             NotificationManager.shared.registerCategories(language: model.language)
         }
+        armTimer()
         guard snapshot.error == nil else { return }
         if let status = model.status { planNotices(status) }
+        planAsks()
         if let settings = model.settings {
             for n in planner.plan(model.alerts, settings: settings.notifications, formatter: model.formatter) {
                 NotificationManager.shared.post(n)
@@ -140,16 +179,31 @@ final class DaemonConnection {
             NotificationManager.shared.post(notice, tab: .settings)
         }
         let defaults = UserDefaults.standard
-        guard defaults.string(forKey: DaemonConnection.notifiedTripKey) != planner.notifiedTrip else { return }
-        if let trip = planner.notifiedTrip {
-            defaults.set(trip, forKey: DaemonConnection.notifiedTripKey)
+        guard defaults.string(forKey: DaemonConnection.notifiedUncleanStopKey) != planner.notifiedUncleanStop else { return }
+        if let stop = planner.notifiedUncleanStop {
+            defaults.set(stop, forKey: DaemonConnection.notifiedUncleanStopKey)
         } else {
-            defaults.removeObject(forKey: DaemonConnection.notifiedTripKey)
+            defaults.removeObject(forKey: DaemonConnection.notifiedUncleanStopKey)
+        }
+    }
+
+    /// One banner per open question; banners of questions no longer open are withdrawn.
+    private func planAsks() {
+        // The daemon lists at most 200 questions; a capped reply must not withdraw banners.
+        let complete = model.asks.count < 200 && (model.status?.pendingAsks ?? 0) <= model.asks.count
+        let plan = planner.plan(asks: model.asks, formatter: model.formatter, complete: complete, agentName: model.agentName)
+        NotificationManager.shared.remove(asks: plan.remove)
+        for n in plan.post { NotificationManager.shared.post(n) }
+        if complete && !staleAsksWithdrawn {
+            staleAsksWithdrawn = true
+            NotificationManager.shared.removeDeliveredAsks(keeping: Set(model.asks.map { NotificationPlanner.askIdentifier($0.id) }))
         }
     }
 
     /// Runs a request off the main thread, applies the daemon's answer, then refreshes.
-    private func run(_ work: @escaping @Sendable (XPCClient) throws -> IPCResponse, then: (() -> Void)? = nil) {
+    /// `failed` describes a refusal (default: `L10n.message(for:)`) and may act on it.
+    private func run(_ work: @escaping @Sendable (XPCClient) throws -> IPCResponse,
+                     failed: ((IPCError) -> String)? = nil, then: (() -> Void)? = nil) {
         let client = self.client
         queue.async {
             var response: IPCResponse?
@@ -157,13 +211,10 @@ final class DaemonConnection {
             do { response = try work(client) } catch let e as IPCError { failure = e } catch { failure = IPCError(.internalError, "\(error)") }
             Task { @MainActor in
                 if let failure {
-                    self.lastActionError = L10n.message(for: failure)
+                    self.lastActionError = failed?(failure) ?? L10n.message(for: failure)
                 } else {
                     self.lastActionError = nil
                     if let response { self.model.apply(response: response) }
-                    // Re-enabling clears a trip; seen here, a trip right after it (same text) is
-                    // notified even if no poll ran in between.
-                    if case .status(let status)? = response { self.planNotices(status) }
                     then?()
                 }
                 self.poll(full: true)
@@ -182,6 +233,30 @@ final class DaemonConnection {
             guard fromNotification, action == .blockFromNowOn, let caveat = self.model.enforcementCaveat else { return }
             NotificationManager.shared.post(SystemNotice(identifier: "whoread.rule-not-blocking-\(alert)",
                                                          title: L10n.t(.notifRuleNotBlockingTitle), body: caveat), tab: .rules)
+        }
+    }
+
+    /// Answers an ask-mode question. Allowing needs the signed app (or root): an unsigned build is
+    /// refused, and the error says how to allow from Terminal instead. `fromNotification`: the user
+    /// answered a banner, so a refusal is posted as a notice too (the menu may not be open).
+    func answer(ask id: Int64, _ action: AlertAction, fromNotification: Bool = false) {
+        run({ try $0.call(.answerAsk(id: id, action: action)) }, failed: { e in
+            let text = L10n.answerError(e, askID: id, action: action)
+            if fromNotification {
+                NotificationManager.shared.post(SystemNotice(identifier: "whoread.ask-failed-\(id)",
+                                                             title: L10n.t(.notifAskFailedTitle), body: text), tab: .alerts)
+            }
+            return text
+        })
+    }
+
+    /// The "trust all Apple programs" switch: its own request on the daemon's current settings (not
+    /// part of the Settings draft). Turning it on weakens protection: root or the signed app only.
+    func setTrustApplePrograms(_ on: Bool) {
+        run { client in
+            var s = try client.settings()
+            s.trustApplePrograms = on
+            return try client.call(.updateSettings(s))
         }
     }
 
@@ -206,9 +281,16 @@ final class DaemonConnection {
         }
     }
     func delete(rule id: String) { perform(.deleteRule(id: id)) }
-    /// `then` runs only if the daemon accepted the settings.
-    func save(settings: Settings, then: (() -> Void)? = nil) { perform(.updateSettings(settings), then: then) }
-    func restartLearning() { perform(.restartLearning) }
+    /// `then` runs only if the daemon accepted the settings. "Trust all Apple programs" has its own
+    /// switch (and answer): it is taken from the daemon's settings fetched right before saving, as
+    /// the model's copy can be up to 10 s old and must not switch it back on (or off).
+    func save(settings: Settings, then: (() -> Void)? = nil) {
+        run({ client in
+            var s = settings
+            s.trustApplePrograms = try client.settings().trustApplePrograms
+            return try client.call(.updateSettings(s))
+        }, then: then)
+    }
 
     /// Catalog edits are applied to the catalog fetched right before saving (read-modify-write
     /// on the IPC queue), never to the model's copy, which can be up to 10 s old.
@@ -238,20 +320,11 @@ final class DaemonConnection {
     }
 
     private func enableEnforcement() {
-        let status = model.status
-        if status?.killSwitchFilePresent == true {
+        if model.status?.killSwitchFilePresent == true {
             // The UI's own fallback (or `whoread kill-switch engage`) left the file: remove it.
             guard runAsAdministrator("/bin/rm -f '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") else { return }
         }
-        if let status, status.enforcementEnabled, status.latencyTripReason != nil {
-            // Still switched on but tripped: switching it off and on again re-arms it.
-            run { client in
-                _ = try? client.call(.setEnforcement(enabled: false))
-                return try client.call(.setEnforcement(enabled: true))
-            }
-        } else {
-            perform(.setEnforcement(enabled: true))
-        }
+        perform(.setEnforcement(enabled: true))
     }
 
     /// Kill switch #3 (file) from the UI: asks for an administrator password via AppleScript.

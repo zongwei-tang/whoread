@@ -53,9 +53,10 @@ final class R2ScriptsTests: XCTestCase {
 
     // MARK: - acceptance-m5.sh (scripts-packaging-1)
 
-    /// The script's post-SIGKILL check matches the reason the restarted daemon shows, and the restart
-    /// starts an empty latency window (so the summary must be printed before the kill).
-    func testRestartAfterKillWhileEnforcingMatchesTheM5Check() throws {
+    /// Ask mode: after a kill while enforcing, the restarted daemon keeps enforcement as set and
+    /// reports the unclean stop; the restart starts an empty latency window (so the summary must be
+    /// printed before the kill).
+    func testRestartAfterKillWhileEnforcingKeepsEnforcementOn() throws {
         let dir = TempDir()
         do {
             let core = try makeCore(dir)
@@ -66,13 +67,17 @@ final class R2ScriptsTests: XCTestCase {
         FileManager.default.createFile(atPath: dir.path("data/auth-armed"), contents: Data())
         let core = try makeCore(dir)
         let s = core.status()
-        XCTAssertFalse(s.enforcementEnabled)
-        XCTAssertFalse(s.enforcementActive)
+        XCTAssertTrue(s.enforcementEnabled)
+        XCTAssertTrue(s.enforcementActive)
         XCTAssertEqual(s.latency.totalResponses, 0)
-        let reason = try XCTUnwrap(s.latencyTripReason)
+        XCTAssertNil(s.latencyTripReason)
+        let reason = try XCTUnwrap(s.uncleanStop)
         XCTAssertTrue(reason.contains("while enforcing"), reason)
+        // The script expects the same after its SIGKILL, and runs the ask-mode checks.
         let m5 = try String(contentsOfFile: script("scripts/vm/acceptance-m5.sh"), encoding: .utf8)
-        XCTAssertTrue(m5.contains("\"off \"*\"while enforcing\"*)"))
+        XCTAssertTrue(m5.contains("\"on \"*\"while enforcing\"*)"))
+        XCTAssertFalse(m5.contains("latencyTripReason"))
+        XCTAssertTrue(m5.contains("echo \"== ask mode\""))
     }
 
     /// "enforcement on" after "off" (the CLI kill-switch step) empties the percentile window.

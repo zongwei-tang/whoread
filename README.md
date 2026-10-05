@@ -7,7 +7,7 @@ your Mac.
 [中文说明见下方](#whoread-中文)
 
 > **Status:** in development. The core, storage, daemon, eslogger backend and CLI are built and
-> tested (336 tests, two adversarial review rounds). The SwiftUI app, the native Endpoint Security client and enforcement are
+> tested (440 tests, two adversarial review rounds). The SwiftUI app, the native Endpoint Security client and enforcement are
 > written but not yet compiled on a Mac. See [docs/STATUS.md](docs/STATUS.md).
 
 ## Why
@@ -33,19 +33,23 @@ terminal and every tool it spawns.
 - **Attribution** charges helpers to their `.app`, and interpreters or CLI tools to the app or AI
   agent that started them. Recognised agents: Claude Code, Codex CLI, Gemini CLI, opencode,
   aider, Cursor, the Claude and ChatGPT desktop apps.
-- **Quiet by default.** It learns for 7 days and then alerts only on a new (app, category,
-  access) combination. Critical files touched by an unexpected process alert even while
-  learning. Repeats within 10 minutes merge into one alert with a count. Spotlight, Time Machine,
-  iCloud, Quick Look and XProtect are folded away.
-- **Optional blocking.** Rules (deny / allow / alert) can target a category, a severity or a path,
-  and apply to a signed program, an unsigned program, an app, "anything that isn't an expected
-  owner" or **"anything started by an AI agent"**. Off by default. Fail-open. Three instant kill
-  switches (turning enforcement off needs `sudo` or the app, so an agent cannot simply switch
-  off its own guard; a sustained flood that makes AUTH answers slow does trip it, by design).
-- **Menu bar app** with seven tabs (Live, Alerts, Apps, Files, Agents, Rules, Settings),
-  notifications with actions ("Allow once · Always allow · Keep blocking"), English and
-  Simplified Chinese.
+- **Asks first (with enforcement on).** The first time a program touches a sensitive file and no
+  rule decides it, the access is held and you get a notification: Allow once (10 min) · Always
+  allow · Deny · Always deny, plus "Allow all Apple programs" when only Apple programs are involved.
+  Your answer is saved as a rule; no answer in time means denied. Expected owners (ssh for SSH keys,
+  Chrome for its cookies) are not asked unless an AI agent started them; Spotlight, Time Machine,
+  iCloud, Quick Look and XProtect are never asked. See [docs/ASK_MODE.md](docs/ASK_MODE.md).
+- **Monitor-only mode** (enforcement off, or the eslogger backend): no learning period; first
+  accesses are alerted at once with the same answers. Repeats within 10 minutes merge into one alert.
+- **Rules** (deny / allow / alert) can target a category, a severity or a path, and apply to a
+  signed program, an unsigned program, an app, "anything that isn't an expected owner" or
+  **"anything started by an AI agent"**. Enforcement is off until you turn it on, and never switched
+  off automatically. Three instant kill switches (turning enforcement off needs `sudo` or the app,
+  so an agent cannot switch off its own guard).
+- **Menu bar app** with seven tabs (Live, Alerts, Apps, Files, Agents, Rules, Settings), question
+  and alert notifications with actions, English and Simplified Chinese.
 - **`whoread` CLI** for status, queries, daily aggregates, JSON/CSV export, catalog edits,
+  questions (`whoread asks`, `whoread ask ID allow-once|allow|deny|block|trust-apple`),
   enforcement on/off and the kill switch.
 - **Private.** It never reads file contents, never uses the network, and has no telemetry and no
   LLM calls. Command lines are redacted before they are stored.
@@ -92,7 +96,7 @@ To use the signed app with the dev daemon, see "M3: the signed app against the d
 | Root (daemon only) | Endpoint Security clients run as root. The app and the CLI run as you. |
 | System extension approval | The release build monitors through an Endpoint Security system extension. |
 | Endpoint Security entitlement | Granted by Apple to the developer; needed for the native client and for blocking. |
-| Notifications (app, optional) | Alerts with Allow once / Always allow / Keep blocking actions. |
+| Notifications (app; strongly recommended with enforcement on) | Questions with Allow once (10 min) / Always allow / Deny / Always deny (/ Allow all Apple programs), and alerts. Without them, questions show only in the menu bar and Alerts tab and are denied when their time runs out. Allow buttons need the Mac unlocked. |
 | Administrator password (app, occasionally) | Only when the UI creates or removes the kill-switch file because the daemon refused. |
 
 ## Screenshots
@@ -112,7 +116,7 @@ Pending: the app has not been run on a Mac yet (M7).
 **谁读了我的 SSH 密钥？** WhoRead 告诉你：哪个 app、哪个进程，在什么时候，读或写了你的哪个敏感文件，又是谁启动了它；并且可以按规则拦截。所有数据都只留在这台 Mac 上。
 
 > **状态：** 开发中。
-> - 已完成并通过测试（336 个测试，经过两轮对抗性审查）：核心逻辑、存储、守护进程、eslogger 后端、CLI。
+> - 已完成并通过测试（440 个测试，经过两轮对抗性审查）：核心逻辑、存储、守护进程、eslogger 后端、CLI。
 > - 代码已写完，但还没在 Mac 上编译：SwiftUI 应用、原生 Endpoint Security 客户端、拦截功能。
 >
 > 详见 [docs/STATUS.md](docs/STATUS.md)。
@@ -135,18 +139,15 @@ macOS 的隐私弹窗（TCC）只保护桌面、文稿、下载等少数位置�
 
   本机不存在的类别标记为「未检测到」。
 - **归因**：helper 归到外层 `.app`；解释器和命令行工具归到启动它们的 app 或 AI agent。能识别的 agent：Claude Code、Codex CLI、Gemini CLI、opencode、aider、Cursor、Claude 桌面版、ChatGPT 桌面版。
-- **降噪**：
-  - 先学习 7 天，之后只对新的（app、类别、读/写）组合告警；
-  - critical 文件被非预期进程访问时，学习期内也会告警；
-  - 同一 app 对同一类别 10 分钟内的重复访问，合并成一条告警并附上次数；
-  - 聚焦、时间机器、iCloud、快速查看、XProtect 的访问默认折叠。
-- **可选拦截**：
+- **先问你（开启拦截后）**：某个程序第一次碰敏感文件、又没有规则能决定时，这次访问会先挂起，并弹出通知：「允许一次（10 分钟）· 始终允许 · 拒绝 · 始终拒绝」；如果整条进程链都是苹果程序，还有「允许所有苹果程序」。你的选择存成规则；没来得及回答就拒绝。预期的使用者（ssh 读 SSH 密钥、Chrome 读自己的 Cookie）不问，除非是 AI agent 启动的；聚焦、时间机器、iCloud、快速查看、XProtect 从不问。详见 [docs/ASK_MODE.md](docs/ASK_MODE.md)。
+- **只监控模式**（拦截关闭，或 eslogger 后端）：没有学习期，第一次访问立即提醒，可以直接选同样的答案；10 分钟内的重复访问合并成一条。
+- **规则**：
   - 规则动作：拦截、允许或告警；
   - 保护对象：类别、严重程度或路径；
   - 适用对象：已签名程序、未签名程序、某个 app、「任意非 owner 进程」，或**「祖先链中包含 AI agent 的任意进程」**；
-  - 默认关闭，出错时放行（fail-open），有三种立即生效的 kill switch（关闭拦截需要 `sudo` 或应用本身，agent 不能直接关掉；但持续制造大量访问、让 AUTH 响应变慢，会按设计触发自动关闭）。
-- **菜单栏应用**：实时、告警、应用、文件、AI agent、规则、设置七个页签。通知带操作按钮（「允许一次 · 始终允许 · 保持拦截」）。界面提供中英文。
-- **`whoread` 命令行**：查看状态、查询、按天汇总、导出 JSON/CSV、编辑类别、开关拦截、kill switch。
+  - 拦截默认关闭，开启后**永远不会自动关闭**；有三种立即生效的 kill switch（关闭拦截需要 `sudo` 或应用本身，agent 关不掉）。
+- **菜单栏应用**：实时、告警、应用、文件、AI agent、规则、设置七个页签。询问和告警通知都带操作按钮。界面提供中英文。
+- **`whoread` 命令行**：查看状态、查询、按天汇总、导出 JSON/CSV、编辑类别、回答询问（`whoread asks`、`whoread ask ID allow-once|allow|deny|block|trust-apple`）、开关拦截、kill switch。
 - **隐私**：从不读取文件内容，不联网，没有遥测，不调用任何 LLM。命令行参数在存储前会脱敏。
 
 ## 安装（开发版）
@@ -189,7 +190,7 @@ sudo whoread catalog resolve-owners
 | root（仅守护进程） | Endpoint Security 客户端必须以 root 运行；应用和 CLI 以你的身份运行 |
 | 批准系统扩展 | 正式版通过 Endpoint Security 系统扩展监控 |
 | Endpoint Security entitlement | 由 Apple 授予开发者；原生客户端和拦截功能需要它 |
-| 通知（应用，可选） | 告警通知，带「允许一次 · 始终允许 · 保持拦截」操作 |
+| 通知（应用；开启拦截时强烈建议允许） | 询问（允许一次（10 分钟）· 始终允许 · 拒绝 · 始终拒绝 ·（允许所有苹果程序））和告警。不允许通知的话，询问只出现在菜单栏和告警页，来不及回答就会被拒绝。「允许」类按钮需要先解锁 Mac。 |
 | 管理员密码（应用，偶尔） | 仅当守护进程拒绝、需要由界面创建或删除 kill switch 文件时 |
 
 ## 文档

@@ -56,7 +56,7 @@ public struct IdentitySpec: Codable, Hashable, Sendable {
 
     /// True for an executable in a root-owned system location. `/System/Volumes/Data/…` is the
     /// writable data volume (`/Users`, `/private/tmp`…) under another spelling, not a system location.
-    static func isSystemLocation(_ path: String) -> Bool {
+    public static func isSystemLocation(_ path: String) -> Bool {
         systemLocations.contains { path.hasPrefix($0) } && !PathNormalizer.fold(path).hasPrefix("/system/volumes/data/")
     }
 

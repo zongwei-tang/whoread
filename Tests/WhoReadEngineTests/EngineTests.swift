@@ -33,7 +33,7 @@ final class EsloggerSourceTests: XCTestCase {
         let status = try client.status()
         XCTAssertEqual(status.source, .eslogger)
         XCTAssertTrue(status.sourceRunning)
-        XCTAssertEqual(status.mode, .learning)
+        XCTAssertEqual(status.mode, .monitoring, "no learning period (ask mode)")
         XCTAssertEqual(status.parser?.malformed, 0)
         XCTAssertGreaterThan(status.parser?.ignored ?? 0, 0, "the prefilter dropped non-sensitive lines")
         XCTAssertEqual(status.parser?.droppedByKernel, 0, "prefiltered lines are not kernel drops")
@@ -284,26 +284,20 @@ final class EnforcementPathTests: XCTestCase {
         try FileManager.default.removeItem(atPath: core.config.resolvedKillSwitchPath)
         XCTAssertNotNil(waitFor(1) { core.enforcer.decide(read(cat, key)).verdict == .deny })
 
-        // 3. Latency trip (deadline miss) → automatic off, until the user re-enables. The trip is
-        // persisted as "enforcement off" so a restart does not silently turn it back on.
+        // 3. Ask mode: a missed deadline is counted, never an automatic switch-off.
         core.enforcer.recordResponse(micros: 10, missedDeadline: true)
-        _ = waitFor(1) { core.enforcement.latencyTripReason != nil }
+        core.checkLatency()
         core.drainPolicyQueue()
-        XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .allow)
-        XCTAssertTrue(core.status().enforcementInactiveReasons.contains(.latencyTripped))
-        XCTAssertFalse(core.currentSettings.enforcementEnabled, "trip persisted as the setting")
-        XCTAssertFalse(try core.store.settings().enforcementEnabled)
-        XCTAssertNotNil(core.status().latencyTripReason)
-        // Unrelated settings changes do not re-enable it.
-        try core.mutateSettings(peer: .inProcess) { $0.coalesceMinutes = 5 }
-        XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .allow)
-        // `whoread enforcement on`.
-        try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
-        XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .deny, "re-enabling clears the trip")
+        XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .deny)
+        XCTAssertTrue(core.status().enforcementActive)
+        XCTAssertEqual(core.status().latency.deadlineMisses, 1)
+        XCTAssertTrue(core.currentSettings.enforcementEnabled)
+        XCTAssertTrue(try core.store.settings().enforcementEnabled)
         XCTAssertNil(core.status().latencyTripReason)
     }
 
-    func testTripWhileSettingStillOnIsClearedByEnforcementOn() throws {
+    // Ask mode (was: a trip cleared by "enforcement on"): no automatic switch-off at all.
+    func testMissedDeadlinesNeverSwitchEnforcementOff() throws {
         let dir = TempDir()
         let (core, _) = try makeCore(dir)
         var rule = RuleTemplates.blockAgentsFromCritical()
@@ -313,28 +307,31 @@ final class EnforcementPathTests: XCTestCase {
         try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
         let cat = agentCat(core)
         let key = "/Users/alice/.ssh/id_ed25519"
-        // A trip whose persistence has not run yet: the setting is still on.
-        core.enforcement.tripLatency("test")
-        XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .allow)
-        try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
+        for _ in 0..<50 { core.enforcer.recordResponse(micros: 10, missedDeadline: true) }
+        core.checkLatency()
         core.drainPolicyQueue()
         XCTAssertEqual(core.enforcer.decide(read(cat, key)).verdict, .deny)
+        XCTAssertTrue(core.enforcement.inactiveReasons.isEmpty)
     }
 
-    func testTripDuringKillSwitchWindowIsStillPersisted() throws {
+    // Ask mode (was: a trip during the kill-switch window is persisted): releasing the kill switch
+    // brings enforcement back, whatever happened meanwhile.
+    func testDeadlineMissDuringKillSwitchWindowChangesNothing() throws {
         let dir = TempDir()
         let (core, _) = try makeCore(dir)
         try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
         core.enforcement.setKillSwitchFilePresent(true)   // already inactive
-        core.enforcement.tripLatency("deadline missed")
+        core.enforcer.recordResponse(micros: 10, missedDeadline: true)
+        core.checkLatency()
         core.drainPolicyQueue()
-        XCTAssertFalse(core.currentSettings.enforcementEnabled)
-        XCTAssertFalse(try core.store.settings().enforcementEnabled)
+        XCTAssertTrue(core.currentSettings.enforcementEnabled)
+        XCTAssertTrue(try core.store.settings().enforcementEnabled)
         core.enforcement.setKillSwitchFilePresent(false)
-        XCTAssertFalse(core.enforcement.isActive, "stays off after the kill switch is released")
+        XCTAssertTrue(core.enforcement.isActive, "back on once the kill switch is released")
     }
 
-    func testRestartAfterDeathWhileEnforcingLeavesEnforcementOff() throws {
+    // Ask mode (was: left off after a death while enforcing): kept as set, the unclean stop reported.
+    func testRestartAfterDeathWhileEnforcingKeepsEnforcementAndReportsIt() throws {
         let dir = TempDir()
         do {
             let (core, _) = try makeCore(dir)
@@ -342,26 +339,29 @@ final class EnforcementPathTests: XCTestCase {
         }
         FileManager.default.createFile(atPath: dir.path("data/auth-armed"), contents: Data())
         let (core, _) = try makeCore(dir)
-        XCTAssertFalse(core.currentSettings.enforcementEnabled)
+        XCTAssertTrue(core.currentSettings.enforcementEnabled)
+        XCTAssertTrue(core.enforcement.isActive)
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path("data/auth-armed")))
-        XCTAssertNotNil(core.status().latencyTripReason)
+        XCTAssertNil(core.status().latencyTripReason)
+        XCTAssertTrue(core.status().uncleanStop?.contains("while enforcing") == true)
     }
 
-    func testP99TripViaMaintenance() throws {
+    // Ask mode (was: a p99 trip via the latency check): slow responses are reported, never a trip.
+    func testSlowP99NeverSwitchesEnforcementOff() throws {
         let dir = TempDir()
         let (core, _) = try makeCore(dir)
         var s = core.currentSettings
         s.enforcementEnabled = true
         s.latencyP99ThresholdMs = 1
         try core.update(settings: s, peer: .inProcess)
-        // Three consecutive checks, each with fresh slow responses.
-        for round in 0..<3 {
+        for round in 0..<5 {
             for _ in 0..<100 { core.enforcer.recordResponse(micros: 5000, missedDeadline: false) }
-            XCTAssertTrue(core.enforcement.isActive, "round \(round)")
             core.checkLatency()
+            XCTAssertTrue(core.enforcement.isActive, "round \(round)")
         }
-        XCTAssertFalse(core.enforcement.isActive)
-        XCTAssertNotNil(core.status().latencyTripReason)
+        XCTAssertTrue(core.latency.isSlow)
+        XCTAssertNil(core.status().latencyTripReason)
+        XCTAssertGreaterThan(core.status().latency.p99Micros, 1000)
     }
 
     func testPolicyChangeCallbackFires() throws {

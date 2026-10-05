@@ -9,15 +9,20 @@ whoread — who read my sensitive files?
 Usage: whoread <command> [options]
 
 Daemon queries (talk to whoreadd over XPC; --socket PATH for the dev socket):
-  status                         daemon state, source, enforcement, counters
+  status                         daemon state, source, enforcement, open questions, counters
   events [filters]               recorded accesses (newest first)
       --since 1h|2d|2026-10-04|"2026-10-04 09:30"   --until …   (no offset = local time)
       --category ID (repeatable)   --app TEXT   --agent ID   --agents-only   --denied
       --all (include folded system noise)   --limit N
   tail [--all]                   follow new events live
+  asks [--json]                  questions waiting for your answer (ask mode, see below)
+  ask <id> deny|block            deny now | deny now and from now on (saves a deny rule)
+  ask <id> allow-once|allow      allow for 10 minutes | always (saves an allow rule); needs sudo
+  ask <id> trust-apple           allow all Apple programs without asking (never under an AI agent);
+                                 needs sudo
   alerts [--unread] [--since …] [--limit N]
   alert <id> block               deny this app from now on (alert stays open without sudo)
-  alert <id> allow-once|always-allow|keep-blocking|ignore      needs sudo (or the WhoRead app)
+  alert <id> allow-once|always-allow|keep-blocking|ignore|trust-apple   needs sudo (or the WhoRead app)
   read-all                       mark every alert read; needs sudo (or the WhoRead app)
   apps | files | agents          who touched what (Apps / Files / Agents tabs)
   daily [--since …] [filters]    per-day totals for days past the detail window (detail-days)
@@ -35,17 +40,24 @@ Daemon queries (talk to whoreadd over XPC; --socket PATH for the dev socket):
   catalog add-category ID NAME_EN NAME_ZH medium|high|critical [--path PATH]...
   catalog remove-category ID | set-severity ID SEVERITY | enable ID | disable ID
   catalog import FILE | reset
-  settings [show | set KEY VALUE]   keys: learning-days retention-days detail-days coalesce-minutes
+  settings [show | set KEY VALUE]   keys: retention-days detail-days coalesce-minutes
                                        readdir on|off  project-root-add PATH  project-root-remove PATH
                                        notifications on|off  min-severity medium|high|critical
-                                       latency-p99-ms N  language en|zh-Hans|system
-  baseline [restart-learning]
+                                       latency-p99-ms N (status warning)  language en|zh-Hans|system
+                                       trust-apple on|off (allow Apple programs without asking)
+  baseline                       (app, category, access) combinations seen so far
   Changes that can weaken protection (settings set, rule edits other than adding a deny or alert
-  rule, catalog changes, restart-learning) need sudo (or the WhoRead app).
+  rule, catalog changes, allowing a question) need sudo (or the WhoRead app).
+
+Ask mode: with enforcement on, an access that nothing decides yet (no rule, not an owner, not a
+system service) is held and you are asked: `whoread asks`, or the WhoRead app. Your answer is saved
+as a rule, so each app × category × access is asked once. Unanswered in time, the access is denied
+and the question stays open. Enforcement is never switched off automatically: only
+`sudo whoread enforcement off`, the app's switch or `sudo whoread kill-switch engage` turn it off.
 
 Local (no daemon):
   kill-switch engage|release|status [--path P]   creates/removes the disable-enforcement file (root)
-  replay FILE [--home DIR] [--defaults DIR] [--learning-days N] [--all] [--json]
+  replay FILE [--home DIR] [--defaults DIR] [--all] [--json]
                                  run an eslogger JSONL capture through the full pipeline
   fixture sanitize --input RAW --output OUT [--home DIR] [--vault DIR] [--sample N]
   version
@@ -99,11 +111,14 @@ func shellWord(_ s: String) -> String {
     return plain ? s : "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
+/// This very command under sudo, pasteable as is.
+var sudoCommand: String { "sudo whoread " + CommandLine.arguments.dropFirst().map(shellWord).joined(separator: " ") }
+
 /// An error the daemon replied with.
 func explain(_ e: IPCError) -> CLIError {
     switch e.code {
     case .notPermitted:
-        return CLIError("not permitted: \(e.message)\n  e.g. sudo whoread \(CommandLine.arguments.dropFirst().map(shellWord).joined(separator: " "))", exitCode: 77)
+        return CLIError("not permitted: \(e.message)\n  e.g. \(sudoCommand)", exitCode: 77)
     default:
         return CLIError("\(e.code.rawValue): \(e.message)")
     }
@@ -200,13 +215,23 @@ func cmdStatus(_ c: IPCClient) throws {
         .paused: ("Paused", "已暂停"), .error: ("Error", "错误"),
     ]
     let m = modeName[s.mode].map { language == .zhHans ? $0.1 : $0.0 } ?? s.mode.rawValue
-    out("WhoRead \(s.version) — \(m)" + (s.learning ? "  (learning until \(Format.time(s.learningEndsAt)))" : ""))
+    // Settings only add warnings: a daemon that cannot send them still gets a full status.
+    let settings = try? c.settings()
+    out("WhoRead \(s.version) — \(m)")
     out("  source:       \(s.source.rawValue) \(s.sourceRunning ? "running" : "stopped")" + (s.sourceError.map { "  ERROR: \($0)" } ?? ""))
     if let h = s.sourceHint { out("                hint: \(h)") }
     out("  enforcement:  \(s.enforcementActive ? "ACTIVE" : "inactive") (setting \(s.enforcementEnabled ? "on" : "off"))"
         + (s.enforcementInactiveReasons.isEmpty ? "" : " — " + s.enforcementInactiveReasons.map(\.rawValue).joined(separator: ", ")))
     out("  kill switch:  file \(s.killSwitchFilePresent ? "PRESENT (enforcement forced off)" : "absent")")
-    if let t = s.latencyTripReason { out("  latency trip: \(t)") }
+    if let n = s.pendingAsks {
+        out("  questions:    " + (n == 0 ? "none waiting" : "\(n) waiting for your answer (whoread asks)"))
+    }
+    if settings?.trustApplePrograms == true {
+        out("  trust Apple:  on (Apple programs in system locations are not asked, unless an AI agent is in the chain)")
+    }
+    if let u = s.uncleanStop {
+        out("  unclean stop: \(u); enforcement was kept as you set it")
+    }
     out("  events:       \(s.counts.events) stored (+\(s.counts.aggregatedDays) days aggregated), \(s.eventsProcessed) since start, last \(Format.ago(s.lastEventAt))")
     out("  alerts:       \(s.unreadAlerts) unread of \(s.counts.alerts)")
     out("  coverage:     \(s.monitoredPrefixes) monitored prefixes, homes \(s.homeDirectories.joined(separator: ", "))")
@@ -216,6 +241,15 @@ func cmdStatus(_ c: IPCClient) throws {
     if s.latency.samples > 0 {
         out(String(format: "  AUTH latency: p50 %.0f µs, p99 %.0f µs, max %.0f µs, %d deadline misses", s.latency.p50Micros,
                    s.latency.p99Micros, s.latency.maxMicros, s.latency.deadlineMisses))
+        if let t = settings?.latencyP99ThresholdMs, s.latency.p99Micros > t * 1000 {
+            out(String(format: "  WARNING: AUTH p99 latency %.1f ms is over latency-p99-ms %.0f ms (enforcement stays on)",
+                       s.latency.p99Micros / 1000, t))
+        }
+    }
+    // Missed deadlines never switch enforcement off (the kernel allowed those accesses): only counted.
+    if s.latency.deadlineMisses > 0 {
+        out("  WARNING: \(s.latency.deadlineMisses) AUTH deadline miss\(s.latency.deadlineMisses == 1 ? "" : "es"): "
+            + "the kernel allowed those accesses; enforcement stays on (turn it off by hand: sudo whoread enforcement off)")
     }
     if s.writerDropped > 0 { out("  WARNING: \(s.writerDropped) events dropped before storage") }
     if let d = s.sourceDroppedEvents, d > 0 {
@@ -282,6 +316,12 @@ func cmdTail(_ c: IPCClient) throws {
     }
 }
 
+/// `whoread alert ID WORD`.
+let alertActionWords: [(word: String, action: AlertAction)] = [
+    ("allow-once", .allowOnce), ("always-allow", .alwaysAllow), ("keep-blocking", .keepBlocking), ("block", .blockFromNowOn),
+    ("ignore", .ignore), ("trust-apple", .trustApplePrograms),
+]
+
 func cmdAlerts(_ c: IPCClient) throws {
     var q = AlertQuery()
     if args.has("unread") { q.statuses = [.unread] }
@@ -293,23 +333,88 @@ func cmdAlerts(_ c: IPCClient) throws {
     for a in alerts {
         let status = a.status == .unread ? "●" : (a.status == .read ? "○" : "✓")
         out("\(status) #\(a.id) \(Format.time(a.updatedAt)) [\(f.kindTitle(a.kind))] \(f.line(a))")
+        // An ask alert waits for a decision: show how to give it from here.
+        if a.kind == .ask && a.status != .resolved {
+            let words = a.availableActions.compactMap { action in alertActionWords.first { $0.action == action }?.word }
+            out("    " + (language == .zhHans ? "回答：" : "answer: ") + "whoread alert \(a.id) " + words.joined(separator: "|"))
+        }
     }
     if alerts.isEmpty { out(language == .zhHans ? "没有告警。" : "No alerts.") }
 }
 
 func cmdAlertAction(_ c: IPCClient) throws {
     guard args.positional.count >= 3, let id = Int64(args.positional[1]) else {
-        throw CLIError("usage: whoread alert <id> <block|allow-once|always-allow|keep-blocking|ignore>")
+        throw CLIError("usage: whoread alert <id> <" + alertActionWords.map(\.word).joined(separator: "|") + ">")
     }
-    let map: [String: AlertAction] = ["allow-once": .allowOnce, "always-allow": .alwaysAllow, "block": .blockFromNowOn,
-                                      "keep-blocking": .keepBlocking, "ignore": .ignore]
-    guard let action = map[args.positional[2]] else { throw CLIError("unknown action \(args.positional[2])") }
+    guard let action = alertActionWords.first(where: { $0.word == args.positional[2] })?.action else {
+        throw CLIError("unknown action \(args.positional[2])")
+    }
     _ = try c.call(.alertAction(alertID: id, action: action))
     out("alert #\(id): \(action.rawValue)")
     if action == .blockFromNowOn && geteuid() != 0 {
         // The daemon adds the deny rule for anyone, but only root or the app may close the alert.
         out(language == .zhHans ? "  已添加拦截规则；告警本身仍保持打开，请在 WhoRead 应用中处理（或用 sudo）。"
                                 : "  deny rule added; the alert itself stays open: handle it in the WhoRead app (or with sudo).")
+    }
+}
+
+// MARK: - Ask mode (docs/ASK_MODE.md)
+
+/// `whoread ask ID WORD`. `always-allow` and `keep-blocking` are the `alert` command's words for
+/// the same answers.
+let askAnswerWords: [(word: String, action: AlertAction)] = [
+    ("allow-once", .allowOnce), ("allow", .alwaysAllow), ("deny", .keepBlocking), ("block", .blockFromNowOn),
+    ("trust-apple", .trustApplePrograms), ("always-allow", .alwaysAllow), ("keep-blocking", .keepBlocking),
+]
+
+func cmdAsks(_ c: IPCClient) throws {
+    guard case .asks(let asks) = try c.call(.asks) else { throw IPCError(.internalError, "unexpected response") }
+    if args.json { return out(try Format.json(asks)) }
+    let zh = language == .zhHans
+    if asks.isEmpty { return out(zh ? "没有等待回答的问题。" : "No questions waiting.") }
+    let ctx = context(c)
+    let agents = (try? c.agents()) ?? AgentCatalog(agents: [])
+    let rows = asks.map { r -> [String] in
+        let agentIDs = r.key.chainAgents.isEmpty ? (r.agentID.map { [$0] } ?? []) : r.key.chainAgents
+        return [String(r.id), r.responsible.displayName, ctx.categoryName(r.key.categoryID) + "/" + r.severity.rawValue,
+                r.key.access.label, ctx.normalizer.abbreviate(r.path),
+                agentIDs.map { agents.agent($0)?.name.resolve(language) ?? $0 }.joined(separator: ", "),
+                "\(r.holding)/\(r.attempts)", r.appleProgram ? (zh ? "是" : "yes") : ""]
+    }
+    out(Format.table(rows, header: zh ? ["编号", "应用", "类别", "访问", "路径", "AI agent", "等待/次数", "苹果程序"]
+                                      : ["ID", "APP", "CATEGORY", "ACCESS", "PATH", "AGENT", "WAITING/ATTEMPTS", "APPLE"]))
+    out(zh ? "\n回答：whoread ask 编号 allow-once|allow|deny|block|trust-apple（允许需要 sudo）"
+           : "\nanswer: whoread ask ID allow-once|allow|deny|block|trust-apple (allowing needs sudo)")
+}
+
+func cmdAsk(_ c: IPCClient) throws {
+    let usage = "usage: whoread ask <id> allow-once|allow|deny|block|trust-apple"
+    guard args.positional.count == 3, let id = Int64(args.positional[1]) else { throw CLIError(usage) }
+    guard let action = askAnswerWords.first(where: { $0.word == args.positional[2] })?.action else {
+        throw CLIError("unknown answer \(args.positional[2])\n\(usage)")
+    }
+    let zh = language == .zhHans
+    let reply: IPCResponse
+    do {
+        reply = try c.call(.answerAsk(id: id, action: action))
+    } catch let e as IPCError where e.code == .notPermitted && [.allowOnce, .alwaysAllow, .trustApplePrograms].contains(action) {
+        // Denying is open to the console user; allowing needs root or the signed app, so an AI agent
+        // running as the user can turn its own question down but never approve it.
+        throw CLIError(zh ? "不允许：\(e.message)\n  允许访问需要 root 或 WhoRead 应用（以你的身份运行的 AI agent 只能拒绝，不能允许）。\n  例如 \(sudoCommand)"
+                          : "not permitted: \(e.message)\n  Allowing needs root or the WhoRead app (an AI agent running as you can deny, never allow).\n  e.g. \(sudoCommand)",
+                       exitCode: 77)
+    }
+    let done: (en: String, zh: String)
+    switch action {
+    case .allowOnce: done = ("allowed for 10 minutes", "已允许 10 分钟")
+    case .alwaysAllow: done = ("always allowed (saved as an allow rule)", "已始终允许（已保存为允许规则）")
+    case .blockFromNowOn: done = ("denied, now and from now on (saved as a deny rule)", "已拒绝，以后也拦截（已保存为拦截规则）")
+    case .trustApplePrograms: done = ("allowed; Apple programs are no longer asked (trust-apple on)", "已允许；以后不再询问苹果程序（trust-apple 已打开）")
+    default: done = ("denied", "已拒绝")
+    }
+    out((zh ? "问题 #\(id)：" : "question #\(id): ") + (zh ? done.zh : done.en))
+    if case .asks(let remaining) = reply, !remaining.isEmpty {
+        out(zh ? "  还有 \(remaining.count) 个问题等待回答：whoread asks" : "  \(remaining.count) more waiting: whoread asks")
     }
 }
 
@@ -591,8 +696,12 @@ func cmdRules(_ c: IPCClient) throws {
         case .anyNonOwner: subject = "any non-owner"
         case .agentAncestor(let ids, let ex): subject = "agent chain " + (ids?.joined(separator: ",") ?? "any") + (ex ? " except owners" : "")
         }
-        let state = !r.enabled ? "off" : (r.action == .deny ? (r.enforce ? "ENFORCE" : "dry-run") : "on")
-        return [r.id, state, r.action.rawValue, r.access.rawValue, target, subject, r.name ?? ""]
+        // Answers to questions are scoped to the AI agents seen in the chain, and "allow once" expires:
+        // without both, an approval for Terminal and one for Claude Code in Terminal look the same.
+        let scope = r.chainAgents.map { $0.isEmpty ? ", no AI agent in chain" : ", chain agents " + $0.joined(separator: ",") } ?? ""
+        let state = (!r.enabled ? "off" : (r.action == .deny ? (r.enforce ? "ENFORCE" : "dry-run") : "on"))
+            + (r.expiresAt.map { " until " + Format.time($0) } ?? "")
+        return [r.id, state, r.action.rawValue, r.access.rawValue, target, subject + scope, r.name ?? ""]
     }
     func modify(_ id: String, _ f: (inout Rule) -> Void) throws {
         guard var r = try c.rules().first(where: { $0.id == id }) else { throw CLIError("no rule \(id)") }
@@ -887,6 +996,7 @@ func cmdSettings(_ c: IPCClient) throws {
         guard let sev = Severity(rawValue: value) else { throw CLIError("medium|high|critical") }
         s.notifications.minimumSeverity = sev
     case "latency-p99-ms": s.latencyP99ThresholdMs = try number(value)
+    case "trust-apple": s.trustApplePrograms = try bool(value)
     case "language":
         // zh* means Simplified Chinese, as with --lang; an unknown value is an error, not "system".
         switch value.lowercased() {
@@ -999,6 +1109,7 @@ do {
     default:
         let commands: [String: (IPCClient) throws -> Void] = [
             "status": cmdStatus, "events": cmdEvents, "tail": cmdTail, "alerts": cmdAlerts, "alert": cmdAlertAction,
+            "asks": cmdAsks, "ask": cmdAsk,
             "read-all": { c in _ = try c.call(.markAlertsRead(ids: nil)); out("all alerts marked read") },
             "apps": cmdApps, "files": cmdFiles, "agents": cmdAgents, "daily": cmdDaily, "export": cmdExport,
             "enforcement": cmdEnforcement,

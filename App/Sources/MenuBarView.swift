@@ -4,7 +4,7 @@ import WhoReadCore
 import WhoReadIPC
 import WhoReadUIModel
 
-/// The menu bar popover: state, unread alerts, quick switches.
+/// The menu bar popover: state, open questions (first), quick switches, unread alerts.
 struct MenuBarView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(AppModel.self) private var model
@@ -18,6 +18,10 @@ struct MenuBarView: View {
             }
             Divider()
             if model.connected, let status = model.liveStatus {
+                if !model.asks.isEmpty {
+                    openAsks
+                    Divider()
+                }
                 quickToggles(status)
                 Divider()
                 recentAlerts
@@ -57,10 +61,6 @@ struct MenuBarView: View {
             VStack(alignment: .leading) {
                 Text(L10n.t(.appName)).font(.headline)
                 Text(model.menuBar.title).foregroundStyle(.secondary)
-                if let s = model.liveStatus, s.learning {
-                    Text(L10n.f(.learningUntilFormat, s.learningEndsAt.formatted(date: .abbreviated, time: .omitted)))
-                        .font(.caption).foregroundStyle(.secondary)
-                }
             }
             Spacer()
             if model.unreadCount > 0 {
@@ -74,19 +74,40 @@ struct MenuBarView: View {
             Toggle(L10n.t(.pauseMonitoring), isOn: Binding(
                 get: { status.monitoringPaused },
                 set: { connection.setPaused($0) }))
-            // Shows what is in effect: off after the kill-switch file or a latency trip.
+            // Shows what is in effect: off after the kill-switch file. Never switched off automatically.
             Toggle(L10n.t(.enforcement), isOn: Binding(
                 get: { model.enforcementSwitchOn },
                 set: { connection.setEnforcement($0) }))
             if let inactive = model.enforcementInactiveText {
                 Text(inactive).font(.caption).foregroundStyle(.orange)
             }
+            if let slow = model.slowResponsesText {
+                Text(slow).font(.caption).foregroundStyle(.orange)
+            }
             if status.enforcementActive {
                 Button(L10n.t(.killSwitchAdmin)) { connection.engageKillSwitchWithAdminRights() }
                     .font(.caption)
             }
-            if let err = connection.lastActionError {
+            // Shown with the questions while any is open (a refused answer).
+            if model.asks.isEmpty, let err = connection.lastActionError {
                 Text(err).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+
+    /// Questions waiting for an answer, those about to be denied first, with the answers as buttons.
+    private var openAsks: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L10n.t(.asksTitle)).font(.subheadline.weight(.semibold))
+            ForEach(Array(model.asksByUrgency.prefix(3))) { ask in
+                AskRow(ask: ask)
+            }
+            if model.asks.count > 3 {
+                Button(L10n.f(.asksMoreFormat, model.asks.count - 3)) { open(.alerts) }
+                    .buttonStyle(.link).font(.caption)
+            }
+            if let err = connection.lastActionError {
+                Text(err).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
         }
     }

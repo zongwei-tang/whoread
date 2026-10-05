@@ -4,7 +4,9 @@ import WhoReadCore
 /// Version of the request/response protocol. Bumped on incompatible changes.
 /// 2: daily aggregates, alert firstTime, rule subject cdhash/exceptOwners, exception access/chain
 /// scoping, status rulesLoadError/sourceDroppedEvents.
-public let whoReadIPCVersion = 2
+/// 3: ask mode (asks, answerAsk, Verdict.ask, AlertKind.ask, AlertAction.trustApplePrograms,
+/// Rule.chainAgents, Settings.trustApplePrograms), no automatic enforcement trips.
+public let whoReadIPCVersion = 3
 
 /// Requests from the app / CLI to the daemon. Encoded as JSON over XPC (`Data` in, `Data` out)
 /// or over the development Unix socket.
@@ -39,6 +41,12 @@ public enum IPCRequest: Codable, Sendable {
     /// Replaces the whole rule list (root or the app). The only rule change accepted while the stored
     /// rules cannot be read; the old rows are then kept in the database's `rules_backup` table.
     case replaceRules([Rule])
+    /// Ask mode: questions waiting for an answer. Polling it also tells the daemon an answering app is
+    /// present (without one, ask-mode accesses are denied at once instead of held).
+    case asks
+    /// Answers a question: allowOnce (10 minutes), alwaysAllow, keepBlocking (deny now),
+    /// blockFromNowOn (deny rule), trustApplePrograms. Allowing needs root or the signed app.
+    case answerAsk(id: Int64, action: AlertAction)
 }
 
 public enum IPCResponse: Codable, Sendable {
@@ -53,6 +61,7 @@ public enum IPCResponse: Codable, Sendable {
     case catalog(CatalogInfo)
     case agents(AgentCatalog)
     case baseline([BaselineEntry])
+    case asks([AskRequest])
     case ok
     case error(IPCError)
 }
@@ -127,6 +136,8 @@ public struct DaemonStatus: Codable, Sendable {
     public var enforcementEnabled: Bool
     public var enforcementActive: Bool
     public var enforcementInactiveReasons: [EnforcementState.InactiveReason]
+    /// Why an older daemon switched enforcement off automatically. Always nil since protocol 3 (ask
+    /// mode: nothing switches enforcement off automatically).
     public var latencyTripReason: String?
     public var killSwitchFilePresent: Bool
     public var latency: LatencyStats
@@ -144,6 +155,11 @@ public struct DaemonStatus: Codable, Sendable {
     public var sourceDroppedEvents: UInt64?
     /// NOTIFY events the kernel dropped before the source saw them (sequence-number gaps).
     public var sourceKernelDrops: UInt64?
+    /// Ask mode: questions waiting for an answer.
+    public var pendingAsks: Int?
+    /// The previous daemon instance stopped while AUTH events were subscribed (likely killed for a
+    /// missed deadline). Enforcement stays as the user set it; this is for the user to know.
+    public var uncleanStop: String?
 
     public init(version: String, pid: Int32, startedAt: Date, mode: DaemonMode, source: SourceKind, sourceRunning: Bool,
                 sourceError: String?, sourceHint: String?, sourceCanEnforce: Bool, learning: Bool, learningEndsAt: Date,
@@ -152,7 +168,7 @@ public struct DaemonStatus: Codable, Sendable {
                 killSwitchFilePresent: Bool, latency: LatencyStats, parser: EsloggerParser.Stats?, counts: StoreCounts,
                 unreadAlerts: Int, lastEventAt: Date?, eventsProcessed: UInt64, writerDropped: UInt64, monitoredPrefixes: Int,
                 homeDirectories: [String], rulesLoadError: String? = nil, sourceDroppedEvents: UInt64? = nil,
-                sourceKernelDrops: UInt64? = nil) {
+                sourceKernelDrops: UInt64? = nil, pendingAsks: Int? = nil, uncleanStop: String? = nil) {
         self.version = version
         self.pid = pid
         self.startedAt = startedAt
@@ -182,6 +198,8 @@ public struct DaemonStatus: Codable, Sendable {
         self.rulesLoadError = rulesLoadError
         self.sourceDroppedEvents = sourceDroppedEvents
         self.sourceKernelDrops = sourceKernelDrops
+        self.pendingAsks = pendingAsks
+        self.uncleanStop = uncleanStop
     }
 }
 

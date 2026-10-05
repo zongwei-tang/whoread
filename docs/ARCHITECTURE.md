@@ -105,13 +105,16 @@ truth, generated once by `scripts/dev/gen_catalog.py`. The daemon:
    - blocked / would block → alert;
    - explicit allow → nothing;
    - alert rule → alert;
-   - owner → nothing;
-   - critical and not user-approved → alert, even while learning;
-   - after learning, a new (app, category, access) triple → alert.
+   - owner with no AI agent in its chain → nothing (an owner run by an agent alerts);
+   - critical and not user-approved → alert;
+   - a new (app, category, access) triple → alert (no learning period since ask mode).
+   With enforcement on, undecided accesses never get here as "allowed": they are held and asked
+   (docs/ASK_MODE.md); an unanswered one becomes a denied event with an `ask` alert.
 
    The baseline records everything except benign and denied accesses.
-8. **Coalescing**: one alert per (app, category, blocked or not) per 10 minutes, so "blocked ×6"
-   never counts reads that went through. Repeats bump the count. An escalation (e.g. first access
+8. **Coalescing**: one alert per (app, category, lane) per 10 minutes, the lanes being passed,
+   blocked and asked (questions also per set of chain agents), so "blocked ×6" never counts reads
+   that went through. Repeats bump the count. An escalation (e.g. first access
    → critical) or a new access kind (a write after reads) re-surfaces the alert and moves its
    headline path to the access that caused it; "allow once" targets that path. The alert text
    says read / wrote / read and modified, and "for the first time" when the triple was new.
@@ -136,12 +139,18 @@ truth, generated once by `scripts/dev/gen_catalog.py`. The daemon:
      covers this process and file;
    - readdir / directory opens → always allow (never blocked);
    - other AUTH events → `es_respond_auth_result`, never cached (none of them support caching).
-4. Record the latency from the message's `mach_time` against `deadline`. A missed deadline is
-   reported from a serial queue (so the enforcement trip and its logging never run on the
-   callback); es_respond failures are logged from the same queue without touching the message.
+   - ask (enforcement on, nothing decided): `es_retain_message`, hand the message to `AskBroker` with
+     a budget (deadline − clamp(20 %, 1–5 s)) and return; the broker answers it exactly once (your
+     answer, re-decided against the new rules, or deny when the budget runs out), the source
+     releases it; a backstop denies before the deadline; no budget, no answering app or too many held
+     → deny at once.
+4. Record the latency of immediately answered messages from `mach_time` against `deadline` (stats
+   only: nothing switches enforcement off); es_respond failures are logged from a queue without
+   touching the message.
 5. Denials are queued for logging; NOTIFY events of allowed accesses carry the normal log.
 
-Rule priority: explicit deny > explicit allow > owner > default. "Allow once" and "always allow"
+Rule priority: explicit deny > explicit allow > owner (no AI agent) > benign service / trusted Apple
+chain > ask (enforcement on) or default allow. "Allow once" and "always allow"
 on a blocked access are **exceptions** on the deny rule, so deny keeps the highest priority.
 
 ## IPC and permissions
@@ -151,9 +160,11 @@ There is a single protocol, `IPCRequest`/`IPCResponse` (JSON). XPC carries it as
 each request by peer euid and code identity (see THREAT_MODEL "Protecting the guard from the
 guarded"). Rule, settings and catalog read-modify-writes are serialized by one recursive lock in
 `DaemonCore`; settings are applied in memory before they are persisted, so a kill switch works
-even when the disk is full. The protocol version (`whoReadIPCVersion`, now 2) is checked with a
-`hello` by the CLI and the app. The app polls every second (status, alerts, live tail) and every
-10 s (summaries, rules, settings, catalog), plus a full poll right after any change.
+even when the disk is full. The protocol version (`whoReadIPCVersion`, now 3: adds `asks` and `answerAsk`) is checked with a
+`hello` by the CLI and the app. The app polls every second (status, alerts, live tail, `.asks`),
+every 250 ms only `.asks` while questions are open (that poll is what makes the daemon hold accesses
+instead of denying them at once), and every 10 s (summaries, rules, settings, catalog), plus a full
+poll right after any change.
 
 ## Threads
 
@@ -161,12 +172,14 @@ even when the disk is full. The protocol version (`whoReadIPCVersion`, now 2) is
 |---|---|
 | ES process client handler | fork/exec/exit → tree (synchronous, in memory) |
 | ES file client handler | AUTH decide + respond; NOTIFY → `whoread.native.events` queue (bounded) |
-| native report queue | deadline-miss trips, es_respond failure logs |
+| native report queue | es_respond failure logs |
+| AskBroker queue | budget timers, answers to held accesses |
+| `whoread.ask.redact` | argv redaction of questions (off the ES callback) |
 | `whoread.eslogger.reader` | read eslogger stdout, prefilter, parse, analyze |
 | `whoread.eslogger.stderr` | blocking read of eslogger stderr (4 KB tail for the source error and hint) |
 | `whoread.writer` | SQLite batches |
 | `whoread.maintenance` | prune tree, expire alert windows, baseline flush, retention, latency check, home / symlink re-discovery, save used "allow once" |
-| `whoread.policy` | enforcement on/off observers: ES cache clear, AUTH subscribe/unsubscribe, trip persistence |
+| `whoread.policy` | enforcement on/off observers: ES cache clear, AUTH subscribe/unsubscribe, releasing held accesses when enforcement goes off |
 | `whoread.killswitch` | stat the kill-switch file every 200 ms |
 | IPC threads | `ServiceHandler` |
 

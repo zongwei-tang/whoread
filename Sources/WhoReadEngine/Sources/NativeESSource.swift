@@ -124,6 +124,117 @@ struct NativeSequenceGaps {
     mutating func reset() { last = nil }
 }
 
+/// How long ask mode may hold an AUTH message (docs/ASK_MODE.md): remaining = deadline − now,
+/// headroom = 20 % of remaining clamped to [1 s, 5 s] (the pattern Santa uses), budget = remaining −
+/// headroom, never below 0. Times are Mach absolute ticks; the timebase turns ticks into nanoseconds
+/// (ticks × numer / denom). Outside the EndpointSecurity guard so it is unit-tested on any host.
+struct NativeAskBudget: Equatable {
+    /// Seconds the broker may hold the access before denying it.
+    let budget: TimeInterval
+    let headroom: TimeInterval
+
+    /// When the source denies by itself if the broker has not answered: halfway through the
+    /// headroom, so still before the kernel deadline.
+    var backstop: TimeInterval { budget + headroom / 2 }
+
+    init(deadline: UInt64, now: UInt64, numer: UInt32, denom: UInt32) {
+        let ticks = deadline > now ? deadline - now : 0
+        let remaining = denom == 0 ? 0 : Double(ticks) * Double(numer) / Double(denom) / 1_000_000_000
+        headroom = min(max(remaining * 0.2, 1), 5)
+        budget = max(remaining - headroom, 0)
+    }
+}
+
+/// Ask mode: the AUTH messages the native source holds for the user's answer. Each one is answered
+/// (or, for `abandon`, only released) exactly once, by whoever takes it out of the set first: the
+/// broker (answer, timeout, denyAll), the source's backstop, `denyAll` here before the ES client is
+/// deleted, or `abandon` when the broker did not hold it. Generic over how a message is answered and
+/// released (es_respond_* and es_release_message in the source), so it is unit-tested on any host.
+final class NativeHeldMessages: @unchecked Sendable {
+    final class Held: @unchecked Sendable {
+        fileprivate let answer: (Bool) -> Void
+        fileprivate let release: () -> Void
+
+        fileprivate init(answer: @escaping (Bool) -> Void, release: @escaping () -> Void) {
+            self.answer = answer
+            self.release = release
+        }
+    }
+
+    private let lock = NSCondition()
+    /// A `Held` is keyed by its identity; every caller of `finish` or `abandon` keeps it alive, so the
+    /// identifier cannot be reused while it can still be passed in.
+    private var held: [ObjectIdentifier: Held] = [:]
+    /// Answers or releases taken out of `held` and still running (outside the lock). `denyAll` waits
+    /// for them: the ES client must not be deleted while a backstop is inside es_respond.
+    private var inFlight = 0
+
+    /// Messages held right now.
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return held.count
+    }
+
+    /// Registers a message the caller has just retained. `answer(allow)` responds (never cached) and
+    /// releases it; `release` only releases it.
+    func add(answer: @escaping (Bool) -> Void, release: @escaping () -> Void) -> Held {
+        let h = Held(answer: answer, release: release)
+        lock.lock()
+        held[ObjectIdentifier(h)] = h
+        lock.unlock()
+        return h
+    }
+
+    private func take(_ h: Held) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard held.removeValue(forKey: ObjectIdentifier(h)) != nil else { return false }
+        inFlight += 1
+        return true
+    }
+
+    private func done() {
+        lock.lock()
+        inFlight -= 1
+        if inFlight == 0 { lock.broadcast() }
+        lock.unlock()
+    }
+
+    /// Answers, the first time only (outside the lock: responding is a system call). False if it was
+    /// already answered or abandoned.
+    @discardableResult
+    func finish(_ h: Held, allow: Bool) -> Bool {
+        guard take(h) else { return false }
+        h.answer(allow)
+        done()
+        return true
+    }
+
+    /// Releases without answering: the handler that retained it answers at once, while the message is
+    /// still valid in its scope. False if it was already answered.
+    func abandon(_ h: Held) -> Bool {
+        guard take(h) else { return false }
+        h.release()
+        done()
+        return true
+    }
+
+    /// Denies everything still held, then waits (bounded) for answers already running elsewhere (a
+    /// backstop, the broker queue) to return. Returns how many it denied: none when the broker's
+    /// denyAll kept its contract.
+    @discardableResult
+    func denyAll(waitAtMost timeout: TimeInterval = 2) -> Int {
+        lock.lock()
+        let all = Array(held.values)
+        lock.unlock()
+        let denied = all.filter { finish($0, allow: false) }.count
+        let until = Date().addingTimeInterval(timeout)
+        lock.lock()
+        while inFlight > 0 && lock.wait(until: until) {}
+        lock.unlock()
+        return denied
+    }
+}
+
 #if canImport(EndpointSecurity)
 #if canImport(Darwin)
 import Darwin
@@ -151,7 +262,10 @@ import WhoReadIPC
 //
 // AUTH callback: build the FileActivity, decide from in-memory state (Enforcer: classifier +
 // process tree + rules), respond immediately, then hand logging to a queue. No disk IO, no XPC,
-// no UI on the callback path. Anything unexpected → allow.
+// no UI on the callback path. Anything unexpected → allow. Ask mode (docs/ASK_MODE.md): an access
+// nothing decides is retained and handed to the AskBroker, which answers it later from its own
+// queue; the callback still returns at once. An ask that cannot be held is denied at once: ask
+// means enforcement is active and nothing allowed the access.
 public final class NativeESSource: EventSource, @unchecked Sendable {
     public let kind = SourceKind.native
     public let canEnforce = true
@@ -168,9 +282,18 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private let clientThread = ClientThread()
     private let eventQueue = DispatchQueue(label: "whoread.native.events", qos: .userInitiated)
     private let deniedQueue = DispatchQueue(label: "whoread.native.denied", qos: .utility)
-    /// What the callback must not do itself (logging, the latency trip's observers). Serial, so a burst
-    /// of failures queues up instead of parking a pool thread per message on Log's lock.
+    /// What the callback must not do itself (logging). Serial, so a burst of failures queues up instead
+    /// of parking a pool thread per message on Log's lock.
     private static let reportQueue = DispatchQueue(label: "whoread.native.report", qos: .userInitiated)
+
+    /// Ask mode: held messages answer through the file client, so they are held only while it exists.
+    /// Taken across the check and `AskBroker.hold` (short, never blocks), so stop and abortSetup can
+    /// close it and then deny everything held before es_delete_client. Never taken in a `respond`
+    /// closure, which may run under the broker's lock: hence not `lock`, which those closures take.
+    private let askGate = NSLock()
+    private var asksOpen = false
+    /// Every message held right now, so closeAsks can answer what the broker did not.
+    private let heldMessages = NativeHeldMessages()
 
     private let lock = NSLock()
     private var mutedPrefixes = Set<NativeMutePlan.Path>()
@@ -246,11 +369,14 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     public func stop() {
         // A clean stop is not a death while enforcing (see DaemonCore's start-up check).
         disarm()
-        clientThread.run {
+        // Waits (bounded): the process exits right after Daemon.stop(), and held accesses must be
+        // denied and the clients deleted by us first, not left to the kernel's teardown.
+        clientThread.runAndWait(timeout: 3) {
             // After this, a retry that was already queued finds `stopped` and creates nothing.
             self.stopped = true
             self.retryTimer?.cancel()
             self.retryTimer = nil
+            self.closeAsks()
             if let c = self.fileClient {
                 _ = es_unsubscribe_all(c)
                 _ = es_delete_client(c)
@@ -315,6 +441,9 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         fileSequence.reset()
         processSequence.reset()
         lock.unlock()
+        askGate.lock()
+        asksOpen = true
+        askGate.unlock()
         if let core {
             let c = core.analyzer.classifier
             // Every byte-distinct spelling (catalog and on-disk); the mute plan adds realpath / NFC / NFD.
@@ -356,12 +485,26 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     /// Setup failed after both clients exist: delete them (still on the creating thread) and retry.
     private func abortSetup(_ proc: OpaquePointer, _ file: OpaquePointer, _ message: String) {
         disarm()
+        closeAsks()
         _ = es_delete_client(file)
         _ = es_delete_client(proc)
         procClient = nil
         fileClient = nil
         report(error: message, hint: "Endpoint Security setup failed; retrying.")
         scheduleRetry()
+    }
+
+    /// Before the ES clients are deleted (client thread): hold nothing more, then deny everything held
+    /// while the client its `respond` closures answer through still exists. The broker's denyAll returns
+    /// once every access it holds is answered; whatever is still held after it is denied here, so no
+    /// message outlives its client whatever the broker does.
+    private func closeAsks() {
+        askGate.lock()
+        asksOpen = false
+        askGate.unlock()
+        decider.askBroker?.denyAll()
+        let missed = heldMessages.denyAll()
+        if missed > 0 { Log.warning("ask mode: \(missed) held accesses left unanswered by the broker; denied") }
     }
 
     /// Publishes and logs a setup error once, not on every retry.
@@ -530,8 +673,9 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         clearCacheSoon()
     }
 
-    /// The marker exists exactly while AUTH events are subscribed. If the kernel kills the daemon for a
-    /// missed deadline, the next start finds it and leaves enforcement off. Client thread only (IO).
+    /// The marker exists exactly while AUTH events are subscribed. If the daemon dies while it exists
+    /// (the kernel killed it for a missed deadline, a crash), the next start finds it and reports an
+    /// unclean stop; enforcement stays as the user set it. Client thread only (IO).
     private func arm() {
         guard let config = core?.config, !config.inMemoryStore else { return }
         if !FileManager.default.createFile(atPath: config.authArmedMarkerPath, contents: nil,
@@ -599,44 +743,38 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         if m.action_type == ES_ACTION_TYPE_AUTH {
             let start = mach_absolute_time()
             let activity = NativeESSource.activity(msg)
-            let decision = activity.map { decider.decide($0) } ?? .failOpen()
+            var decision = activity.map { decider.decide($0) } ?? .failOpen()
+            if decision.verdict == .ask, let activity {
+                // Held: the broker answers it later, and held accesses stay out of the latency stats.
+                if hold(client, msg, activity, decision) {
+                    lock.lock()
+                    if m.version >= 4 { fileSequence.note(m.global_seq_num) }
+                    lock.unlock()
+                    return
+                }
+                // Not held (no broker or question, too little time, too many held, nobody to answer,
+                // stopping): denied at once, recorded and timed like any other denial.
+                decision = NativeESSource.askDenial(decision)
+            }
             NativeESSource.respond(client, msg, decision)
             let end = mach_absolute_time()
             let tb = NativeESSource.timebase
             // Measured from the event's Mach time (comparable to mach_absolute_time, header), so time
-            // spent queued behind other messages counts toward the p99 guard.
+            // spent queued behind other messages counts toward the p99 statistics. Stats only: a slow
+            // response or a missed deadline never switches enforcement off.
             let begin = m.mach_time > 0 ? min(start, m.mach_time) : start
             let micros = (end &- begin) &* UInt64(tb.numer) / UInt64(tb.denom) / 1000
-            if end >= m.deadline {
-                // A miss trips enforcement, and EnforcementState runs its observers (which log) on the
-                // calling thread: report it from a queue, never from the callback.
-                NativeESSource.reportQueue.async { [decider] in
-                    decider.recordResponse(micros: micros, missedDeadline: true)
-                }
-            } else {
-                decider.recordResponse(micros: micros, missedDeadline: false)
-            }
-            // A denied access produces no NOTIFY: record it off the callback path. The backlog merges
-            // repeats and counts the excess instead of growing without bound (NativeDenialBacklog).
-            let denied = decision.verdict == .deny ? activity : nil
+            decider.recordResponse(micros: micros, missedDeadline: end >= m.deadline)
             lock.lock()
             if m.version >= 4 { fileSequence.note(m.global_seq_num) }
-            let ticket = denied.flatMap { a in denials.admit { NativeDenialBacklog.Key(a, decision) } }
             lock.unlock()
-            if let denied, let ticket {
-                deniedQueue.async { [weak self] in
-                    guard let self else { return }
-                    self.sink?.receive(.file(denied), context: .decided(decision))
-                    self.lock.lock()
-                    self.denials.finish(ticket)
-                    self.lock.unlock()
-                }
-            }
+            if decision.verdict == .deny, let activity { recordDenial(activity, decision) }
             return
         }
         let activity = NativeESSource.activity(msg)
         // `.afterAuth` only when this access really passed an AUTH check: AUTH subscribed and
-        // enforcement live right now (the kill switch and latency trip unsubscribe asynchronously).
+        // enforcement live right now (the kill switch unsubscribes asynchronously). An access held in
+        // ask mode and allowed by the answer passed AUTH too, so it is `.afterAuth` as well.
         // A modified close has no AUTH counterpart but is treated the same: its open passed AUTH, or
         // predates enforcement and a matching deny still alerts. As `.monitorOnly` it would turn a
         // write allowed once into "would block", and could use up a live "allow once".
@@ -659,20 +797,103 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         }
     }
 
+    /// Ask mode: hands a `.ask` access to the broker. True when held (the broker answers it, exactly
+    /// once, through the closure); false when the caller must deny it at once.
+    private func hold(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ activity: FileActivity,
+                      _ ask: RuleDecision) -> Bool {
+        guard let broker = decider.askBroker, let request = decider.askRequest(for: activity, decision: ask) else { return false }
+        let tb = NativeESSource.timebase
+        let plan = NativeAskBudget(deadline: msg.pointee.deadline, now: mach_absolute_time(), numer: tb.numer, denom: tb.denom)
+        // No time to ask in, and the backstop below falls before the deadline only with a budget.
+        guard plan.budget > 0 else { return false }
+        let denial = NativeESSource.askDenial(ask)
+        askGate.lock()
+        defer { askGate.unlock() }
+        guard asksOpen else { return false }
+        // Retained before the broker can call `respond` (from its queue, maybe before hold returns).
+        // The closures use `msg` and `client` after the callback returns: valid only because the
+        // message stays retained until it is answered and released, and because the client outlives
+        // every held message (closeAsks answers them all before es_delete_client; the closed gate
+        // holds nothing more). The denial is recorded off the callback like any other; the access is
+        // answered even if the source is gone.
+        es_retain_message(msg)
+        let decider = self.decider
+        let held = heldMessages.add(answer: { [weak self] allow in
+            // A question covers one category. An "allow" is re-decided against the rules the answer
+            // just saved, so the other undecided categories of the same operation (`cp ~/.ssh/id_x
+            // ~/.aws/credentials`) are not let through on it; they are denied and asked on the retry.
+            // Memory only, off the callback (broker queue or backstop).
+            var final = denial
+            if allow {
+                let again = decider.decide(activity)
+                final = again.verdict == .allow ? again : (again.verdict == .ask ? NativeESSource.askDenial(again) : again)
+            }
+            let allowed = final.verdict == .allow
+            NativeESSource.respond(client, msg, allow: allowed, cache: false)
+            es_release_message(msg)
+            if !allowed { self?.recordDenial(activity, final) }
+        }, release: { es_release_message(msg) })
+        let heldMessages = self.heldMessages
+        let respond: @Sendable (Bool) -> Void = { allow in heldMessages.finish(held, allow: allow) }
+        switch broker.hold(request, budget: plan.budget, respond: { respond($0 == .allow) }) {
+        case .held(let id):
+            // Backstop: should the broker never answer, deny before the kernel deadline (a miss gets
+            // the daemon killed and the access allowed). A no-op once the broker has answered.
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + plan.backstop) { respond(false) }
+            // Enforcement went off between the decision and this hold: the observer's release may
+            // already have run, so release it here (the re-decide then allows: enforcement inactive).
+            // The state flips before the observer is queued, so one of the two always sees it.
+            if core?.enforcement.isActive == false { broker.resolve(id: id, answer: .allow) }
+            return true
+        case .denyNow:
+            // `respond` is never called for it: release, and the caller answers at once inside the
+            // handler. (Already answered, against the contract: nothing is left to do.)
+            return !heldMessages.abandon(held)
+        }
+    }
+
+    /// What an ask that was not answered in time (or could not be held) becomes.
+    static func askDenial(_ ask: RuleDecision) -> RuleDecision {
+        RuleDecision(verdict: .deny, reason: .askUser, askKey: ask.askKey)
+    }
+
+    /// A denied access produces no NOTIFY: record it off the callback path. The backlog merges repeats
+    /// and counts the excess instead of growing without bound (NativeDenialBacklog).
+    private func recordDenial(_ activity: FileActivity, _ decision: RuleDecision) {
+        lock.lock()
+        let ticket = denials.admit { NativeDenialBacklog.Key(activity, decision) }
+        lock.unlock()
+        guard let ticket else { return }
+        deniedQueue.async { [weak self] in
+            guard let self else { return }
+            self.sink?.receive(.file(activity), context: .decided(decision))
+            self.lock.lock()
+            self.denials.finish(ticket)
+            self.lock.unlock()
+        }
+    }
+
+    /// Only `.allow` allows: an undecided `.ask` never gets here (handleFile holds or denies it), and
+    /// would be denied.
     static func respond(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ d: RuleDecision) {
+        let allow = d.verdict == .allow
+        // Cache only if no enforced rule denies this process anything here: a cached narrower mask
+        // would deny a later open in the kernel with no AUTH event (no log, no alert), and keep doing
+        // so after the kill switch.
+        respond(client, msg, allow: allow, cache: allow && d.cacheable && d.policyDenied.isEmpty)
+    }
+
+    /// Any thread (an answer to a held message comes from the broker's queue; the message is retained).
+    static func respond(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, allow: Bool, cache: Bool) {
         let result: es_respond_result_t
         if msg.pointee.event_type == ES_EVENT_TYPE_AUTH_OPEN {
             // Deny with 0 and never cache it. Allow with UINT32_MAX (header: unless intentionally
             // denying flags): an allow never needs a mask, because any requested bit an enforced rule
-            // denies already makes the verdict deny. Cache only if no enforced rule denies this
-            // process anything here: a cached narrower mask would deny a later open in the kernel
-            // with no AUTH event (no log, no alert), and keep doing so after the kill switch.
-            result = d.verdict == .deny
-                ? es_respond_flags_result(client, msg, 0, false)
-                : es_respond_flags_result(client, msg, UInt32.max, d.cacheable && d.policyDenied.isEmpty)
+            // denies already makes the verdict deny.
+            result = es_respond_flags_result(client, msg, allow ? UInt32.max : 0, allow && cache)
         } else {
             // CREATE, RENAME, CLONE, COPYFILE, LINK, UNLINK, TRUNCATE, EXCHANGEDATA: no caching (header).
-            result = es_respond_auth_result(client, msg, d.verdict == .deny ? ES_AUTH_RESULT_DENY : ES_AUTH_RESULT_ALLOW, false)
+            result = es_respond_auth_result(client, msg, allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY, false)
         }
         if result != ES_RESPOND_RESULT_SUCCESS {
             // Logging writes to disk: never on the callback thread. Copy plain values, not `msg`.
@@ -856,6 +1077,20 @@ final class ClientThread: @unchecked Sendable {
         blocks.append(block)
         condition.signal()
         condition.unlock()
+    }
+
+    /// Runs the block on the client thread and waits for it (bounded). Inline when already on it.
+    func runAndWait(timeout: TimeInterval, _ block: @escaping () -> Void) {
+        if let thread, Thread.current === thread {
+            block()
+            return
+        }
+        let done = DispatchSemaphore(value: 0)
+        run {
+            block()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + timeout)
     }
 
     private func loop() {

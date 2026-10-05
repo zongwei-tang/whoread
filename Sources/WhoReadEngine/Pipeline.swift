@@ -185,9 +185,10 @@ public final class EventPipeline: EventSink, @unchecked Sendable {
             return
         }
         if isPaused() {
-            // Paused: keep the process tree current and record nothing, except blocks. Enforcement is a
-            // separate switch and keeps denying; every denial must still be recorded and alerted.
-            guard case .decided(let d) = context, d.verdict == .deny else { return }
+            // Paused: keep the process tree current and record nothing, except blocks and questions.
+            // Enforcement is a separate switch and keeps denying (and asking); every denial must still be
+            // recorded and alerted.
+            guard case .decided(let d) = context, d.verdict != .allow else { return }
         }
         orderLock.lock()
         let out = analyzer.handle(event, context: context)
@@ -219,16 +220,30 @@ public final class EventPipeline: EventSink, @unchecked Sendable {
 }
 
 /// AUTH decisions for the native source: classification, chain and rules, all in memory.
-/// Any inactive switch (user, kill-switch file, latency trip) means allow.
+/// Any inactive switch (user, kill-switch file) means allow. With enforcement active, an access that
+/// no rule, owner, benign service or "trust Apple programs" decides is asked (verdict `.ask`): the
+/// native source holds it in `askBroker` until the user answers or its budget runs out (docs/ASK_MODE.md).
 public final class Enforcer: AuthDecider, @unchecked Sendable {
     let analyzer: Analyzer
     let state: EnforcementState
     let latency: LatencyMonitor
+    /// Where held accesses wait. nil: nothing can be held, so nothing is asked.
+    public let askBroker: AskBroker?
+    private let lock = NSLock()
+    private var trustApple = false
 
-    public init(analyzer: Analyzer, state: EnforcementState, latency: LatencyMonitor) {
+    public init(analyzer: Analyzer, state: EnforcementState, latency: LatencyMonitor, askBroker: AskBroker? = nil) {
         self.analyzer = analyzer
         self.state = state
         self.latency = latency
+        self.askBroker = askBroker
+    }
+
+    /// `Settings.trustApplePrograms`, mirrored by DaemonCore: read on the ES callback thread, so a
+    /// locked in-memory flag.
+    public var trustApplePrograms: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return trustApple }
+        set { lock.lock(); trustApple = newValue; lock.unlock() }
     }
 
     public func decide(_ activity: FileActivity) -> RuleDecision {
@@ -241,15 +256,49 @@ public final class Enforcer: AuthDecider, @unchecked Sendable {
         guard !targets.isEmpty else { return RuleDecision(verdict: .allow, reason: .notSensitive, cacheable: true) }
         let chain = analyzer.tree.chain(for: activity.process, at: activity.time)
         let process = chain.first?.image ?? activity.process
-        return analyzer.rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: true, now: activity.time)
+        return analyzer.rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: true, now: activity.time,
+                                       ask: askPolicy(chain: chain))
     }
 
-    /// NativeESSource calls this on the ES callback thread only for on-time responses (a ring store).
-    /// A missed deadline trips enforcement, which runs the EnforcementState observers on the calling
-    /// thread, so the source reports misses from a queue.
+    /// The ask policy for an access while enforcement is active (`decide` returns earlier otherwise).
+    func askPolicy(chain: [ProcessNode]) -> AskPolicy {
+        guard askBroker != nil else { return .off }
+        return AskPolicy(enabled: true, trustApplePrograms: trustApplePrograms, benignChain: analyzer.isBenignChain(chain))
+    }
+
+    /// An Apple program in a root-owned system location (see AskPolicy.isAppleProgram).
+    public static func isAppleProgram(_ p: ProcessRecord) -> Bool { AskPolicy.isAppleProgram(p) }
+
+    /// The question for an `.ask` decision. Memory only (ES callback thread). nil (deny at once) when
+    /// the decision carries no key or the access no longer touches the key's category. The argv in its
+    /// display data is raw: redacting it is too slow for the callback, AskBroker does it off it.
+    public func askRequest(for activity: FileActivity, decision: RuleDecision) -> AskRequest? {
+        guard decision.verdict == .ask, let key = decision.askKey else { return nil }
+        let inCategory = analyzer.classify(activity).compactMap { t -> (path: String, severity: Severity)? in
+            guard let c = t.categories.first(where: { $0.id == key.categoryID }) else { return nil }
+            return (t.path, c.severity)
+        }
+        guard let first = inCategory.first, let severity = inCategory.map(\.severity).max() else { return nil }
+        let chain = analyzer.tree.chain(for: activity.process, at: activity.time)
+        let process = chain.first?.image ?? activity.process
+        // Stored chains are capped (nearest 64 links), as for events.
+        return AskRequest(id: 0, key: key, responsible: analyzer.attributor.attribute(chain: chain), severity: severity,
+                          path: first.path, process: process,
+                          chain: Array(chain.prefix(64).reversed()).map(Enforcer.rawLink), agentID: chain.nearestAgent,
+                          appleProgram: AskPolicy.isTrustableAppleProgram(process, chain: chain), firstAt: activity.time, lastAt: activity.time)
+    }
+
+    /// ChainLink(node:) without its argv redaction (AskBroker redacts it off the ES callback).
+    static func rawLink(_ node: ProcessNode) -> ChainLink {
+        let p = node.image
+        return ChainLink(pid: p.pid, name: p.name, path: p.executablePath, signingID: p.signingID, teamID: p.teamID,
+                         isPlatformBinary: p.isPlatformBinary, agentID: node.agentID, argv: p.argv)
+    }
+
+    /// Statistics only: slow responses and missed deadlines never switch enforcement off (ask mode).
+    /// NativeESSource calls this on the ES callback thread for on-time responses (a ring store).
     public func recordResponse(micros: UInt64, missedDeadline: Bool) {
         latency.record(micros: micros, missedDeadline: missedDeadline)
-        if missedDeadline { state.tripLatency("deadline missed") }
     }
 }
 

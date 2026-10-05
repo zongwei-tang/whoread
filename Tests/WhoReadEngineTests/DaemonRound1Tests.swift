@@ -251,13 +251,17 @@ final class RuleRound1DaemonTests: XCTestCase {
                                 subject: .anyNonOwner, access: .read, action: .deny, includePlatformBinaries: true)])
         try enableEnforcement(core)
         let cat = r1TerminalChild(core, proc(501, "/bin/cat", platform: true))
-        XCTAssertEqual(r1Auth(core, r1Open(cat, "/Users/alice/.ssh/known_hosts", at: 100)).verdict, .allow)
+        // Ask mode: an undecided read (known_hosts, not covered by the critical-only rule) is asked.
+        XCTAssertEqual(r1Auth(core, r1Open(cat, "/Users/alice/.ssh/known_hosts", at: 100)).verdict, .ask)
         XCTAssertEqual(r1Auth(core, r1Open(cat, r1Key, at: 101)).verdict, .deny)
         let alerts = try core.store.alerts(AlertQuery())
         let blocked = try XCTUnwrap(alerts.first { $0.kind == .blocked })
         XCTAssertEqual(blocked.firstPath, r1Key)
         try core.apply(action: .allowOnce, toAlert: blocked.id, peer: .inProcess)
         XCTAssertEqual(core.enforcer.decide(r1Open(cat, r1Key)).verdict, .allow, "the retried read goes through")
+        // Narrow: one path, one use. No category-wide allow rule lets other ssh files through unasked.
+        XCTAssertEqual(core.enforcer.decide(r1Open(cat, "/Users/alice/.ssh/known_hosts", at: 103)).verdict, .ask)
+        XCTAssertFalse(core.rules.rules.contains { $0.template == RuleTemplates.askAnswer })
     }
 
     // policy-7 / analysis-2: a denied copy to a USB stick has one blocked alert, and "allow once" on it works.
@@ -273,8 +277,11 @@ final class RuleRound1DaemonTests: XCTestCase {
         let alerts = try core.store.alerts(AlertQuery())
         XCTAssertEqual(alerts.map(\.categoryID), ["ssh"], "no second, unactionable alert for the stick")
         try core.apply(action: .allowOnce, toAlert: alerts[0].id, peer: .inProcess)
-        XCTAssertEqual(core.enforcer.decide(clone).verdict, .allow)
-        XCTAssertEqual(core.enforcer.decide(clone).verdict, .deny)
+        // Ask mode: the ssh half is now approved, the stick (volumes) is still undecided, so the retry
+        // asks about that category instead of slipping through on the ssh answer.
+        let retry = core.enforcer.decide(clone)
+        XCTAssertEqual(retry.verdict, .ask)
+        XCTAssertEqual(retry.askKey?.categoryID, "volumes")
     }
 
     // policy-2
@@ -478,35 +485,27 @@ final class RuleRound1DaemonTests: XCTestCase {
 // MARK: - Settings, kill switches, persistence (policy-3, policy-4, native-es-1, spec-11, policy-12, analysis-14, critic-4)
 
 final class EnforcementRound1Tests: XCTestCase {
-    // policy-3
-    func testEnforcementOnAfterALatencyTripWorksThroughTheHandler() throws {
+    // policy-3. Ask mode: a missed deadline no longer trips enforcement; "enforcement on" from the
+    // console user (strengthening) still works through the handler.
+    func testAMissedDeadlineKeepsEnforcementOnAndEnforcementOnWorksThroughTheHandler() throws {
         let dir = TempDir()
         let (core, _) = try r1Core(dir)
         try core.setRules([denySSH()])
         try enableEnforcement(core)
         let cat = r1TerminalChild(core, proc(501, "/bin/cat", platform: true))
         core.enforcer.recordResponse(micros: 10, missedDeadline: true)
-        core.drainPolicyQueue()
-        XCTAssertEqual(core.enforcer.decide(r1Open(cat, r1Key)).verdict, .allow)
-        let handler = strictHandler(core)
-        // The console user may turn it back on (strengthening).
-        XCTAssertNil(errorCode(handler.handle(.setEnforcement(enabled: true), peer: agentPeer)))
-        core.drainPolicyQueue()
-        XCTAssertEqual(core.enforcer.decide(r1Open(cat, r1Key)).verdict, .deny)
-        XCTAssertFalse(core.enforcement.inactiveReasons.contains(.latencyTripped))
-        // The latency monitor's own trip was reset too: the next check does not trip again.
         core.checkLatency()
-        XCTAssertTrue(core.enforcement.isActive)
-
-        // A trip while another switch already had enforcement off is persisted too (EnforcementState
-        // reports trips, not only transitions); "enforcement on" clears it.
+        core.drainPolicyQueue()
+        XCTAssertEqual(core.enforcer.decide(r1Open(cat, r1Key)).verdict, .deny, "still enforcing")
+        XCTAssertTrue(core.enforcement.inactiveReasons.isEmpty)
+        let handler = strictHandler(core)
+        // The console user may turn it back on (strengthening) after a manual kill switch.
         core.enforcement.setKillSwitchFilePresent(true)
         core.drainPolicyQueue()
-        core.enforcement.tripLatency("deadline missed")
+        XCTAssertEqual(core.enforcer.decide(r1Open(cat, r1Key)).verdict, .allow)
         core.enforcement.setKillSwitchFilePresent(false)
         core.drainPolicyQueue()
-        XCTAssertFalse(core.currentSettings.enforcementEnabled)
-        XCTAssertEqual(core.enforcer.decide(r1Open(cat, r1Key)).verdict, .allow)
+        XCTAssertTrue(core.currentSettings.enforcementEnabled)
         XCTAssertNil(errorCode(handler.handle(.setEnforcement(enabled: true), peer: agentPeer)))
         XCTAssertEqual(core.enforcer.decide(r1Open(cat, r1Key)).verdict, .deny)
     }
@@ -538,8 +537,8 @@ final class EnforcementRound1Tests: XCTestCase {
         XCTAssertTrue(try core.store.settings().monitoringPaused)
     }
 
-    // native-es-1
-    func testALatencyTripSurvivesARestartUntilTurnedOnAgain() throws {
+    // native-es-1. Ask mode: slow responses before a restart leave enforcement as the user set it.
+    func testSlowResponsesBeforeARestartLeaveEnforcementOn() throws {
         let dir = TempDir()
         do {
             let (core, _) = try r1Core(dir)
@@ -553,28 +552,25 @@ final class EnforcementRound1Tests: XCTestCase {
                 core.checkLatency()
             }
             core.drainPolicyQueue()
-            XCTAssertFalse(core.enforcement.isActive)
-            XCTAssertFalse(try core.store.settings().enforcementEnabled, "the trip is saved as the setting")
+            XCTAssertTrue(core.enforcement.isActive)
+            XCTAssertTrue(try core.store.settings().enforcementEnabled)
         }
         let (core, _) = try r1Core(dir)
-        XCTAssertFalse(core.enforcement.isActive, "a restart does not silently turn enforcement back on")
-        XCTAssertTrue(core.enforcement.inactiveReasons.contains(.disabledByUser))
-        XCTAssertNotNil(core.status().latencyTripReason, "the reason is still shown")
-        XCTAssertNil(errorCode(strictHandler(core).handle(.setEnforcement(enabled: true), peer: agentPeer)))
-        core.drainPolicyQueue()
-        XCTAssertTrue(core.enforcement.isActive)
+        XCTAssertTrue(core.enforcement.isActive, "on after the restart, as set")
         XCTAssertNil(core.status().latencyTripReason)
-        XCTAssertNil(try core.store.value(forKey: DaemonCore.tripKey))
+        XCTAssertNil(core.status().uncleanStop, "no marker: a clean history")
     }
 
-    // native-es-1 (b): death while AUTH was subscribed.
-    func testAuthArmedMarkerLeavesEnforcementOffOnlyIfItWasOn() throws {
+    // native-es-1 (b): death while AUTH was subscribed. Ask mode: reported, enforcement as set.
+    func testAuthArmedMarkerIsReportedAndLeavesEnforcementAsSet() throws {
         let dir = TempDir()
         do { _ = try r1Core(dir) }
         XCTAssertTrue(FileManager.default.createFile(atPath: dir.path("data/auth-armed"), contents: Data()))
         let (core, _) = try r1Core(dir)
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path("data/auth-armed")), "the marker is consumed")
-        XCTAssertNil(core.status().latencyTripReason, "enforcement was off: nothing to report")
+        XCTAssertFalse(core.currentSettings.enforcementEnabled, "it was off and stays off")
+        XCTAssertNil(core.status().latencyTripReason)
+        XCTAssertNotNil(core.status().uncleanStop)
     }
 
     // spec-11
@@ -585,7 +581,7 @@ final class EnforcementRound1Tests: XCTestCase {
         let box = ThreadBox()
         core.onPolicyChanged = { box.record(Thread.current) }
         let caller = Thread.current
-        core.enforcement.tripLatency("deadline missed")  // what the ES callback thread does on a miss
+        core.enforcement.setKillSwitchFilePresent(true)  // what the kill-switch watcher's thread does
         core.drainPolicyQueue()
         let threads = box.threads
         XCTAssertFalse(threads.isEmpty)
@@ -879,21 +875,22 @@ private func countRows(_ core: DaemonCore, _ table: String) throws -> Int64 {
 }
 
 final class Round1FollowUpDaemonTests: XCTestCase {
-    // native-es-1 follow-up: the trip is persisted from an observer queued on the policy queue. If the user
-    // turned enforcement on again before it ran, persisting then switched their explicit "on" back off.
-    func testALateTripObserverDoesNotUndoAnExplicitReenable() throws {
+    // native-es-1 follow-up (was: a late trip observer must not undo an explicit "on"). Ask mode: there
+    // is no trip observer; misses reported from another queue, as the native source does, change nothing.
+    func testMissesReportedFromAQueueNeverTouchTheSetting() throws {
         let dir = TempDir()
         let (core, _) = try r1Core(dir)
         try enableEnforcement(core)
-        core.enforcement.tripLatency("deadline missed")
+        let q = DispatchQueue(label: "test.report")
+        DispatchQueue.concurrentPerform(iterations: 20) { _ in
+            q.sync { core.enforcer.recordResponse(micros: 10, missedDeadline: true) }
+        }
+        core.checkLatency()
         core.drainPolicyQueue()
-        XCTAssertFalse(core.currentSettings.enforcementEnabled, "the trip is persisted by turning the setting off")
-        try enableEnforcement(core)
-        XCTAssertTrue(core.enforcement.isActive)
-        core.persistTrip("deadline missed")  // the observer of the first trip, running late
         XCTAssertTrue(core.enforcement.isActive)
         XCTAssertTrue(core.currentSettings.enforcementEnabled)
         XCTAssertTrue(try core.store.settings().enforcementEnabled)
+        XCTAssertEqual(core.status().latency.deadlineMisses, 20)
     }
 
     // rules-1 follow-up: the catalog is a privileged setting, but a "strengthening" path rule from any

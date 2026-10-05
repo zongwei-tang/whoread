@@ -43,7 +43,8 @@ public struct DaemonConfiguration: Sendable {
     /// The default catalog the user's copy was made from, so upgrades can merge new defaults in.
     public var userCatalogBasePath: String { (dataDirectory as NSString).appendingPathComponent("catalog.base.json") }
     /// Exists while the native source has AUTH events subscribed. Found at start = the previous
-    /// instance died while enforcing (the kernel kills a client that misses an AUTH deadline).
+    /// instance died while enforcing (the kernel kills a client that misses an AUTH deadline). It is
+    /// reported (`DaemonStatus.uncleanStop`); enforcement stays as the user set it.
     public var authArmedMarkerPath: String { (dataDirectory as NSString).appendingPathComponent("auth-armed") }
     public var lockPath: String { (dataDirectory as NSString).appendingPathComponent("daemon.lock") }
 }
@@ -78,6 +79,8 @@ public final class DaemonCore: @unchecked Sendable {
     public let live: LiveBuffer
     public let pipeline: EventPipeline
     public let enforcer: Enforcer
+    /// Ask mode: held accesses and open questions.
+    public let askBroker: AskBroker
     public private(set) var source: EventSource!
     public let startedAt = Date()
 
@@ -87,8 +90,8 @@ public final class DaemonCore: @unchecked Sendable {
     /// concurrently). Recursive: `apply` calls `setRules`, `upsert` may update the catalog.
     private let mutation = NSRecursiveLock()
     /// Enforcement observers run here, never on the thread that flipped the state (that can be the
-    /// ES callback thread, which must not do IO).
-    private let policyQueue = DispatchQueue(label: "whoread.policy")
+    /// ES callback thread, which must not do IO). Internal: tests suspend it.
+    let policyQueue = DispatchQueue(label: "whoread.policy")
     private var settings: Settings
     private var _data: DefaultData
     /// `_data.catalog` with owner identities resolved on this Mac. Never persisted: writing it
@@ -100,10 +103,20 @@ public final class DaemonCore: @unchecked Sendable {
     private var lastRetention = Date.distantPast
     private var lastRediscovery = Date()
     private var rulesLoadError: String?
+    /// The previous instance stopped while enforcing; kept (and stored) until the next clean stop.
+    private var uncleanStopNote: String?
+    private var lastSlowWarning = Date.distantPast
 
-    static let tripKey = "enforcement_trip_reason"
+    /// Older versions switched enforcement off on a latency trip and kept the reason here. There are
+    /// no trips any more (ask mode); a leftover value is removed at start.
+    static let legacyTripKey = "enforcement_trip_reason"
+    static let uncleanStopKey = "unclean_stop"
     /// Marks rules made by "block from now on" (the app localizes their names).
     public static let blockFromNowOnTemplate = "block-from-now-on"
+    /// Marks allow rules made from answers to ask-mode questions ("allow once", "always allow").
+    public static let askAnswerTemplate = RuleTemplates.askAnswer
+    /// How long an "allow once" answer's allow rule lives.
+    static let allowOnceDuration: TimeInterval = 600
     /// Limits on what a (possibly unprivileged) client can store; rule evaluation is linear in them.
     static let maxRules = 512
     static let maxExceptions = 256
@@ -160,7 +173,7 @@ public final class DaemonCore: @unchecked Sendable {
         }
         _data = data
 
-        var settings = (try? store.settings()) ?? Settings()
+        let settings = (try? store.settings()) ?? Settings()
         _homes = config.homeDirectories ?? HomeDirectories.discover()
         normalizerBox = LockedBox(PathNormalizer(homeDirectories: _homes))
         detector = AgentDetector(catalog: data.agents)
@@ -211,29 +224,37 @@ public final class DaemonCore: @unchecked Sendable {
         // eslogger suppresses its own events; the daemon is the only process ignored here.
         analyzer.ignoredPIDs = [getpid()]
 
-        // The previous instance died while AUTH events were subscribed: most likely the kernel killed it
-        // for a missed deadline. Coming back with enforcement on would repeat that, so leave it off.
+        // The previous instance died while AUTH events were subscribed: the kernel killed it for a missed
+        // deadline, it crashed, or the Mac lost power. Enforcement is never switched off automatically
+        // (ask mode): it stays as the user set it, and the stop is reported until the next clean stop.
+        var unclean = (try? store.value(forKey: DaemonCore.uncleanStopKey))?.flatMap { String(data: $0, encoding: .utf8) }
         if !config.inMemoryStore, FileManager.default.fileExists(atPath: config.authArmedMarkerPath) {
             try? FileManager.default.removeItem(atPath: config.authArmedMarkerPath)
-            if settings.enforcementEnabled {
-                settings.enforcementEnabled = false
-                try? store.saveSettings(settings)
-                try? store.setValue(Data("the previous daemon stopped while enforcing (likely a missed AUTH deadline)".utf8),
-                                    forKey: DaemonCore.tripKey)
-                Log.error("enforcement left off: the previous instance terminated while enforcing")
-            }
+            let note = "the previous daemon stopped while enforcing (killed for a missed AUTH deadline, a crash or a power loss); "
+                + "found at start \(ISO8601DateFormatter().string(from: now))"
+            unclean = note
+            try? store.setValue(Data(note.utf8), forKey: DaemonCore.uncleanStopKey)
+            Log.error("\(note); enforcement stays \(settings.enforcementEnabled ? "on" : "off") as set")
+        }
+        uncleanStopNote = unclean
+        if (try? store.value(forKey: DaemonCore.legacyTripKey)) != nil {
+            try? store.setValue(nil, forKey: DaemonCore.legacyTripKey)
         }
         self.settings = settings
 
-        // p99 must stay over the threshold for 3 consecutive checks (with fresh slow responses in each),
-        // so a burst that already ended cannot switch enforcement off; a missed deadline trips at once.
-        latency = LatencyMonitor(p99ThresholdMicros: settings.latencyP99ThresholdMs * 1000, breachesToTrip: 3)
+        // Statistics, and a log warning when p99 stays over the threshold for 3 consecutive checks.
+        latency = LatencyMonitor(p99ThresholdMicros: settings.latencyP99ThresholdMs * 1000, breachesToWarn: 3)
         enforcement = EnforcementState(userEnabled: settings.enforcementEnabled, sourceCanEnforce: false)
         if !rulesOK { enforcement.setRulesLoaded(false) }
         writer = EventWriter(store: store)
         live = LiveBuffer()
         pipeline = EventPipeline(analyzer: analyzer, writer: writer, live: live)
-        enforcer = Enforcer(analyzer: analyzer, state: enforcement, latency: latency)
+        // Question ids never repeat across daemon instances: an answer meant for a question of the
+        // previous instance (an old banner, a typed id) must not land on a new question.
+        askBroker = AskBroker(firstID: Int64(Date().timeIntervalSince1970 * 1000))
+        enforcer = Enforcer(analyzer: analyzer, state: enforcement, latency: latency, askBroker: askBroker)
+        enforcer.trustApplePrograms = settings.trustApplePrograms
+        analyzer.trustApplePrograms = settings.trustApplePrograms
 
         pipeline.isPaused = { [weak self] in self?.currentSettings.monitoringPaused ?? false }
         pipeline.onAlert = { [weak self] update in self?.alertRaised(update) }
@@ -248,14 +269,18 @@ public final class DaemonCore: @unchecked Sendable {
             guard let self else { return }
             self.policyQueue.async {
                 Log.info("enforcement is now \(active ? "ACTIVE" : "inactive") \(self.enforcement.inactiveReasons.map(\.rawValue))")
+                // Checked again here: an "off" queued just before an "on" must not let through what
+                // was held under the new "on".
+                if !active && !self.enforcement.isActive {
+                    // What enforcement off means for everything else: held accesses go through now
+                    // instead of being denied when their budget runs out. Their questions are dropped
+                    // (nothing can be held any more); the stored `ask` alerts remain answerable.
+                    let released = self.askBroker.resolveMatching(.allow) { _ in true }
+                    if !released.isEmpty { Log.info("enforcement off: \(released.count) open questions released") }
+                }
                 self.source.enforcementChanged(active: active)
                 self.policyChanged()
             }
-        }
-        // Also when the trip happens while enforcement is already inactive (kill-switch window).
-        enforcement.onTrip { [weak self] reason in
-            guard let self else { return }
-            self.policyQueue.async { self.persistTrip(reason) }
         }
     }
 
@@ -304,6 +329,235 @@ public final class DaemonCore: @unchecked Sendable {
     func policyChanged() {
         source?.policyChanged()
         onPolicyChanged?()
+    }
+
+    // MARK: - Ask mode (docs/ASK_MODE.md)
+
+    /// Questions waiting for an answer. Marks an answering client present.
+    public func asks(peer: IPCPeer) -> [AskRequest] {
+        askBroker.noteAnsweringClient()
+        // Bounded reply: questions holding an access first (earliest deadline on top), then the oldest.
+        // A flood of distinct questions must not make the reply huge; the rest stay answerable as alerts.
+        let all = askBroker.pending()
+        guard all.count > DaemonCore.maxListedAsks else { return all }
+        let holding = all.filter { $0.holding > 0 }.sorted { ($0.answerBy ?? .distantFuture) < ($1.answerBy ?? .distantFuture) }
+        let rest = all.filter { $0.holding == 0 }
+        return Array((holding + rest).prefix(DaemonCore.maxListedAsks))
+    }
+
+    static let maxListedAsks = 200
+
+    /// A settings update whose only change is turning "trust Apple programs" off (strengthening).
+    static func onlyTurnsOffAppleTrust(_ new: Settings, current: Settings) -> Bool {
+        guard current.trustApplePrograms, !new.trustApplePrograms else { return false }
+        var c = current
+        c.trustApplePrograms = false
+        // Enforcement and pause are taken from the current settings by updateSettings anyway.
+        var n = new
+        n.enforcementEnabled = c.enforcementEnabled
+        n.monitoringPaused = c.monitoringPaused
+        return n == c
+    }
+
+    /// Answers a question; allowing needs `privileged`. Saves the answer as a rule (or setting) and
+    /// releases every held access with that key.
+    public func answerAsk(id: Int64, action: AlertAction, peer: IPCPeer, privileged: Bool) throws {
+        mutation.lock(); defer { mutation.unlock() }
+        guard let request = askBroker.request(id: id) else { throw IPCError(.notFound, "no question #\(id) (answered or expired)") }
+        let scope = AnswerScope(request)
+        if action == .keepBlocking {
+            // "Deny": this question only; nothing is saved.
+            askBroker.resolve(id: id, answer: .deny)
+        } else {
+            try answer(scope, action: action, peer: peer, privileged: privileged)
+        }
+        // An unprivileged answer (deny, block from now on) leaves the alerts open, as `apply` does.
+        if privileged { try resolveAskAlerts(answering: scope, action: action) }
+        Log.info("question #\(id): \(action.rawValue) by pid \(peer.pid.map(String.init) ?? "?") (uid \(peer.euid.map(String.init) ?? "?"))")
+    }
+
+    /// What an answer applies to: from a question, or from an alert (Alerts tab, monitor-only mode).
+    struct AnswerScope {
+        var key: AskKey
+        var responsible: ResponsibleEntity
+        var appleProgram: Bool
+
+        init(_ r: AskRequest) {
+            key = r.key
+            responsible = r.responsible
+            appleProgram = r.appleProgram
+        }
+
+        init(_ a: Alert) {
+            key = AskKey(responsibleKey: a.responsible.key, categoryID: a.categoryID, access: a.accesses,
+                         chainAgents: Array(Set(a.chain.compactMap(\.agentID))))
+            responsible = a.responsible
+            appleProgram = a.appleProgram
+        }
+
+        /// Unsigned binaries are pinned to their cdhash (brief §5: path + cdhash).
+        var cdhashPin: String? { responsible.kind == .binary && responsible.teamID == nil ? responsible.cdhash : nil }
+
+        var ruleAccess: RuleAccess { key.access == .read ? .read : (key.access == .write ? .write : .any) }
+
+        /// An allow rule saved from this answer covers `other` (same subject and pins, category, an
+        /// access it includes, only agents it names: Rule.chainAgents).
+        func allowCovers(_ other: AnswerScope) -> Bool {
+            other.key.responsibleKey == key.responsibleKey && other.key.categoryID == key.categoryID
+                && !other.key.access.isEmpty && other.key.access.isSubset(of: key.access)
+                && Set(other.key.chainAgents).isSubset(of: Set(key.chainAgents))
+                && (responsible.teamID == nil || other.responsible.teamID == responsible.teamID)
+                && (cdhashPin == nil || other.responsible.cdhash?.lowercased() == cdhashPin?.lowercased())
+        }
+
+        /// Questions and alerts the answer `action` settles.
+        func settles(_ other: AnswerScope, action: AlertAction) -> Bool {
+            switch action {
+            case .allowOnce, .alwaysAllow, .keepBlocking: return allowCovers(other)
+            // The deny rule's subject: the app (or agent) on that category, whatever the access or chain.
+            case .blockFromNowOn: return other.key.responsibleKey == key.responsibleKey && other.key.categoryID == key.categoryID
+            case .trustApplePrograms: return other.appleProgram && other.key.chainAgents.isEmpty
+            case .ignore: return false
+            }
+        }
+    }
+
+    /// The answers table of docs/ASK_MODE.md: saves the answer (rule or setting), then releases the
+    /// held accesses of every open question it settles. Allowing needs `privileged`.
+    private func answer(_ scope: AnswerScope, action: AlertAction, peer: IPCPeer, privileged: Bool, now: Date = Date()) throws {
+        mutation.lock(); defer { mutation.unlock() }
+        switch action {
+        case .allowOnce, .alwaysAllow, .trustApplePrograms:
+            guard privileged else {
+                throw IPCError(.notPermitted, "allowing weakens protection: run it with sudo, or use the WhoRead app")
+            }
+        case .keepBlocking, .blockFromNowOn, .ignore:
+            break
+        }
+        switch action {
+        case .allowOnce, .alwaysAllow:
+            do {
+                try addAnswerRule(scope, once: action == .allowOnce, peer: peer, now: now)
+            } catch let e as IPCError where e.code == .internalError {
+                // Applied in memory but not saved (disk full): the rule already decides the next access,
+                // so release the held ones too instead of letting them time out; then report it.
+                askBroker.resolveMatching(.allow) { scope.settles(AnswerScope($0), action: action) }
+                throw e
+            }
+            askBroker.resolveMatching(.allow) { scope.settles(AnswerScope($0), action: action) }
+        case .trustApplePrograms:
+            guard scope.appleProgram && scope.key.chainAgents.isEmpty else {
+                throw IPCError(.invalid, "\"allow all Apple programs\" applies to Apple programs in system locations with no AI agent in their chain")
+            }
+            try mutateSettings(peer: peer) { $0.trustApplePrograms = true }
+            releaseTrustedApple()
+        case .keepBlocking:
+            askBroker.resolveMatching(.deny) { scope.settles(AnswerScope($0), action: action) }
+        case .blockFromNowOn:
+            try addBlockRule(scope, peer: peer, privileged: privileged, now: now)
+            askBroker.resolveMatching(.deny) { scope.settles(AnswerScope($0), action: action) }
+        case .ignore:
+            throw IPCError(.invalid, "\"ignore\" is not an answer to a question")
+        }
+    }
+
+    /// The allow rule for "allow once" (10 minutes) or "always allow": the app or agent, the category,
+    /// the access, scoped to the AI agents that were in the chain.
+    private func addAnswerRule(_ scope: AnswerScope, once: Bool, peer: IPCPeer, now: Date) throws {
+        // An alert about metadata-only opens (neither read nor write): nothing to allow, and the rule
+        // would be `.any` (read and write).
+        guard !scope.key.access.isEmpty else { return }
+        let categoryID = scope.key.categoryID
+        guard data.catalog.category(categoryID) != nil else {
+            throw IPCError(.invalid, "category \(categoryID) is no longer in the catalog")
+        }
+        let r = scope.responsible
+        let subject = RuleSubject.responsible(key: scope.key.responsibleKey, teamID: r.teamID, cdhash: scope.cdhashPin)
+        let categoryName = analyzer.classifier.spec(categoryID)?.name.en ?? categoryID
+        let verb = scope.ruleAccess == .read ? "read" : (scope.ruleAccess == .write ? "write" : "use")
+        let rule = Rule(
+            name: DaemonCore.truncated("Allow \(r.displayName) to \(verb) \(categoryName)\(once ? " (10 minutes)" : "")",
+                                       maxBytes: DaemonCore.maxNameBytes),
+            enabled: true, target: .category(categoryID), subject: subject, access: scope.ruleAccess, action: .allow,
+            expiresAt: once ? now.addingTimeInterval(DaemonCore.allowOnceDuration) : nil, createdAt: now,
+            template: DaemonCore.askAnswerTemplate, chainAgents: scope.key.chainAgents)
+        try DaemonCore.validate(rule)
+        func sameScope(_ x: Rule) -> Bool {
+            x.template == DaemonCore.askAnswerTemplate && x.action == .allow && x.target == rule.target && x.subject == rule.subject
+                && x.access == rule.access && x.chainAgents == rule.chainAgents
+        }
+        try saveRuleChange(peer: peer, privileged: true) { list in
+            // Answers expire: drop the dead ones, and the earlier "allow once" this one replaces.
+            list.removeAll { $0.template == DaemonCore.askAnswerTemplate && ($0.expiresAt.map { $0 <= now } ?? false) }
+            if once {
+                list.removeAll { sameScope($0) && $0.expiresAt != nil }
+            } else if list.contains(where: { sameScope($0) && $0.expiresAt == nil && $0.enabled }) {
+                return
+            }
+            guard list.count < DaemonCore.maxRules else { throw IPCError(.invalid, "too many rules") }
+            list.append(rule)
+        }
+    }
+
+    /// "Block from now on": an enforced deny rule for the app (or agent) on the category. Owners keep
+    /// working: blocking the terminal an alert was charged to must not break ssh/git.
+    private func addBlockRule(_ scope: AnswerScope, peer: IPCPeer, privileged: Bool, now: Date) throws {
+        let categoryID = scope.key.categoryID
+        // As upsert(rule:) checks: a rule on a removed category would make every later catalog edit fail.
+        guard data.catalog.category(categoryID) != nil else {
+            throw IPCError(.invalid, "category \(categoryID) is no longer in the catalog")
+        }
+        let r = scope.responsible
+        let categoryName = analyzer.classifier.spec(categoryID)?.name.en ?? categoryID
+        let blockSubject = RuleSubject.responsible(key: scope.key.responsibleKey, teamID: r.teamID, cdhash: scope.cdhashPin,
+                                                   exceptOwners: true)
+        let exists = rules.rules.contains {
+            $0.action == .deny && $0.target == .category(categoryID) && $0.subject == blockSubject && $0.enabled
+        }
+        guard !exists else { return }
+        let rule = Rule(
+            name: DaemonCore.truncated("Block \(r.displayName) from \(categoryName)", maxBytes: DaemonCore.maxNameBytes),
+            enabled: true, enforce: true,
+            target: .category(categoryID), subject: blockSubject, access: .any, action: .deny,
+            includePlatformBinaries: true, createdAt: now, template: DaemonCore.blockFromNowOnTemplate)
+        // A rule that validate() refuses could not be edited later (only deleted).
+        try DaemonCore.validate(rule)
+        try saveRuleChange(peer: peer, privileged: privileged) { list in
+            guard list.count < DaemonCore.maxRules else { throw IPCError(.invalid, "too many rules") }
+            list.append(rule)
+        }
+        if !enforcement.isActive {
+            Log.info("rule \(rule.id) added; it blocks only while enforcement is on (currently off)")
+        }
+    }
+
+    /// Marks the open `ask` alerts an answer settles as resolved (privileged answers only).
+    private func resolveAskAlerts(answering scope: AnswerScope, action: AlertAction, except: Int64? = nil) throws {
+        writer.flush()
+        let open = try store.alerts(AlertQuery(statuses: [.unread, .read], limit: 10_000))
+        let settled = open.filter { $0.kind == .ask && $0.id != except && scope.settles(AnswerScope($0), action: action) }
+        guard !settled.isEmpty else { return }
+        let updated = settled.map { a -> Alert in
+            var a = a
+            a.status = .resolved
+            a.resolution = action
+            return a
+        }
+        try store.upsert(updated)
+        writer.enqueue(alerts: updated)
+        for a in updated { coalescer.updateStatus(alertID: a.id, status: .resolved, resolution: action) }
+    }
+
+    /// Releases the held accesses "trust Apple programs" now allows (the setting was just turned on).
+    private func releaseTrustedApple() {
+        let released = askBroker.resolveMatching(.allow) { $0.appleProgram && $0.key.chainAgents.isEmpty }
+        if !released.isEmpty { Log.info("trust Apple programs: \(released.count) open questions allowed") }
+    }
+
+    /// The daemon stopped cleanly: an earlier unclean stop is no longer reported.
+    public func noteCleanStop() {
+        lock.lock(); uncleanStopNote = nil; lock.unlock()
+        try? store.setValue(nil, forKey: DaemonCore.uncleanStopKey)
     }
 
     /// Waits until enforcement observers queued so far have run (tests).
@@ -401,62 +655,57 @@ public final class DaemonCore: @unchecked Sendable {
 
     /// Acts on an alert. `privileged`: root or the signed app. An unprivileged "block from now on"
     /// adds the rule but leaves the alert open, so an agent cannot use it to silence its own alert.
+    /// Allowing on an alert saves the same allow rule an answer to a question does (otherwise, with
+    /// enforcement on, the next access would be asked again); an `ask` alert is answered like its
+    /// question.
     public func apply(action: AlertAction, toAlert id: Int64, peer: IPCPeer, privileged: Bool = true) throws {
         mutation.lock(); defer { mutation.unlock() }
         writer.flush()
         guard var alert = try store.alert(id: id) else { throw IPCError(.notFound, "no alert #\(id)") }
         let now = Date()
-        // Unsigned binaries are pinned to their cdhash (brief §5: path + cdhash).
+        let scope = AnswerScope(alert)
         let r = alert.responsible
-        let pin = r.kind == .binary && r.teamID == nil ? r.cdhash : nil
-        let subject = RuleSubject.responsible(key: r.key, teamID: r.teamID, cdhash: pin)
-        let chainAgents = Array(Set(alert.chain.compactMap(\.agentID))).sorted()
-        let access: RuleAccess = alert.accesses == .read ? .read : (alert.accesses == .write ? .write : .any)
-        let categoryName = analyzer.classifier.spec(alert.categoryID)?.name.en ?? alert.categoryID
+        let subject = RuleSubject.responsible(key: r.key, teamID: r.teamID, cdhash: scope.cdhashPin)
+        let chainAgents = scope.key.chainAgents
+        let access = scope.ruleAccess
+        // The action answered as a question would be (rule, setting, held accesses released or denied).
+        var answered = true
         switch action {
         case .allowOnce:
-            guard let ruleID = alert.ruleID, alert.kind == .blocked else {
-                throw IPCError(.invalid, "\"allow once\" applies to blocked accesses only")
+            guard alert.kind == .blocked || alert.kind == .ask else {
+                throw IPCError(.invalid, "\"allow once\" applies to blocked accesses and questions only")
             }
-            // firstPath is the access that made the alert "blocked" (the coalescer moves it on escalation).
-            try addException(toRule: ruleID, RuleException(
-                subject: subject, pathPrefix: alert.firstPath, categoryID: alert.categoryID, access: access,
-                chainAgents: chainAgents, expiresAt: now.addingTimeInterval(600), remainingUses: 1, createdAt: now))
+            // A block without a rule is an unanswered question: the allow rule alone lets it through.
+            if alert.kind == .blocked, let ruleID = alert.ruleID {
+                guard privileged else { throw IPCError(.notPermitted, "allowing weakens protection: run it with sudo, or use the WhoRead app") }
+                // firstPath is the access that made the alert "blocked" (the coalescer moves it on escalation).
+                try addException(toRule: ruleID, RuleException(
+                    subject: subject, pathPrefix: alert.firstPath, categoryID: alert.categoryID, access: access,
+                    chainAgents: chainAgents, expiresAt: now.addingTimeInterval(600), remainingUses: 1, createdAt: now))
+                // A rule's block: the path-scoped, one-use exception is the whole answer. A category-wide
+                // 10-minute allow rule would also let through files the deny rule does not cover, which
+                // would otherwise be asked. (A rule denial never has an open question to release.)
+                answered = false
+            } else {
+                try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
+            }
         case .alwaysAllow:
+            guard privileged else { throw IPCError(.notPermitted, "allowing weakens protection: run it with sudo, or use the WhoRead app") }
             if let ruleID = alert.ruleID, alert.kind == .blocked || alert.kind == .wouldBlock {
                 try addException(toRule: ruleID, RuleException(subject: subject, categoryID: alert.categoryID, access: access,
                                                                chainAgents: chainAgents, createdAt: now))
             }
+            try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
             baseline.approve(responsibleKey: r.key, categoryID: alert.categoryID, at: now)
             persistBaseline()
-        case .blockFromNowOn:
-            // As upsert(rule:) checks: a rule on a removed category would make every later catalog edit fail.
-            guard data.catalog.category(alert.categoryID) != nil else {
-                throw IPCError(.invalid, "category \(alert.categoryID) is no longer in the catalog")
-            }
-            // Owners keep working: blocking the terminal an alert was charged to must not break ssh/git.
-            let blockSubject = RuleSubject.responsible(key: r.key, teamID: r.teamID, cdhash: pin, exceptOwners: true)
-            let exists = rules.rules.contains {
-                $0.action == .deny && $0.target == .category(alert.categoryID) && $0.subject == blockSubject && $0.enabled
-            }
-            if !exists {
-                let rule = Rule(
-                    name: DaemonCore.truncated("Block \(r.displayName) from \(categoryName)", maxBytes: DaemonCore.maxNameBytes),
-                    enabled: true, enforce: true,
-                    target: .category(alert.categoryID), subject: blockSubject, access: .any, action: .deny,
-                    includePlatformBinaries: true, createdAt: now, template: DaemonCore.blockFromNowOnTemplate)
-                // A rule that validate() refuses could not be edited later (only deleted).
-                try DaemonCore.validate(rule)
-                try saveRuleChange(peer: peer, privileged: privileged) { list in
-                    guard list.count < DaemonCore.maxRules else { throw IPCError(.invalid, "too many rules") }
-                    list.append(rule)
-                }
-                if !enforcement.isActive {
-                    Log.info("rule \(rule.id) added; it blocks only while enforcement is on (currently off)")
-                }
-            }
-        case .keepBlocking, .ignore:
-            break
+        case .blockFromNowOn, .trustApplePrograms:
+            try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
+        case .keepBlocking:
+            // On a question: "deny" (the held accesses it covers are denied now; nothing is saved).
+            answered = alert.kind == .ask
+            if answered { try answer(scope, action: action, peer: peer, privileged: privileged, now: now) }
+        case .ignore:
+            answered = false
         }
         if privileged {
             alert.status = .resolved
@@ -465,6 +714,7 @@ public final class DaemonCore: @unchecked Sendable {
             // Replaces a stale snapshot the writer may have re-queued after a failed flush.
             writer.enqueue(alerts: [alert])
             coalescer.updateStatus(alertID: id, status: .resolved, resolution: action)
+            if answered { try resolveAskAlerts(answering: scope, action: action, except: id) }
         }
         Log.info("alert #\(id): \(action.rawValue) by pid \(peer.pid.map(String.init) ?? "?") (uid \(peer.euid.map(String.init) ?? "?"))")
     }
@@ -497,7 +747,7 @@ public final class DaemonCore: @unchecked Sendable {
     // MARK: - Rules
 
     /// Bounds on rule contents: rule evaluation runs on the AUTH path, so one oversized rule from an
-    /// unprivileged client must not be able to slow it down (and trip enforcement off).
+    /// unprivileged client must not be able to slow it down.
     static func validate(_ r: Rule) throws {
         func check(_ ok: Bool, _ what: String) throws { if !ok { throw IPCError(.invalid, "rule \(what) is too long or invalid") } }
         let idChars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -527,6 +777,7 @@ public final class DaemonCore: @unchecked Sendable {
             }
         }
         try checkSubject(r.subject)
+        try check((r.chainAgents?.count ?? 0) <= 32 && (r.chainAgents ?? []).allSatisfy { $0.utf8.count <= 64 }, "chain agents")
         try check(r.exceptions.count <= maxExceptions, "exception list")
         for e in r.exceptions {
             try checkSubject(e.subject)
@@ -740,7 +991,8 @@ public final class DaemonCore: @unchecked Sendable {
     // MARK: - Settings & catalog
 
     /// Applies settings in memory first (a kill switch must work even if the disk is full), then
-    /// persists. `reenable`: an explicit "enforcement on", which also clears a latency trip.
+    /// persists. `reenable` (an explicit "enforcement on") is kept for callers; there are no latency
+    /// trips to clear any more.
     public func update(settings new: Settings, peer: IPCPeer, reenable: Bool = false) throws {
         mutation.lock(); defer { mutation.unlock() }
         let s = new.validated()
@@ -752,18 +1004,16 @@ public final class DaemonCore: @unchecked Sendable {
         coalescer.window = s.coalesceMinutes * 60
         analyzer.readdirEnabled = s.readdirEnabled
         latency.p99ThresholdMicros = s.latencyP99ThresholdMs * 1000
+        enforcer.trustApplePrograms = s.trustApplePrograms
+        analyzer.trustApplePrograms = s.trustApplePrograms
+        if s.trustApplePrograms && !old.trustApplePrograms { releaseTrustedApple() }
         if old.projectRoots != s.projectRoots || old.readdirEnabled != s.readdirEnabled {
             recompileClassifier()
         }
-        // Compare with the live state, not the previous settings: a trip or a failed save may have left
-        // them apart.
-        let tripped = enforcement.latencyTripReason != nil
-        if s.enforcementEnabled != enforcement.userEnabledSetting || (reenable && s.enforcementEnabled && tripped) {
-            if s.enforcementEnabled {
-                // LatencyMonitor keeps its own trip; without the reset it would trip again within a second.
-                latency.reset()
-                try? store.setValue(nil, forKey: DaemonCore.tripKey)
-            }
+        // Compare with the live state, not the previous settings: a failed save may have left them apart.
+        if s.enforcementEnabled != enforcement.userEnabledSetting {
+            // A fresh latency window for the new enforcement period.
+            if s.enforcementEnabled { latency.reset() }
             enforcement.setUserEnabled(s.enforcementEnabled)
             Log.info("enforcement switched \(s.enforcementEnabled ? "on" : "off") by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         }
@@ -793,24 +1043,6 @@ public final class DaemonCore: @unchecked Sendable {
         var s = currentSettings
         f(&s)
         try update(settings: s, peer: peer, reenable: reenable)
-    }
-
-    /// A latency trip (deadline miss or p99) is kept across restarts by turning the setting off; the
-    /// user's next "enforcement on" clears it.
-    func persistTrip(_ reason: String) {
-        mutation.lock(); defer { mutation.unlock() }
-        // Queued from the observer: the user may have turned enforcement on again (which clears the
-        // trip) before this ran. Persisting then would switch their explicit "on" back off.
-        guard enforcement.latencyTripReason != nil else { return }
-        lock.lock()
-        settings.enforcementEnabled = false
-        let s = settings
-        lock.unlock()
-        do { try store.saveSettings(s) } catch { Log.error("could not save the enforcement trip: \(error)") }
-        try? store.setValue(Data(reason.utf8), forKey: DaemonCore.tripKey)
-        // Already inactive (tripped), so this fires no observer; a later "on" is now a change.
-        enforcement.setUserEnabled(false)
-        Log.error("enforcement turned off until you turn it on again: \(reason)")
     }
 
     public func update(catalog: Catalog?, peer: IPCPeer) throws {
@@ -995,7 +1227,11 @@ public final class DaemonCore: @unchecked Sendable {
         guard !failed else { return }
         let consumed = rules.takeConsumed()
         let pruned = rules.pruneDeadExceptions(at: now)
-        guard consumed || pruned else { return }
+        // Expired "allow once" answers can never match again.
+        func expiredAnswer(_ r: Rule) -> Bool { r.template == DaemonCore.askAnswerTemplate && (r.expiresAt.map { $0 <= now } ?? false) }
+        let expired = rules.rules.contains(where: expiredAnswer)
+        if expired { rules.mutate { $0.removeAll(where: expiredAnswer) } }
+        guard consumed || pruned || expired else { return }
         do {
             try store.saveRules(rules.rules)
         } catch {
@@ -1008,6 +1244,7 @@ public final class DaemonCore: @unchecked Sendable {
     public func maintenance(now: Date = Date()) {
         tree.prune(now: now)
         coalescer.expire(now: now)
+        askBroker.expire()
         persistBaseline()
         if now.timeIntervalSince(lastRetention) > 3600 {
             lastRetention = now
@@ -1029,13 +1266,19 @@ public final class DaemonCore: @unchecked Sendable {
         saveConsumableRules()
     }
 
-    /// Latency check (every second while enforcing).
-    public func checkLatency() {
+    /// Latency check (every second): statistics, and a log warning (at most once a minute) while p99
+    /// stays over the threshold. Never switches enforcement off (ask mode).
+    public func checkLatency(now: Date = Date()) {
         let stats = latency.evaluate()
-        if let reason = latency.trippedReason, enforcement.latencyTripReason == nil, enforcement.userEnabledSetting {
-            enforcement.tripLatency(reason)
-            Log.error("enforcement disabled automatically: \(reason) (p50 \(Int(stats.p50Micros)) µs, p99 \(Int(stats.p99Micros)) µs)")
-        }
+        guard latency.isSlow, enforcement.isActive else { return }
+        lock.lock()
+        let due = now.timeIntervalSince(lastSlowWarning) >= 60
+        if due { lastSlowWarning = now }
+        lock.unlock()
+        guard due else { return }
+        Log.warning(String(format: "AUTH responses are slow: p99 %.1f ms over %.1f ms (p50 %.1f ms, %d deadline misses); "
+                           + "enforcement stays on", stats.p99Micros / 1000, latency.p99ThresholdMicros / 1000,
+                           stats.p50Micros / 1000, stats.deadlineMisses))
     }
 
     public func status() -> DaemonStatus {
@@ -1044,7 +1287,9 @@ public final class DaemonCore: @unchecked Sendable {
         let stats = pipeline.stats
         let counts = (try? store.counts()) ?? StoreCounts(events: 0, aggregatedDays: 0, alerts: 0, unreadAlerts: 0)
         let learning = baseline.isLearning(at: now)
-        let enforcing = enforcement.isActive && rules.rules.contains { $0.isLive(at: now) && $0.action == .deny && $0.enforce }
+        // Ask mode: with enforcement active, undecided accesses are held and asked, so it enforces even
+        // without a deny rule.
+        let enforcing = enforcement.isActive
         let mode: DaemonMode
         if !stats.source.running && stats.source.error != nil && !stats.source.finished {
             mode = .error
@@ -1057,21 +1302,23 @@ public final class DaemonCore: @unchecked Sendable {
         } else {
             mode = .monitoring
         }
-        lock.lock(); let rulesError = rulesLoadError; lock.unlock()
-        // A trip that was persisted (or found at start) stays visible after the in-memory one is gone.
-        let storedTrip = (try? store.value(forKey: DaemonCore.tripKey))?.flatMap { String(data: $0, encoding: .utf8) }
+        lock.lock()
+        let rulesError = rulesLoadError
+        let unclean = uncleanStopNote
+        lock.unlock()
         return DaemonStatus(
             version: WhoReadVersion.string, pid: getpid(), startedAt: startedAt, mode: mode, source: source.kind,
             sourceRunning: stats.source.running, sourceError: stats.source.error, sourceHint: stats.source.hint,
             sourceCanEnforce: source.canEnforce, learning: learning, learningEndsAt: baseline.learningEndsAt(),
             monitoringPaused: s.monitoringPaused, enforcementEnabled: s.enforcementEnabled,
             enforcementActive: enforcement.isActive, enforcementInactiveReasons: enforcement.inactiveReasons,
-            latencyTripReason: enforcement.latencyTripReason ?? (s.enforcementEnabled ? nil : storedTrip),
+            // No automatic switch-off any more: never set (kept in the protocol for older clients).
+            latencyTripReason: nil,
             killSwitchFilePresent: enforcement.killSwitchFilePresent,
-            latency: latency.evaluateWithoutTripping(), parser: source.parserStats, counts: counts,
+            latency: latency.snapshot(), parser: source.parserStats, counts: counts,
             unreadAlerts: counts.unreadAlerts, lastEventAt: stats.lastEventAt, eventsProcessed: stats.processed,
             writerDropped: writer.droppedCount, monitoredPrefixes: analyzer.classifier.prefixes.count,
             homeDirectories: homes, rulesLoadError: rulesError, sourceDroppedEvents: source.droppedEvents,
-            sourceKernelDrops: source.kernelDroppedEvents)
+            sourceKernelDrops: source.kernelDroppedEvents, pendingAsks: askBroker.openRequests, uncleanStop: unclean)
     }
 }

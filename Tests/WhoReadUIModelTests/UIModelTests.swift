@@ -31,7 +31,8 @@ final class L10nTests: XCTestCase {
     }
 
     func testHelpersAreLocalized() {
-        let reasons: [EnforcementState.InactiveReason] = [.disabledByUser, .killSwitchFile, .latencyTripped, .rulesFailedToLoad, .sourceCannotEnforce]
+        // No latency trips any more (ask mode: enforcement is never switched off automatically).
+        let reasons: [EnforcementState.InactiveReason] = [.disabledByUser, .killSwitchFile, .rulesFailedToLoad, .sourceCannotEnforce]
         for r in reasons {
             XCTAssertNotEqual(L10n.inactiveReason(r, .zhHans), r.rawValue)
             XCTAssertNotEqual(L10n.inactiveReason(r, .en), L10n.inactiveReason(r, .zhHans))
@@ -75,8 +76,8 @@ final class AppModelTests: XCTestCase {
         let model = AppModel(language: .en)
         model.apply(SnapshotFetcher.fetch(client, liveAfter: nil, includeBenign: true, full: true))
         XCTAssertTrue(model.connected)
-        XCTAssertEqual(model.menuBar.symbol, "graduationcap")
-        XCTAssertEqual(model.menuBar.title, "Learning")
+        XCTAssertEqual(model.menuBar.symbol, "eye")
+        XCTAssertEqual(model.menuBar.title, "Monitoring")
         XCTAssertEqual(model.menuBar.badge, "2")
         XCTAssertEqual(model.liveRows.count, 14, "folded Spotlight read hidden")
         model.showSystemNoise = true
@@ -213,17 +214,16 @@ final class AppModelTests: XCTestCase {
         var status = try XCTUnwrap(s.status)
         status.enforcementEnabled = true
         status.enforcementActive = false
-        status.enforcementInactiveReasons = [.latencyTripped]
-        status.latencyTripReason = "deadline missed"
+        status.enforcementInactiveReasons = [.rulesFailedToLoad]
         status.sourceCanEnforce = true
         status.killSwitchFilePresent = false
         s.status = status
         model.apply(s)
-        XCTAssertFalse(model.enforcementSwitchOn, "a tripped switch reads off")
-        XCTAssertEqual(model.enforcementInactiveText, "Not active: turned off automatically: responses too slow (deadline missed)")
+        // Ask mode: no latency trips, so the switch shows the user's setting.
+        XCTAssertTrue(model.enforcementSwitchOn)
+        XCTAssertEqual(model.enforcementInactiveText, "Not active: rules failed to load")
         XCTAssertEqual(model.enforcementCaveat, L10n.t(.rulesEnforcementOffNote, .en))
 
-        status.latencyTripReason = nil
         status.enforcementInactiveReasons = [.killSwitchFile, .sourceCannotEnforce]
         status.killSwitchFilePresent = true
         status.sourceCanEnforce = false
@@ -275,8 +275,10 @@ final class AppModelTests: XCTestCase {
         fresh.status = .unread
         let planned = planner.plan(model.alerts + [fresh], settings: settings, formatter: model.formatter)
         XCTAssertEqual(planned.count, 1)
-        XCTAssertEqual(planned[0].categoryIdentifier, NotificationPlanner.categoryAlert)
-        XCTAssertEqual(planned[0].actions, [.alwaysAllow, .blockFromNowOn, .ignore])
+        // The fixture's chain is all Apple with no AI agent: "allow all Apple programs" is offered, also
+        // as a banner button (its own category).
+        XCTAssertEqual(planned[0].categoryIdentifier, NotificationPlanner.categoryAlertApple)
+        XCTAssertEqual(planned[0].actions, [.alwaysAllow, .blockFromNowOn, .ignore, .trustApplePrograms])
         XCTAssertTrue(planned[0].body.contains("调用链："))
         // Repeats (merged count) do not re-notify; escalation to blocked does.
         fresh.count = 5
@@ -333,23 +335,6 @@ final class AppModelTests: XCTestCase {
         recent.updatedAt = recent.createdAt
         // The daemon was unreachable at launch; its first answer has both.
         XCTAssertEqual(planner.plan([old, recent], settings: NotificationSettings(), formatter: model.formatter).map(\.alertID), [300])
-    }
-
-    func testLatencyTripNotice() throws {
-        let planner = NotificationPlanner()
-        var status = core.status()
-        status.latencyTripReason = nil
-        XCTAssertEqual(planner.plan(status: status, language: .en), [])
-        status.latencyTripReason = "deadline missed"
-        let notices = planner.plan(status: status, language: .zhHans)
-        XCTAssertEqual(notices.count, 1)
-        XCTAssertEqual(notices.first?.title, "WhoRead 已关闭拦截")
-        XCTAssertTrue(notices.first?.body.contains("deadline missed") ?? false)
-        XCTAssertEqual(planner.plan(status: status, language: .zhHans), [], "once per trip")
-        status.latencyTripReason = nil
-        XCTAssertEqual(planner.plan(status: status, language: .en), [])
-        status.latencyTripReason = "p99 80 ms"
-        XCTAssertEqual(planner.plan(status: status, language: .en).count, 1)
     }
 
     func testOnboardingStates() {

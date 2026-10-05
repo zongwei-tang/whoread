@@ -133,12 +133,20 @@ struct AlertsView: View {
                 Spacer()
                 Button(L10n.t(.markAllRead)) { connection.markAllRead() }.disabled(model.unreadCount == 0)
             }
-            if let err = connection.lastActionError { Text(err).foregroundStyle(.red).font(.caption) }
-            if model.visibleAlerts.isEmpty {
+            if let err = connection.lastActionError { Text(err).foregroundStyle(.red).font(.caption).textSelection(.enabled) }
+            if model.visibleAlerts.isEmpty && model.asks.isEmpty {
                 ContentUnavailableView(L10n.t(.alertsEmpty), systemImage: "bell.slash")
             } else {
-                List(model.visibleAlerts) { alert in
-                    AlertRow(alert: alert)
+                List {
+                    // Ask mode: questions waiting for an answer come first.
+                    if !model.asks.isEmpty {
+                        Section(L10n.t(.asksTitle)) {
+                            ForEach(model.asksByUrgency) { ask in AskRow(ask: ask) }
+                        }
+                    }
+                    Section {
+                        ForEach(model.visibleAlerts) { alert in AlertRow(alert: alert) }
+                    }
                 }
             }
         }
@@ -168,13 +176,14 @@ struct AlertRow: View {
             }
             if alert.status != .resolved {
                 HStack {
+                    // An `ask` alert answers its question (same wording as the question).
                     ForEach(alert.availableActions, id: \.self) { action in
-                        Button(f.actionTitle(action)) { connection.act(on: alert.id, action) }
+                        Button(model.actionTitle(action, for: alert.kind)) { connection.act(on: alert.id, action) }
                             .help(action == .blockFromNowOn ? (model.enforcementCaveat ?? "") : "")
                     }
                 }
             } else if let r = alert.resolution {
-                Text("✓ " + f.actionTitle(r)).font(.caption).foregroundStyle(.secondary)
+                Text("✓ " + model.actionTitle(r, for: alert.kind)).font(.caption).foregroundStyle(.secondary)
                 // The rule is saved, but nothing is blocked while enforcement is not active.
                 if r == .blockFromNowOn, let caveat = model.enforcementCaveat {
                     Text(caveat).font(.caption).foregroundStyle(.orange)

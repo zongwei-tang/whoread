@@ -9,9 +9,13 @@ import WhoReadIPC
 /// `WhoReadCore.AlertFormatter`, shared with the CLI.
 public enum L: String, CaseIterable, Sendable {
     // Menu bar
-    case appName, modeLearning, modeMonitoring, modeEnforcing, modePaused, modeError, unreadAlertsFormat, openWindow
+    case appName, modeMonitoring, modeEnforcing, modePaused, modeError, unreadAlertsFormat, openWindow
     case pauseMonitoring, resumeMonitoring, enforcement, enforcementOn, enforcementOff, enforcementInactiveFormat
-    case killSwitchAdmin, quit, daemonUnreachable, recentAlerts, noAlerts, learningUntilFormat
+    case killSwitchAdmin, quit, daemonUnreachable, recentAlerts, noAlerts
+    // Ask mode: open questions (menu bar, Alerts tab, notifications)
+    case asksTitle, asksWaitingFormat, asksMoreFormat, askDeniedIn, askNotHeld
+    case askAllowOnce, askAlwaysAllow, askDeny, askAlwaysDeny, askTrustApple
+    case askAllowNotPermittedFormat, askGone, askAgentsFormat
     // Tabs
     case tabLive, tabAlerts, tabApps, tabFiles, tabAgents, tabRules, tabSettings
     // Columns & common
@@ -32,19 +36,21 @@ public enum L: String, CaseIterable, Sendable {
     case targetCategory, targetSeverity, targetPath, subjectSigned, subjectUnsigned, subjectApp, subjectAnyNonOwner
     case subjectAgentChain, exceptOwners, includePlatformBinaries, accessRead, accessWrite, accessAny
     case actionAllow, actionDeny, actionAlert, rulesEnforcementOffNote, ruleExceptionsFormat, rulesEmpty
+    case ruleChainNoAgent, ruleChainAgentsFormat
     // Settings
-    case setMonitoredPaths, setProjectRoots, setProjectRootsNote, setLearning, setLearningDays, setRestartLearning
+    case setMonitoredPaths, setProjectRoots, setProjectRootsNote, setAsk, setAskNote, setTrustApple, setTrustAppleNote
     case setRetention, setRetentionDays, setDetailDays, setNotifications, setNotificationsEnabled, setMinSeverity
     case setNotifyWouldBlock, setEnforcement, setEnforcementMaster, setEnforcementNote, setLatency, setReaddir
+    case slowResponsesFormat, slowMissesFormat, slowP99Format, uncleanStopFormat
     case setLanguage, setLanguageSystem, setCoalesce, setSaved, setPermissionNeeded
     // Onboarding
     case onbTitle, onbIntro, onbFDATitle, onbFDABody, onbFDAButton, onbExtTitle, onbExtBody, onbExtButton
     case onbExtApprove, onbDaemonTitle, onbDaemonBody, onbAllSet, onbWaiting, onbDone, onbFailedFormat, onbContinue
     case onbOpenLoginItems, onbRestartRequired, openSetup
     // Notifications
-    case notifTitle, notifBlockedTitle, notifEnforcementTrippedTitle, notifEnforcementTrippedBodyFormat, notifRuleNotBlockingTitle
+    case notifTitle, notifBlockedTitle, notifUncleanStopTitle, notifRuleNotBlockingTitle, notifAskTitle, notifAskFailedTitle
     // Enforcement inactive reasons and caveats
-    case reasonDisabledByUser, reasonKillSwitchFile, reasonLatencyTripped, reasonRulesFailedToLoad, reasonSourceCannotEnforce
+    case reasonDisabledByUser, reasonKillSwitchFile, reasonRulesFailedToLoad, reasonSourceCannotEnforce
     case sourceCannotEnforceNote
     // Rule editor
     case ruleName, ruleSigningID, ruleTeamID, ruleNoTeamID, ruleProgramPath, ruleCdhash, ruleAgentsNote
@@ -78,7 +84,6 @@ public enum L10n {
 
     static let table: [L: (String, String)] = [
         .appName: ("WhoRead", "WhoRead"),
-        .modeLearning: ("Learning", "学习中"),
         .modeMonitoring: ("Monitoring", "监控中"),
         .modeEnforcing: ("Enforcing", "拦截中"),
         .modePaused: ("Paused", "已暂停"),
@@ -96,7 +101,20 @@ public enum L10n {
         .daemonUnreachable: ("Cannot reach the WhoRead daemon", "无法连接 WhoRead 守护进程"),
         .recentAlerts: ("Recent alerts", "最近告警"),
         .noAlerts: ("No alerts", "没有告警"),
-        .learningUntilFormat: ("Learning normal behaviour until %@", "正在学习正常行为，直到 %@"),
+
+        .asksTitle: ("Waiting for your answer", "等待你的决定"),
+        .asksWaitingFormat: ("%ld questions waiting", "%ld 个访问等待你的决定"),
+        .asksMoreFormat: ("%ld more…", "还有 %ld 个…"),
+        .askDeniedIn: ("Denied if unanswered in", "未回答将被拒绝，剩余"),
+        .askNotHeld: ("Denied for now; your answer applies to the next attempt.", "这次已拒绝；你的回答会用于下一次访问。"),
+        .askAllowOnce: ("Allow once (10 min)", "允许一次（10 分钟）"),
+        .askAlwaysAllow: ("Always allow", "始终允许"),
+        .askDeny: ("Deny", "拒绝"),
+        .askAlwaysDeny: ("Always deny", "始终拒绝"),
+        .askTrustApple: ("Allow all Apple programs", "允许所有苹果程序"),
+        .askAllowNotPermittedFormat: ("Not allowed: only the signed WhoRead app or an administrator can allow (this build is not signed). In Terminal: %@", "没有权限：只有已签名的 WhoRead 应用或管理员才能允许（当前版本未签名）。请在终端运行：%@"),
+        .askGone: ("This question is no longer open (answered elsewhere or expired).", "这个问题已经关闭（已在别处回答或已过期）。"),
+        .askAgentsFormat: ("AI agent in the chain: %@", "调用链中有 AI agent：%@"),
 
         .tabLive: ("Live", "实时"),
         .tabAlerts: ("Alerts", "告警"),
@@ -192,13 +210,16 @@ public enum L10n {
         .rulesEnforcementOffNote: ("Enforcement is off: block rules only raise \"would block\" alerts.", "拦截总开关已关闭：拦截规则只会产生「将被拦截」告警。"),
         .ruleExceptionsFormat: ("%d exceptions", "%d 个例外"),
         .rulesEmpty: ("No rules.", "没有规则。"),
+        .ruleChainNoAgent: ("only without an AI agent in the chain", "仅限调用链中没有 AI agent"),
+        .ruleChainAgentsFormat: ("only with these AI agents in the chain: %@", "仅限调用链中的这些 AI agent：%@"),
 
         .setMonitoredPaths: ("Monitored paths", "监控路径"),
         .setProjectRoots: ("Project roots", "Project roots"),
         .setProjectRootsNote: ("Inside these folders, .env*, *.pem and *.key files are watched at any depth.", "在这些目录下，任意深度的 .env*、*.pem、*.key 文件都会被监控。"),
-        .setLearning: ("Learning period", "学习期"),
-        .setLearningDays: ("Days", "天数"),
-        .setRestartLearning: ("Restart learning", "重新学习"),
+        .setAsk: ("Questions", "访问询问"),
+        .setAskNote: ("With enforcement on, WhoRead holds the first access of an app to a sensitive file and asks you. Your answer is saved as a rule; unanswered in time, the access is denied.", "开启拦截后，应用第一次访问敏感文件时 WhoRead 会暂停这次访问并询问你。你的回答会保存为规则；未及时回答则拒绝访问。"),
+        .setTrustApple: ("Trust all Apple programs (not when started by an AI agent)", "信任所有苹果程序（由 AI agent 启动时除外）"),
+        .setTrustAppleNote: ("Apple programs in system locations are then allowed without asking. This weakens protection.", "开启后，系统位置中的苹果程序无需询问即被允许。这会削弱保护。"),
         .setRetention: ("Retention", "保留期"),
         .setRetentionDays: ("Keep history (days)", "保留历史（天）"),
         .setDetailDays: ("Keep details (days)", "保留明细（天）"),
@@ -208,14 +229,18 @@ public enum L10n {
         .setNotifyWouldBlock: ("Notify for \"would block\"", "「将被拦截」时也通知"),
         .setEnforcement: ("Enforcement", "拦截"),
         .setEnforcementMaster: ("Enforce block rules", "执行拦截规则"),
-        .setEnforcementNote: ("Only rules you marked as Enforce can block. Needs the Endpoint Security extension.", "只有你标记为「强制拦截」的规则才会拦截。需要 Endpoint Security 扩展。"),
-        .setLatency: ("Disable automatically if p99 response exceeds (ms)", "p99 响应超过此值时自动关闭（毫秒）"),
+        .setEnforcementNote: ("Rules marked Enforce block, and accesses nothing has decided yet are asked. WhoRead never turns enforcement off on its own. Needs the Endpoint Security extension.", "标记为「强制拦截」的规则会拦截，尚未决定的访问会询问你。WhoRead 不会自行关闭拦截。需要 Endpoint Security 扩展。"),
+        .setLatency: ("Warn when p99 response time exceeds (ms)", "p99 响应时间超过此值时提醒（毫秒）"),
         .setReaddir: ("Also record directory listings", "同时记录目录列表（readdir）"),
         .setLanguage: ("Language", "语言"),
         .setLanguageSystem: ("System", "跟随系统"),
         .setCoalesce: ("Merge repeated alerts within (minutes)", "合并多少分钟内的重复告警"),
         .setSaved: ("Saved", "已保存"),
         .setPermissionNeeded: ("This change needs administrator rights.", "这项修改需要管理员权限。"),
+        .slowResponsesFormat: ("Slow responses: %@. Enforcement stays as you set it.", "响应变慢：%@。拦截保持你的设置。"),
+        .slowMissesFormat: ("%ld missed kernel deadlines", "错过内核期限 %ld 次"),
+        .slowP99Format: ("p99 %@ ms (warning above %@ ms)", "p99 %@ 毫秒（超过 %@ 毫秒提醒）"),
+        .uncleanStopFormat: ("The monitor stopped unexpectedly while it could block (%@). Enforcement stays as you set it.", "监控程序在可拦截状态下意外停止（%@）。拦截保持你的设置。"),
 
         .onbTitle: ("Welcome to WhoRead", "欢迎使用 WhoRead"),
         .onbIntro: ("WhoRead shows which app read your SSH keys, cloud credentials, browser data and other sensitive files — and who started it. Everything stays on this Mac. File contents are never read.", "WhoRead 告诉你哪个应用读了你的 SSH 密钥、云凭证、浏览器数据等敏感文件，以及是谁启动了它。所有数据只留在这台 Mac 上，从不读取文件内容。"),
@@ -227,7 +252,7 @@ public enum L10n {
         .onbExtButton: ("Install extension", "安装扩展"),
         .onbExtApprove: ("Approve it in System Settings → General → Login Items & Extensions", "请在「系统设置 → 通用 → 登录项与扩展」中批准"),
         .onbDaemonTitle: ("Monitoring is running", "监控已运行"),
-        .onbDaemonBody: ("WhoRead learns what is normal for 7 days and only alerts on unusual access.", "WhoRead 会学习 7 天的正常行为，之后只在出现异常时提醒。"),
+        .onbDaemonBody: ("WhoRead records which apps touch your sensitive files. With enforcement on, it asks you the first time an app wants one.", "WhoRead 会记录哪些应用碰了你的敏感文件。开启拦截后，应用第一次想访问时会先询问你。"),
         .onbAllSet: ("All set", "全部完成"),
         .onbWaiting: ("Waiting…", "等待中…"),
         .onbDone: ("Done", "已完成"),
@@ -239,13 +264,13 @@ public enum L10n {
 
         .notifTitle: ("WhoRead", "WhoRead"),
         .notifBlockedTitle: ("WhoRead blocked an access", "WhoRead 拦截了一次访问"),
-        .notifEnforcementTrippedTitle: ("WhoRead turned enforcement off", "WhoRead 已关闭拦截"),
-        .notifEnforcementTrippedBodyFormat: ("The monitor answered too slowly (%@). Nothing is blocked until you turn enforcement back on.", "监控响应过慢（%@），在你重新开启拦截之前不会拦截任何访问。"),
+        .notifUncleanStopTitle: ("WhoRead's monitor stopped unexpectedly", "WhoRead 监控程序意外停止"),
         .notifRuleNotBlockingTitle: ("Rule saved, but it does not block yet", "规则已保存，但暂时不会拦截"),
+        .notifAskTitle: ("Allow this access?", "允许这次访问吗？"),
+        .notifAskFailedTitle: ("WhoRead could not take your answer", "WhoRead 未能接受你的回答"),
 
         .reasonDisabledByUser: ("switched off", "开关已关闭"),
         .reasonKillSwitchFile: ("kill-switch file present", "存在紧急关闭文件"),
-        .reasonLatencyTripped: ("turned off automatically: responses too slow", "响应过慢，已自动关闭"),
         .reasonRulesFailedToLoad: ("rules failed to load", "规则加载失败"),
         .reasonSourceCannotEnforce: ("this monitor cannot block (eslogger)", "当前监控方式无法拦截（eslogger）"),
         .sourceCannotEnforceNote: ("This monitor (eslogger) cannot block: block rules only raise \"would block\" alerts.", "当前监控方式（eslogger）无法拦截：拦截规则只会产生「将被拦截」告警。"),
@@ -313,8 +338,8 @@ public enum L10n {
 
     public static func mode(_ m: DaemonMode, _ language: Language = current) -> String {
         switch m {
-        case .learning: return t(.modeLearning, language)
-        case .monitoring: return t(.modeMonitoring, language)
+        // Ask mode replaced the learning period: never shown as a state of its own.
+        case .learning, .monitoring: return t(.modeMonitoring, language)
         case .enforcing: return t(.modeEnforcing, language)
         case .paused: return t(.modePaused, language)
         case .error: return t(.modeError, language)
@@ -375,9 +400,10 @@ public enum L10n {
         switch r {
         case .disabledByUser: return t(.reasonDisabledByUser, language)
         case .killSwitchFile: return t(.reasonKillSwitchFile, language)
-        case .latencyTripped: return t(.reasonLatencyTripped, language)
         case .rulesFailedToLoad: return t(.reasonRulesFailedToLoad, language)
         case .sourceCannotEnforce: return t(.reasonSourceCannotEnforce, language)
+        // Latency trips are gone (enforcement is never switched off automatically); not shown.
+        default: return r.rawValue
         }
     }
 
@@ -388,6 +414,32 @@ public enum L10n {
         case "alert-agents-high": return t(.tplAlertAgentsHigh, language)
         case "deny-nonowner-ssh": return t(.tplDenyNonOwnerSSH, language)
         default: return nil
+        }
+    }
+
+    /// Button title for an answer to an ask-mode question (also on `ask` alerts). Other actions
+    /// keep the shared alert wording.
+    public static func askActionTitle(_ a: AlertAction, _ language: Language = current) -> String {
+        switch a {
+        case .allowOnce: return t(.askAllowOnce, language)
+        case .alwaysAllow: return t(.askAlwaysAllow, language)
+        case .keepBlocking: return t(.askDeny, language)
+        case .blockFromNowOn: return t(.askAlwaysDeny, language)
+        case .trustApplePrograms: return t(.askTrustApple, language)
+        case .ignore: return AlertFormatter(language: language).actionTitle(a)
+        }
+    }
+
+    /// What to show when the daemon did not take an answer. An allow refused for lack of privilege
+    /// (an unsigned build, not root) says how to give it from Terminal instead.
+    public static func answerError(_ e: IPCError, askID: Int64, action: AlertAction, _ language: Language = current) -> String {
+        switch e.code {
+        case .notPermitted where AskAnswers.isAllow(action):
+            return f(.askAllowNotPermittedFormat, "sudo whoread ask \(askID) \(AskAnswers.cliVerb(action))", language: language)
+        case .notFound:
+            return t(.askGone, language)
+        default:
+            return message(for: e, language)
         }
     }
 

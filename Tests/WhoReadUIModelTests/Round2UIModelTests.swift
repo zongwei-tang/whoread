@@ -76,64 +76,8 @@ final class Round2UIModelTests: XCTestCase {
                        [L10n.t(.notifBlockedTitle, .en)])
     }
 
-    // app-uimodel-2: after a trip the daemon turns the setting off; the UI must still say why.
-    func testTripIsExplainedAfterTheSettingTurnsOff() throws {
-        try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
-        core.enforcement.tripLatency("deadline missed")
-        core.drainPolicyQueue()
-        let model = loadedModel()
-        let status = try XCTUnwrap(model.status)
-        XCTAssertFalse(status.enforcementEnabled, "persistTrip switched the setting off")
-        XCTAssertEqual(status.latencyTripReason, "deadline missed")
-        XCTAssertFalse(model.enforcementSwitchOn)
-        let text = try XCTUnwrap(model.enforcementInactiveText)
-        XCTAssertTrue(text.hasPrefix("Not active: turned off automatically: responses too slow (deadline missed)"), text)
-
-        // After a daemon restart only the stored reason remains (no latencyTripped reason).
-        var s = Snapshot()
-        var restarted = status
-        restarted.enforcementInactiveReasons = [.disabledByUser]
-        s.status = restarted
-        model.apply(s)
-        XCTAssertEqual(model.enforcementInactiveText, "Not active: turned off automatically: responses too slow (deadline missed)")
-
-        // Turned off by the user, no trip: the plain switch says it all.
-        restarted.latencyTripReason = nil
-        s.status = restarted
-        model.apply(s)
-        XCTAssertNil(model.enforcementInactiveText)
-
-        // Re-enabling (the response the app applies) clears the trip, so a re-trip with the same text
-        // notifies again even if no poll ran in between.
-        let planner = NotificationPlanner()
-        XCTAssertEqual(planner.plan(status: status, language: .en).count, 1)
-        model.apply(response: try client.call(.setEnforcement(enabled: true)))
-        let reenabled = try XCTUnwrap(model.status)
-        XCTAssertNil(reenabled.latencyTripReason)
-        XCTAssertEqual(planner.plan(status: reenabled, language: .en), [])
-        core.enforcement.tripLatency("deadline missed")
-        core.drainPolicyQueue()
-        XCTAssertEqual(planner.plan(status: core.status(), language: .en).count, 1)
-    }
-
-    // app-uimodel-5: a trip already notified is not notified again by a relaunched app.
-    func testTripNoticeSurvivesRelaunch() throws {
-        var status = core.status()
-        status.latencyTripReason = "deadline missed"
-        let first = NotificationPlanner()
-        XCTAssertEqual(first.plan(status: status, language: .en).count, 1)
-        XCTAssertEqual(first.notifiedTrip, "deadline missed")
-        // Relaunch: the app hands back what it kept.
-        let relaunched = NotificationPlanner(notifiedTrip: first.notifiedTrip)
-        XCTAssertEqual(relaunched.plan(status: status, language: .en), [])
-        // A different trip that happened while the app was closed still notifies once.
-        status.latencyTripReason = "p99 80 ms > 50 ms"
-        XCTAssertEqual(NotificationPlanner(notifiedTrip: "deadline missed").plan(status: status, language: .en).count, 1)
-        // Enforcement back on: nothing left to keep.
-        status.latencyTripReason = nil
-        XCTAssertEqual(relaunched.plan(status: status, language: .en), [])
-        XCTAssertNil(relaunched.notifiedTrip)
-    }
+    // app-uimodel-2 and app-uimodel-5 (latency trips explained and notified once) are gone with the
+    // trips: enforcement is never switched off automatically (AskUIModelTests covers what replaced them).
 
     // app-uimodel-6: repeats merged since launch do not re-notify an alert from before launch.
     func testFirstPlanUsesCreationTime() throws {
@@ -210,7 +154,7 @@ final class Round2UIModelTests: XCTestCase {
     // app-uimodel-7: an incompatible daemon replacing the running one.
     func testIncompatibleDaemonIsNotShownAsLive() throws {
         let model = loadedModel()
-        XCTAssertEqual(model.menuBar.symbol, "graduationcap")
+        XCTAssertEqual(model.menuBar.symbol, "eye")
         var down = Snapshot()
         down.error = IPCError(.unavailable, "gone")
         model.apply(down)
@@ -239,7 +183,7 @@ final class Round2UIModelTests: XCTestCase {
         model.apply(SnapshotFetcher.fetch(client, liveAfter: nil, includeBenign: false, full: false, hello: true))
         XCTAssertNil(model.versionProblem)
         XCTAssertNotNil(model.liveStatus)
-        XCTAssertEqual(model.menuBar.symbol, "graduationcap")
+        XCTAssertEqual(model.menuBar.symbol, "eye")
     }
 
     // app-uimodel-7 (second review): a daemon replaced between two polls answers before any handshake.

@@ -7,11 +7,31 @@ import Foundation
 /// keys ×51" stays truthful after the first read made the triple known.
 /// Blocked attempts and accesses that went through are counted in separate alerts, so "blocked ×6"
 /// never includes a read that succeeded.
+///
+/// Ask mode: accesses denied because a question was not answered (kind `.ask`) get a third kind of
+/// alert, apart from rule blocks: answering an ask alert answers the question, which must not
+/// stand for a rule's denials (nor a rule's "allow once" for a question). Ask alerts are also kept
+/// apart by the AI agents in the chain, as questions are: an answer for an app never covers it
+/// driven by another agent. Read and write questions of one app on one category share an alert.
 public final class AlertCoalescer: @unchecked Sendable {
+    private enum Lane: Hashable {
+        /// The access went through (or would have: monitor only).
+        case passed
+        /// Denied by a rule (or only along with another category).
+        case blocked
+        /// Denied while waiting for an answer; the sorted agent ids in the chain.
+        case asked(chainAgents: [String])
+    }
+
     private struct Key: Hashable {
         var responsibleKey: String
         var categoryID: String
-        var blocked: Bool
+        var lane: Lane
+    }
+
+    private static func lane(kind: AlertKind?, denied: Bool, chain: [ChainLink]) -> Lane {
+        if kind == .ask { return .asked(chainAgents: Set(chain.compactMap(\.agentID)).sorted()) }
+        return denied ? .blocked : .passed
     }
 
     private let lock = NSLock()
@@ -31,15 +51,18 @@ public final class AlertCoalescer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         self.nextID = max(self.nextID, nextID)
         for a in openAlerts {
-            open[Key(responsibleKey: a.responsible.key, categoryID: a.categoryID, blocked: a.kind == .blocked)] = a
+            open[Key(responsibleKey: a.responsible.key, categoryID: a.categoryID,
+                     lane: AlertCoalescer.lane(kind: a.kind, denied: a.kind == .blocked, chain: a.chain))] = a
         }
     }
 
     /// Feeds one analyzed event. `kind` is non-nil if the event on its own deserves an alert;
-    /// `firstTime` says the (app, category, access) was new to the baseline (wording only).
-    public func ingest(_ event: AnalyzedEvent, kind: AlertKind?, firstTime: Bool = false) -> AlertUpdate? {
+    /// `firstTime` says the (app, category, access) was new to the baseline (wording only);
+    /// `appleProgram` that the alert may offer "allow all Apple programs".
+    public func ingest(_ event: AnalyzedEvent, kind: AlertKind?, firstTime: Bool = false, appleProgram: Bool = false) -> AlertUpdate? {
         lock.lock(); defer { lock.unlock() }
-        let key = Key(responsibleKey: event.responsible.key, categoryID: event.categoryID, blocked: event.decision == .denied)
+        let key = Key(responsibleKey: event.responsible.key, categoryID: event.categoryID,
+                      lane: AlertCoalescer.lane(kind: kind, denied: event.decision == .denied, chain: event.chain))
         if var alert = open[key], event.time < alert.windowEndsAt {
             // A new kind of access (a write after reads) is news even at the same alert level.
             let addsAccess = kind != nil && !alert.accesses.isSuperset(of: event.access)
@@ -55,6 +78,7 @@ public final class AlertCoalescer: @unchecked Sendable {
                     alert.ruleID = event.ruleID ?? alert.ruleID
                 }
                 alert.firstTime = firstTime
+                alert.appleProgram = appleProgram
                 // The event that made it worse is the one the headline and "allow once" are about.
                 alert.firstPath = event.path
                 alert.firstEventID = event.id
@@ -82,7 +106,7 @@ public final class AlertCoalescer: @unchecked Sendable {
             windowEndsAt: event.time.addingTimeInterval(window), responsible: event.responsible,
             categoryID: event.categoryID, severity: event.severity, count: 1, accesses: event.access,
             firstPath: event.path, firstEventID: event.id, lastEventID: event.id, paths: [event.path],
-            chain: event.chain, agentID: event.agentID, ruleID: event.ruleID, firstTime: firstTime)
+            chain: event.chain, agentID: event.agentID, ruleID: event.ruleID, firstTime: firstTime, appleProgram: appleProgram)
         nextID += 1
         open[key] = alert
         return AlertUpdate(alert: alert, change: .created)

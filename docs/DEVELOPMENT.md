@@ -157,9 +157,9 @@ open "$P/WhoRead.app"
    ```bash
    scripts/vm/acceptance-m5.sh [--stop-test]
    ```
-   Record the latencies and the pending-AUTH behaviour in docs/STATUS.md. The SIGKILL step leaves
-   enforcement off on purpose (the daemon died while enforcing); `whoread enforcement on` turns
-   it back on.
+   Record the latencies, the ask-mode hold budget it prints and the pending-AUTH behaviour in
+   docs/STATUS.md. The SIGKILL step expects enforcement still on after launchd restarts the daemon,
+   with `uncleanStop` set in `whoread status` (enforcement is never switched off automatically).
 
 ## System extension in development (manual)
 

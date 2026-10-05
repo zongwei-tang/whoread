@@ -55,11 +55,22 @@ public protocol EventSink: AnyObject, Sendable {
     func sourceStateChanged(_ state: SourceState)
 }
 
-/// Synchronous, in-memory decision for AUTH events (native source only).
+/// Synchronous, in-memory decision for AUTH events (native source only). `decide`, `recordResponse`
+/// and `askRequest` run on the ES callback thread: no IO, logging, XPC or waiting.
 public protocol AuthDecider: AnyObject, Sendable {
     func decide(_ activity: FileActivity) -> RuleDecision
-    /// Latency accounting for every AUTH response.
+    /// Latency accounting for every AUTH response that was answered at once (held asks excluded).
+    /// Statistics only, misses included: it never switches enforcement off.
     func recordResponse(micros: UInt64, missedDeadline: Bool)
+    /// Ask mode: the question for a `.ask` decision (display data, key). nil = deny at once.
+    func askRequest(for activity: FileActivity, decision: RuleDecision) -> AskRequest?
+    /// Ask mode: where held accesses wait for the answer.
+    var askBroker: AskBroker? { get }
+}
+
+extension AuthDecider {
+    public func askRequest(for activity: FileActivity, decision: RuleDecision) -> AskRequest? { nil }
+    public var askBroker: AskBroker? { nil }
 }
 
 /// Thread-safe box for source state.

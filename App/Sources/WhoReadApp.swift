@@ -32,8 +32,9 @@ struct WhoReadApp: App {
     }
 }
 
-/// Icon + unread badge in the menu bar. Reads the model in its own body so observation tracking
-/// refreshes it (a value computed in `App.body` might not be).
+/// Icon + badge in the menu bar: open questions first (a question mark and their count), then
+/// unread alerts. Reads the model in its own body so observation tracking refreshes it (a value
+/// computed in `App.body` might not be).
 struct MenuBarLabel: View {
     let model: AppModel
     @Environment(\.openWindow) private var openWindow
@@ -41,12 +42,12 @@ struct MenuBarLabel: View {
     var body: some View {
         let state = model.menuBar
         HStack(spacing: 2) {
-            Image(systemName: state.symbol)
+            Image(systemName: state.labelSymbol)
             if let badge = state.badge {
                 Text(badge).font(.caption2.monospacedDigit())
             }
         }
-        .accessibilityLabel(Text(state.title))
+        .accessibilityLabel(Text(state.accessibilityLabel))
         // The label lives as long as the app: lets notification clicks open the main window.
         .onAppear { NavigationState.shared.openMainWindow = { openWindow(id: "main") } }
     }

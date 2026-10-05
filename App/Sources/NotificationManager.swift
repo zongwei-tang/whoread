@@ -4,7 +4,8 @@ import UserNotifications
 import WhoReadCore
 import WhoReadUIModel
 
-/// UNUserNotificationCenter with action buttons ("允许一次 / 始终允许 / 保持拦截" …).
+/// UNUserNotificationCenter with action buttons ("允许一次 / 始终允许 / 保持拦截" …), and the ask-mode
+/// questions ("允许一次（10 分钟）/ 始终允许 / 拒绝 / 始终拒绝").
 final class NotificationManager: @unchecked Sendable {
     static let shared = NotificationManager()
 
@@ -16,14 +17,28 @@ final class NotificationManager: @unchecked Sendable {
         func category(_ id: String, _ actions: [AlertAction]) -> UNNotificationCategory {
             let buttons = actions.map { a -> UNNotificationAction in
                 let destructive = a == .blockFromNowOn || a == .keepBlocking
-                return UNNotificationAction(identifier: actionID(a), title: f.actionTitle(a), options: destructive ? [.destructive] : [])
+                // Allowing saves a rule that also answers future questions: never from the lock screen.
+                let options: UNNotificationActionOptions = AskAnswers.isAllow(a) ? [.authenticationRequired]
+                    : (destructive ? [.destructive] : [])
+                return UNNotificationAction(identifier: actionID(a), title: f.actionTitle(a), options: options)
+            }
+            return UNNotificationCategory(identifier: id, actions: buttons, intentIdentifiers: [], options: [])
+        }
+        // Questions: allowing from a banner needs the Mac unlocked (not from the lock screen).
+        func askCategory(_ id: String, apple: Bool) -> UNNotificationCategory {
+            let buttons = AskAnswers.actions(apple: apple).map { a -> UNNotificationAction in
+                let options: UNNotificationActionOptions = AskAnswers.isAllow(a) ? [.authenticationRequired] : [.destructive]
+                return UNNotificationAction(identifier: actionID(a), title: L10n.askActionTitle(a, language), options: options)
             }
             return UNNotificationCategory(identifier: id, actions: buttons, intentIdentifiers: [], options: [])
         }
         UNUserNotificationCenter.current().setNotificationCategories([
             category(NotificationPlanner.categoryBlocked, [.allowOnce, .alwaysAllow, .keepBlocking]),
             category(NotificationPlanner.categoryAlert, [.alwaysAllow, .blockFromNowOn, .ignore]),
+            category(NotificationPlanner.categoryAlertApple, [.alwaysAllow, .blockFromNowOn, .ignore, .trustApplePrograms]),
             category(NotificationPlanner.categoryWouldBlock, [.alwaysAllow, .ignore]),
+            askCategory(NotificationPlanner.categoryAsk, apple: false),
+            askCategory(NotificationPlanner.categoryAskApple, apple: true),
         ])
     }
 
@@ -39,6 +54,34 @@ final class NotificationManager: @unchecked Sendable {
         UNUserNotificationCenter.current().add(request)
     }
 
+    /// An open question, with the answers as buttons (`categoryAsk` / `categoryAskApple`).
+    func post(_ n: PlannedAskNotification) {
+        let content = UNMutableNotificationContent()
+        content.title = n.title
+        content.body = n.body
+        content.categoryIdentifier = n.categoryIdentifier
+        content.threadIdentifier = NotificationPlanner.categoryAsk
+        content.userInfo = ["askID": NSNumber(value: n.askID)]
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: n.identifier, content: content, trigger: nil))
+    }
+
+    /// Withdraws the banners of questions no longer open.
+    func remove(asks identifiers: [String]) {
+        guard !identifiers.isEmpty else { return }
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+    }
+
+    /// Withdraws question banners left by a previous run of the app (answered or expired since).
+    func removeDeliveredAsks(keeping open: Set<String>) {
+        UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+            let stale = delivered.map(\.request.identifier).filter { NotificationPlanner.isAskIdentifier($0) && !open.contains($0) }
+            if !stale.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: stale) }
+        }
+    }
+
     /// A notice about WhoRead itself (no action buttons). Clicking it opens `tab`.
     func post(_ notice: SystemNotice, tab: Tab) {
         let content = UNMutableNotificationContent()
@@ -49,16 +92,31 @@ final class NotificationManager: @unchecked Sendable {
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: notice.identifier, content: content, trigger: nil))
     }
 
+    /// The answer button the user pressed; nil for a click on the banner itself.
+    private func pressedAction(in response: UNNotificationResponse) -> AlertAction? {
+        let raw = response.actionIdentifier
+        guard raw.hasPrefix("whoread.action.") else { return nil }
+        return AlertAction(rawValue: String(raw.dropFirst("whoread.action.".count)))
+    }
+
     func handle(_ response: UNNotificationResponse) {
         let info = response.notification.request.content.userInfo
+        if let ask = (info["askID"] as? NSNumber)?.int64Value {
+            guard let action = pressedAction(in: response) else {
+                // Clicked the banner itself: open questions are listed in the Alerts tab.
+                Task { @MainActor in NavigationState.shared.show(tab: .alerts) }
+                return
+            }
+            Task { @MainActor in DaemonConnection.shared.answer(ask: ask, action, fromNotification: true) }
+            return
+        }
         guard let id = (info["alertID"] as? NSNumber)?.int64Value else {
             if let raw = info["tab"] as? String, let tab = Tab(rawValue: raw) {
                 Task { @MainActor in NavigationState.shared.show(tab: tab) }
             }
             return
         }
-        let raw = response.actionIdentifier
-        guard raw.hasPrefix("whoread.action."), let action = AlertAction(rawValue: String(raw.dropFirst("whoread.action.".count))) else {
+        guard let action = pressedAction(in: response) else {
             // Clicked the banner itself: open the Alerts tab.
             Task { @MainActor in NavigationState.shared.show(tab: .alerts) }
             return
