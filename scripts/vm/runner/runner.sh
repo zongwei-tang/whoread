@@ -38,7 +38,9 @@
 # WHOREAD_VM_RUNNER_TEST_PATH is then put in front of PATH (stand-ins for tools a sandbox refuses).
 set -uo pipefail
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-RUNNER_VERSION=1
+# In the heartbeat; vmjob.sh queues jobs only for a runner as new as the job files it writes.
+# 2: every job runs from a private copy (exec_job), which job files from vmjob.sh rely on.
+RUNNER_VERSION=2
 MODE="${1:-}"
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 CONF="${WHOREAD_VM_RUNNER_CONF:-/usr/local/etc/whoread-vmrunner.conf}"

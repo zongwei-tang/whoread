@@ -396,6 +396,31 @@ sleep 3
 out=$(VMJOB result "$NOPE" 2>&1); [ $? -eq 70 ] && grep -q withdrawn <<< "$out" && ok "result reports the withdrawal" || bad "result of withdrawn: $out"
 stop_runner
 
+echo "== a runner older than vmjob.sh gets no jobs"
+# The VM keeps running the runner install.sh copied until install.sh runs again. Version 1 ran a
+# job file where it lies in the share, so the copy of the script a job makes would land next to it
+# (and every later job would fail): vmjob must queue nothing for it and say how to update it. A
+# stand-in heartbeat, rewritten every half second, says runner: 1.
+OLDSHARE="$T/oldshare"
+mkdir -p "$OLDSHARE/.vm"
+( while :; do
+    printf 'mode: daemon\nbeat: %s\nrunner: 1\n' "$RANDOM" > "$OLDSHARE/.vm/heartbeat.tmp"
+    mv -f "$OLDSHARE/.vm/heartbeat.tmp" "$OLDSHARE/.vm/heartbeat"
+    /bin/sleep 0.5
+  done ) &
+OLDBEAT=$!
+OLDVMJOB() { WHOREAD_VM_HOST_DIR="$OLDSHARE" bash "$ROOT/scripts/vm/vmjob.sh" "$@"; }
+out=$(OLDVMJOB ping 2>&1); rc=$?
+[ $rc -eq 69 ] && grep -q 'runner/install.sh' <<< "$out" \
+  && ok "ping reports a runner older than vmjob.sh (69, install it again)" || bad "ping with a version 1 runner: rc $rc: $out"
+out=$(WHOREAD_VMJOB_GRACE=0 OLDVMJOB run old "$T/outside.sh" --timeout 1 2>&1); rc=$?
+[ $rc -eq 69 ] && grep -q 'runner/install.sh' <<< "$out" && [ -z "$(ls -A "$OLDSHARE/.vm/jobs" 2>/dev/null)" ] \
+  && ok "run queues nothing for a runner older than vmjob.sh (69, install it again)" \
+  || bad "run with a version 1 runner: rc $rc: $out; queued: $(ls -A "$OLDSHARE/.vm/jobs" 2>/dev/null)"
+kill "$OLDBEAT"; wait "$OLDBEAT" 2>/dev/null
+grep -q '^runner: [2-9]' "$SHARE/.vm/heartbeat" && ok "the runner's heartbeat names a version vmjob.sh accepts" \
+  || bad "runner heartbeat: $(grep '^runner:' "$SHARE/.vm/heartbeat")"
+
 echo "== TCC grant (scripts/vm/tcc-fda.sh --db)"
 TCC="$ROOT/scripts/vm/tcc-fda.sh"
 # macOS 14+ (also 11-13 without the last four columns)

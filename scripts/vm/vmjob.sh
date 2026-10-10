@@ -11,7 +11,8 @@
 #   scripts/vm/vmjob.sh list                             queued, running and recent jobs
 # Exit codes besides the job's own: 124 the job timed out in the VM, 125 interrupted by a runner or
 # VM restart, 69 the runner is not responding (a job it had not taken yet is withdrawn and never
-# runs), 70 gave up waiting (a job still queued is withdrawn and never runs; a running one may still
+# runs) or is older than this script (nothing is queued: install it again in the VM, README step 4),
+# 70 gave up waiting (a job still queued is withdrawn and never runs; a running one may still
 # finish: result ID --wait), 64 usage. A job gets its timeout plus 120 s from its start (not from
 # when it was queued) before vmjob gives up; WHOREAD_VMJOB_GRACE sets another margin than 120 s.
 # Only time this Mac is awake counts: a jump of the clock (after sleep) does not use up these limits.
@@ -32,11 +33,14 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 DEFAULT_TIMEOUT=900
 END_OF_SCRIPT=WHOREAD_VM_END_OF_SCRIPT
+# The oldest runner (its heartbeat's "runner:" line) that runs the job files written here: version 1
+# ran a job file where it lies in the share, and the copy of the script a job makes goes next to it.
+NEED_RUNNER=2
 GRACE="${WHOREAD_VMJOB_GRACE:-120}"
 case "$GRACE" in ""|*[!0-9]*) echo "vmjob: WHOREAD_VMJOB_GRACE must be a number of seconds" >&2; exit 64 ;; esac
 
 die() { echo "vmjob: $*" >&2; exit "${2:-1}"; }
-usage() { sed -n '5,17p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 64; }
+usage() { sed -n '5,18p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 64; }
 
 # CLOCK: seconds of waiting so far. It follows the wall clock while that moves plausibly; tick is
 # called about once a second, and a step backwards or of more than MAX_STEP seconds (this Mac slept,
@@ -88,10 +92,21 @@ alive() {
   return 1
 }
 
+# The runner that writes the heartbeat is NEED_RUNNER or newer. The VM runs the copy install.sh
+# made, so a change to scripts/vm/runner/ reaches it only when install.sh runs again.
+runner_current() {
+  local v
+  v=$(sed -n 's/^runner:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$HB" 2>/dev/null | head -n 1)
+  [ "${v:-0}" -ge "$NEED_RUNNER" ] && return 0
+  echo "vmjob: the runner in the VM is version ${v:-unknown}, older than these scripts (they need $NEED_RUNNER). Install it again: in the VM, sudo bash /Users/admin/wr/whoread/scripts/vm/runner/install.sh (scripts/vm/README.md, step 4)" >&2
+  return 1
+}
+
 cmd_ping() {
   alive strict || exit 69
   echo "VM runner alive ($VMDIR)"
   sed 's/^/  /' "$HB"
+  runner_current || exit 69
 }
 
 OFFSET=0
@@ -211,6 +226,7 @@ cmd_run() {
   [ -n "$timeout" ] || timeout=$(header_timeout "$abs")
   [ -n "$timeout" ] || timeout=$DEFAULT_TIMEOUT
   alive || exit 69
+  runner_current || exit 69
   mkdir -p "$VMDIR/jobs" "$VMDIR/results" || die "cannot create $VMDIR"
   id="$(date +%Y%m%d-%H%M%S)-$name-$$"
   job="$VMDIR/jobs/$id.sh"
