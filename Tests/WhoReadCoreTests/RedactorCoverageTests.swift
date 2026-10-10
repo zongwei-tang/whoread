@@ -86,6 +86,15 @@ final class RedactorCoverageTests: XCTestCase {
             ["db2", "connect", "to", "sample"], ["db2", "connect to sample"], ["db2", "list", "database", "directory"],
             ["psql", "-c", "SELECT * FROM t JOIN u USING (id)"], ["psql", "-c", "\\connect app"],
         ])
+        // A logon after CONNECT is SQL*Plus, RMAN or DGMGRL syntax, read where one of them runs.
+        assertRedacted(["/bin/sh", "-c", "rman <<EOF\nconnect target sys/Hunter2pw@db\nconnect catalog rcat/Hunter2pw@rcat\nEOF"],
+                       ["/bin/sh", "-c", "rman <<EOF\nconnect target sys/\(R)@db\nconnect catalog rcat/\(R)@rcat\nEOF"])
+        assertRedacted(["/bin/sh", "-c", "sqlplus /nolog <<EOF\nconn system/Hunter2pw\nEOF"], ["/bin/sh", "-c", "sqlplus /nolog <<EOF\nconn system/\(R)\nEOF"])
+        assertKept([
+            ["/bin/zsh", "-c", "grep -rn connect src/net && rg connect Sources/WhoReadIPC"],
+            ["git", "commit", "-m", "connect src/main.swift to the db"], ["python3", "-c", "import db; db.connect('a/b')"],
+            ["/bin/zsh", "-c", "grep -rn connect src/permanent"],
+        ])
     }
 
     /// MySQL's `PASSWORD('x')` and pgcrypto's `crypt('x', …)` take the password in any statement: the

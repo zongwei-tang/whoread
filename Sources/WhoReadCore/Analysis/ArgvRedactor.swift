@@ -1532,6 +1532,12 @@ public enum ArgvRedactor {
         let lower = s.lowercased()
         guard lower.contains("password") || lower.contains("identified") || lower.contains("conn") || lower.contains("crypt") else { return s }
         var scanner = SQLScanner(Array(s.unicodeScalars))
+        // `CONNECT user/pw@db` is SQL*Plus, RMAN and DGMGRL syntax: it is read only where one of them
+        // runs, so that `grep -rn connect src/net` keeps its path.
+        if lower.contains("conn") {
+            let words = Set(lower.split { !$0.isLetter && !$0.isNumber })
+            scanner.logons = !words.isDisjoint(with: ["sqlplus", "rman", "dgmgrl", "sqlcl"]) || lower.contains("/nolog")
+        }
         scanner.run()
         guard !scanner.secrets.isEmpty else { return s }
         var out = scanner.text
@@ -1555,6 +1561,8 @@ public enum ArgvRedactor {
         var i = 0
         /// Ranges of `text` to replace.
         var secrets: [Range<Int>] = []
+        /// `CONNECT user/pw` logons are read (the text runs an Oracle client).
+        var logons = false
 
         init(_ text: [Unicode.Scalar]) { self.text = text }
 
@@ -1799,7 +1807,9 @@ public enum ArgvRedactor {
                             // TO db USER u USING x [NEW y CONFIRM y]` (Db2, embedded SQL).
                             _ = next()
                             statement = .connectTo
-                        } else {
+                        } else if logons {
+                            // RMAN: `CONNECT TARGET|CATALOG|AUXILIARY user/pw@db`.
+                            if let w = upper(peek()), ["TARGET", "CATALOG", "AUXILIARY"].contains(w) { _ = next() }
                             connect()
                         }
                     case "USER" where statement == .connectTo:
