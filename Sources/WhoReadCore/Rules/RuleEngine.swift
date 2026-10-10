@@ -57,6 +57,9 @@ public enum DecisionReason: String, Codable, Sendable {
     /// "Trust Apple programs" is on and this is an Apple program in a system location, with no AI
     /// agent in its chain.
     case trustedApple
+    /// Allowed by the daemon, but the answer reached the kernel at or after the AUTH deadline (or not at
+    /// all) while the deadline miss mode was fail-closed (macOS 27): the kernel denied the access.
+    case deadlineMissed
 }
 
 public struct RuleDecision: Codable, Hashable, Sendable {

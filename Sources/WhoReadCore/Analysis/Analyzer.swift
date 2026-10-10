@@ -311,6 +311,9 @@ public final class Analyzer: @unchecked Sendable {
 
         var output = AnalysisOutput()
         let learning = baseline.isLearning(at: time)
+        // What the decision and access alone do not tell, recorded with every event of the access.
+        var note = activity.note
+        if case .decided(let d) = context, d.reason == .deadlineMissed { note = EventNote.deadlineMissed }
         // Rules are evaluated per category: an allow for one category must not silence another
         // category touched by the same operation (copying a key to a USB stick).
         func evaluationTargets(_ group: (category: TargetCategory, targets: [ClassifiedTarget])) -> [EvaluationTarget] {
@@ -332,7 +335,9 @@ public final class Analyzer: @unchecked Sendable {
                         $0.category.id == asked ? d : RuleDecision(verdict: .deny, reason: .askUser, suppressAlert: true)
                     }
                 }
-            } else {
+            } else if d.reason != .deadlineMissed {
+                // (The kernel denied an access the daemon allowed: no rule did, and none is charged with
+                // it; every category keeps that decision.)
                 let own = groups.map {
                     rules.evaluate(process: process, chain: chain, targets: evaluationTargets($0), enforcementActive: true,
                                    now: time, consumeExceptions: false)
@@ -394,7 +399,7 @@ public final class Analyzer: @unchecked Sendable {
                 categoryID: group.category.id, severity: group.category.severity, process: ArgvRedactor.redact(process),
                 chain: chainLinks, responsible: responsible, agentID: agentID, isOwner: isOwner,
                 benignServiceID: benignID, decision: eventDecision, ruleID: decision.ruleID,
-                chainAgents: chainAgents, ancestryKnown: ancestryKnown)
+                chainAgents: chainAgents, ancestryKnown: ancestryKnown, note: note)
 
             let keys = access.kinds.map { BaselineKey(responsibleKey: responsible.key, categoryID: group.category.id, access: $0) }
             let firstTime = !learning && benignID == nil && keys.contains { !baseline.contains($0) }

@@ -41,7 +41,7 @@ public enum L: String, CaseIterable, Sendable {
     case setMonitoredPaths, setProjectRoots, setProjectRootsNote, setAsk, setAskNote, setTrustApple, setTrustAppleNote
     case setRetention, setRetentionDays, setDetailDays, setNotifications, setNotificationsEnabled, setMinSeverity
     case setNotifyWouldBlock, setEnforcement, setEnforcementMaster, setEnforcementNote, setLatency, setReaddir
-    case slowResponsesFormat, slowMissesFormat, slowP99Format, uncleanStopFormat
+    case slowResponsesFormat, slowMissesFormat, slowP99Format, uncleanStopFormat, authDroppedDeniedFormat, authDroppedAllowedFormat
     case setLanguage, setLanguageSystem, setCoalesce, setSaved, setPermissionNeeded
     // Onboarding
     case onbTitle, onbIntro, onbFDATitle, onbFDABody, onbFDAButton, onbExtTitle, onbExtBody, onbExtButton
@@ -242,7 +242,11 @@ public enum L10n {
         .slowResponsesFormat: ("Slow responses: %@. Enforcement stays as you set it.", "响应变慢：%@。拦截保持你的设置。"),
         .slowMissesFormat: ("%ld missed kernel deadlines", "错过内核期限 %ld 次"),
         .slowP99Format: ("p99 %@ ms (warning above %@ ms)", "p99 %@ 毫秒（超过 %@ 毫秒提醒）"),
-        .uncleanStopFormat: ("The monitor stopped unexpectedly while it could block (%@). Enforcement stays as you set it.", "监控程序在可拦截状态下意外停止（%@）。拦截保持你的设置。"),
+        .uncleanStopFormat: ("The monitor stopped unexpectedly (%@). Enforcement stays as you set it.", "监控程序意外停止（%@）。拦截保持你的设置。"),
+        .authDroppedDeniedFormat: ("The kernel dropped %ld file accesses from a full queue and denied them. Which program and file is not known, so they are not in the events.",
+                                   "内核因队列已满丢弃了 %ld 次文件访问并拒绝了它们。无法得知是哪个程序和文件，所以事件里没有它们。"),
+        .authDroppedAllowedFormat: ("The kernel dropped %ld file accesses from a full queue and allowed them. Which program and file is not known, so they are not in the events.",
+                                    "内核因队列已满丢弃了 %ld 次文件访问并放行了它们。无法得知是哪个程序和文件，所以事件里没有它们。"),
 
         .onbTitle: ("Welcome to WhoRead", "欢迎使用 WhoRead"),
         .onbIntro: ("WhoRead shows which app read your SSH keys, cloud credentials, browser data and other sensitive files — and who started it. Everything stays on this Mac. File contents are never read.", "WhoRead 告诉你哪个应用读了你的 SSH 密钥、云凭证、浏览器数据等敏感文件，以及是谁启动了它。所有数据只留在这台 Mac 上，从不读取文件内容。"),
@@ -380,14 +384,21 @@ public enum L10n {
         }
     }
 
+    /// The event's decision, and its note when it has one (`EventNote`).
     public static func decision(_ e: AnalyzedEvent, _ language: Language = current) -> String {
-        if e.isBenign { return t(.decBenign, language) }
-        switch e.decision {
-        case .observed: return t(.decObserved, language)
-        case .allowed: return t(.decAllowed, language)
-        case .denied: return t(.decDenied, language)
-        case .wouldDeny: return t(.decWouldDeny, language)
+        let text: String
+        if e.isBenign {
+            text = t(.decBenign, language)
+        } else {
+            switch e.decision {
+            case .observed: text = t(.decObserved, language)
+            case .allowed: text = t(.decAllowed, language)
+            case .denied: text = t(.decDenied, language)
+            case .wouldDeny: text = t(.decWouldDeny, language)
+            }
         }
+        guard let note = e.note else { return text }
+        return text + (language == .zhHans ? "，" : ", ") + EventNote.describe(note, language: language)
     }
 
     public static func kind(_ k: ResponsibleEntity.Kind, _ language: Language = current) -> String {

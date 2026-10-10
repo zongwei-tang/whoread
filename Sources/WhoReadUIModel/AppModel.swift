@@ -407,10 +407,22 @@ public final class AppModel {
         return L10n.f(.slowResponsesFormat, parts.joined(separator: language == .zhHans ? "，" : ", "), language: language)
     }
 
-    /// The daemon's previous instance stopped while it could block (killed for a missed deadline,
-    /// a crash, power loss). Enforcement was left as the user set it.
+    /// The daemon's previous instance stopped uncleanly (killed for a missed deadline, a crash, power
+    /// loss, or exited by its watchdog, also while only monitoring; the daemon's note says which).
+    /// Enforcement was left as the user set it.
     public var uncleanStopText: String? {
         liveStatus?.uncleanStop.map { L10n.f(.uncleanStopFormat, $0, language: language) }
+    }
+
+    /// AUTH accesses the kernel dropped from the native source's full queue since the daemon started:
+    /// denied in fail-closed mode (macOS 27), allowed before. Nothing about them is known, so no event
+    /// shows them. (Accesses the kernel denied after a late answer are recorded as events.)
+    public var kernelDropsText: String? {
+        guard let a = liveStatus?.sourceAuth else { return nil }
+        var parts: [String] = []
+        if a.droppedDenied > 0 { parts.append(L10n.f(.authDroppedDeniedFormat, Int(clamping: a.droppedDenied), language: language)) }
+        if a.droppedAllowed > 0 { parts.append(L10n.f(.authDroppedAllowedFormat, Int(clamping: a.droppedAllowed), language: language)) }
+        return parts.isEmpty ? nil : parts.joined(separator: language == .zhHans ? "" : " ")
     }
 
     /// Why block rules (and "block from now on") do not block right now; nil when they do.

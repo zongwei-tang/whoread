@@ -84,6 +84,9 @@ struct MenuBarView: View {
             if let slow = model.slowResponsesText {
                 Text(slow).font(.caption).foregroundStyle(.orange)
             }
+            if let dropped = model.kernelDropsText {
+                Text(dropped).font(.caption).foregroundStyle(.orange)
+            }
             if status.enforcementActive {
                 Button(L10n.t(.killSwitchAdmin)) { connection.engageKillSwitchWithAdminRights() }
                     .font(.caption)

@@ -94,6 +94,9 @@ struct SettingsView: View {
                 if let slow = model.slowResponsesText {
                     Text(slow).font(.caption).foregroundStyle(.orange)
                 }
+                if let dropped = model.kernelDropsText {
+                    Text(dropped).font(.caption).foregroundStyle(.orange)
+                }
             }
             Section(L10n.t(.setLanguage)) {
                 Picker(L10n.t(.setLanguage), selection: s.language) {

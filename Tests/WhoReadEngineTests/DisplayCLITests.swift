@@ -216,6 +216,38 @@ final class DisplayCLITests: XCTestCase {
         XCTAssertEqual(decoded, stub.events)
     }
 
+    /// `whoread events` shows an event's note with its decision: a denial by the kernel after a late
+    /// answer, a close that is only possibly a write, and (escaped) a note from a newer daemon.
+    func testEventsShowTheNote() throws {
+        try skipIfSocketBindDenied()
+        let dir = TempDir()
+        let stub = try Stub()
+        let t = Date(timeIntervalSince1970: 1_760_000_000)
+        let who = ResponsibleEntity(kind: .binary, key: "bin:/opt/tools/cat", displayName: "cat")
+        func event(_ id: Int64, _ path: String, _ op: FileOperation, _ access: AccessSet, _ decision: EventDecision, _ note: String?) -> AnalyzedEvent {
+            AnalyzedEvent(id: id, time: t, operation: op, access: access, path: path, secondaryPath: nil, categoryID: "test-vault",
+                          severity: .critical, process: ProcessRecord(pid: 60, ppid: 1, executablePath: "/opt/tools/cat"), chain: [],
+                          responsible: who, agentID: nil, isOwner: false, benignServiceID: nil, decision: decision, ruleID: nil, note: note)
+        }
+        stub.events = [event(1, "/Users/alice/WhoReadTestVault/a", .open, .read, .denied, EventNote.deadlineMissed),
+                       event(2, "/Users/alice/WhoReadTestVault/b", .close, .write, .observed, EventNote.mappedWritable),
+                       event(3, "/Users/alice/WhoReadTestVault/c", .open, .read, .allowed, "newer\u{1B}[2J")]
+        let server = UnixSocketServer(path: dir.path("s.sock"), handler: stub)
+        try server.start()
+        defer { server.stop() }
+
+        let r = try whoread(["--socket", dir.path("s.sock"), "events"])
+        XCTAssertEqual(r.status, 0, String(decoding: r.stderr, as: UTF8.self))
+        assertNoTerminalControls(r.stdout)
+        let lines = r.text.split(separator: "\n").map(String.init)
+        let a = try XCTUnwrap(lines.first { $0.contains("WhoReadTestVault/a") }, r.text)
+        XCTAssertTrue(a.contains("BLOCKED, " + EventNote.describe(EventNote.deadlineMissed, language: .en)), a)
+        let b = try XCTUnwrap(lines.first { $0.contains("WhoReadTestVault/b") }, r.text)
+        XCTAssertTrue(b.contains(EventNote.describe(EventNote.mappedWritable, language: .en)), b)
+        let c = try XCTUnwrap(lines.first { $0.contains("WhoReadTestVault/c") }, r.text)
+        XCTAssertTrue(c.contains("newer\\u{1b}[2J"), c)
+    }
+
     func testLogLinesEscapeBidiAndZeroWidthCharactersToo() {
         // The log shares the display sanitizer: a right-to-left override cannot reorder a log line.
         XCTAssertEqual(Log.sanitize("rule \u{202E}kcolb\u{200B}"), "rule \\u{202e}kcolb\\u{200b}")

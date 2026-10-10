@@ -66,7 +66,7 @@ public enum Exporter {
     public static let csvColumns = [
         "id", "time", "operation", "access", "path", "secondary_path", "category", "category_name", "severity",
         "pid", "executable", "signing_id", "team_id", "platform_binary", "responsible", "responsible_kind",
-        "responsible_key", "agent", "chain", "owner", "benign_service", "decision", "rule_id", "alert_id",
+        "responsible_key", "agent", "chain", "owner", "benign_service", "decision", "rule_id", "alert_id", "note",
     ]
 
     public static func csv(events: [AnalyzedEvent], catalog: Catalog? = nil) -> String {
@@ -79,7 +79,7 @@ public enum Exporter {
                 e.process.teamID ?? "", e.process.isPlatformBinary ? "true" : "false", e.responsible.displayName,
                 e.responsible.kind.rawValue, e.responsible.key, e.agentID ?? "", e.chainDisplay,
                 e.isOwner ? "true" : "false", e.benignServiceID ?? "", e.decision.rawValue, e.ruleID ?? "",
-                e.alertID.map(String.init) ?? "",
+                e.alertID.map(String.init) ?? "", e.note ?? "",
             ]
             lines.append(row.map(csvField).joined(separator: ","))
         }

@@ -61,6 +61,9 @@ public struct DaemonConfiguration: Sendable {
     /// instance died while enforcing (the kernel kills a client that misses an AUTH deadline). It is
     /// reported (`DaemonStatus.uncleanStop`); enforcement stays as the user set it.
     public var authArmedMarkerPath: String { (dataDirectory as NSString).appendingPathComponent("auth-armed") }
+    /// Written by the native source's handler watchdog just before it exits (NativeStallMarker): the next
+    /// start reports the stop as the watchdog's and counts it toward the watchdog's backoff.
+    public var watchdogStallMarkerPath: String { (dataDirectory as NSString).appendingPathComponent("watchdog-stall") }
     public var lockPath: String { (dataDirectory as NSString).appendingPathComponent("daemon.lock") }
 }
 
@@ -346,6 +349,9 @@ public final class DaemonCore: @unchecked Sendable {
     private var rulesLoadError: String?
     /// The previous instance stopped while enforcing; kept (and stored) until the next clean stop.
     private var uncleanStopNote: String?
+    /// The shortest stall the native source's handler watchdog waits for in this instance: longer after
+    /// recent watchdog exits (UncleanStops, NativeHandlerWatchdog.floor).
+    public let watchdogStallFloor: TimeInterval
     private var lastSlowWarning = Date.distantPast
 
     /// Older versions switched enforcement off on a latency trip and kept the reason here. There are
@@ -479,19 +485,27 @@ public final class DaemonCore: @unchecked Sendable {
         // deadline (kill mode), its watchdog exited it with the file handler stuck (fail-closed mode, see
         // NativeHandlerWatchdog), it crashed, or the Mac lost power. Enforcement is never switched off automatically
         // (ask mode): it stays as the user set it, and the stop is reported until the next clean stop.
+        // The watchdog also exits a daemon that only monitors (its stall marker says so): file events were
+        // lost then. Every unclean stop is counted until the next clean stop (UncleanStops), so a wedge
+        // that comes back after each restart shows as one loop with its count, first and last time.
         var unclean = (try? store.value(forKey: DaemonCore.uncleanStopKey))?.flatMap { String(data: $0, encoding: .utf8) }
+        var stops = (try? store.value(forKey: UncleanStops.key))?.flatMap { try? JSONDecoder().decode(UncleanStops.self, from: $0) }
+            ?? UncleanStops()
         var marker = stat()
-        if !config.inMemoryStore, lstat(config.authArmedMarkerPath, &marker) == 0 {
-            // unlink, not removeItem: never a recursive delete, and a link goes, not its target.
-            unlink(config.authArmedMarkerPath)
-            let note = "the previous daemon stopped while enforcing (killed for a missed AUTH deadline, exited by its watchdog "
-                + "with the event handler stuck, a crash or a power loss); "
-                + "found at start \(ISO8601DateFormatter().string(from: now))"
+        let armed = !config.inMemoryStore && lstat(config.authArmedMarkerPath, &marker) == 0
+        // unlink, not removeItem: never a recursive delete, and a link goes, not its target.
+        if armed { unlink(config.authArmedMarkerPath) }
+        let stall = config.inMemoryStore ? nil : NativeStallMarker.take(config.watchdogStallMarkerPath)
+        if armed || stall != nil {
+            stops.record(at: now, stall: stall)
+            let note = stops.note(now: now, armed: armed, stall: stall)
             unclean = note
             try? store.setValue(Data(note.utf8), forKey: DaemonCore.uncleanStopKey)
+            try? store.setValue(try? JSONEncoder().encode(stops), forKey: UncleanStops.key)
             Log.error("\(note); enforcement stays \(settings.enforcementEnabled ? "on" : "off") as set")
         }
         uncleanStopNote = unclean
+        watchdogStallFloor = stops.watchdogFloor(now: now)
         if (try? store.value(forKey: DaemonCore.legacyTripKey)) != nil {
             try? store.setValue(nil, forKey: DaemonCore.legacyTripKey)
         }
@@ -856,6 +870,7 @@ public final class DaemonCore: @unchecked Sendable {
     public func noteCleanStop() {
         lock.lock(); uncleanStopNote = nil; lock.unlock()
         try? store.setValue(nil, forKey: DaemonCore.uncleanStopKey)
+        try? store.setValue(nil, forKey: UncleanStops.key)
     }
 
     /// Waits until enforcement observers queued so far have run (tests).
@@ -1852,7 +1867,7 @@ public final class DaemonCore: @unchecked Sendable {
             writerDropped: writer.droppedCount, monitoredPrefixes: analyzer.classifier.prefixes.count,
             homeDirectories: homes, rulesLoadError: rulesError, sourceDroppedEvents: source.droppedEvents,
             sourceKernelDrops: source.kernelDroppedEvents, pendingAsks: askBroker.openRequests, uncleanStop: unclean,
-            sourceDeadlineMissMode: stats.source.deadlineMissMode)
+            sourceDeadlineMissMode: stats.source.deadlineMissMode, sourceAuth: source.authCounts)
     }
 }
 

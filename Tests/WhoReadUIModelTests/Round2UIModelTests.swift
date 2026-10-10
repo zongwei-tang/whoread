@@ -254,6 +254,16 @@ final class Round2UIModelTests: XCTestCase {
         editing.selectApp(toolRow)
         XCTAssertEqual(editing.appCdhash, older)
     }
+
+    /// An event's note (a denial by the kernel after a late answer, a close that is only possibly a
+    /// write) is shown with its decision.
+    func testTheDecisionNamesTheEventNote() {
+        var e = event(1, Date(), "/Users/alice/.ssh/id_rsa", .read, denied: true)
+        XCTAssertEqual(L10n.decision(e, .en), "Blocked")
+        e.note = EventNote.deadlineMissed
+        XCTAssertEqual(L10n.decision(e, .en), "Blocked, " + EventNote.describe(EventNote.deadlineMissed, language: .en))
+        XCTAssertEqual(L10n.decision(e, .zhHans), "已拦截，" + EventNote.describe(EventNote.deadlineMissed, language: .zhHans))
+    }
 }
 
 /// A coding key for a decoding error the way a newer daemon's answer produces one.

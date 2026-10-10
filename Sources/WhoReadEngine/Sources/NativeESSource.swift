@@ -174,7 +174,7 @@ public enum NativeDeadlineMissMode: UInt32, Sendable, CaseIterable {
 
 /// Denials queued for recording (the AUTH callback only counts under a lock). Every denial is
 /// recorded while the backlog is short. Past `mergeThreshold`, a denial identical to one still
-/// queued (same process instance, operation, targets with their access, and rule) is merged into it,
+/// queued (same process instance, operation, targets with their access, rule and reason) is merged into it,
 /// so a process looping on a denied open cannot grow the queue without bound; past `limit`, every
 /// further denial is only counted. Neither touches the AUTH response, which is sent before. Outside
 /// the EndpointSecurity guard so it is unit-tested on any host.
@@ -186,6 +186,8 @@ struct NativeDenialBacklog {
         /// Paths with their access: a denied write is not merged into a queued denied read.
         let targets: [FileTarget]
         let ruleID: String?
+        /// A denial by no rule is an unanswered question or the kernel's (a late answer): recorded apart.
+        let reason: DecisionReason
 
         init(_ activity: FileActivity, _ decision: RuleDecision) {
             pid = activity.process.pid
@@ -193,6 +195,7 @@ struct NativeDenialBacklog {
             operation = activity.operation
             targets = activity.targets
             ruleID = decision.ruleID
+            reason = decision.reason
         }
     }
 
@@ -249,6 +252,59 @@ struct NativeSequenceGaps {
 
     /// A new client numbers its messages afresh.
     mutating func reset() { last = nil }
+}
+
+/// AUTH messages the kernel dropped for the file client, from seq_num (message version >= 2), which
+/// counts each event type on its own: a gap in an AUTH type's numbers is an AUTH message of that type
+/// that never arrived (global_seq_num gaps cannot tell AUTH from NOTIFY). The kernel denies such an
+/// access in fail-closed mode (header, es_set_deadline_miss_mode) and allows it otherwise. Nothing else
+/// is known about it (no process, no path), so it is counted by outcome, never recorded as an event.
+/// Outside the EndpointSecurity guard so it is unit-tested on any host.
+struct NativeAuthDrops {
+    private var gaps: [UInt32: NativeSequenceGaps] = [:]
+    /// Dropped while the client's deadline miss mode was fail-closed: the kernel denied them.
+    private(set) var denied: UInt64 = 0
+    /// Dropped in any other mode (kill before macOS 27): the kernel allowed them.
+    private(set) var allowed: UInt64 = 0
+
+    mutating func note(type: UInt32, seq: UInt64, failClosed: Bool) {
+        var g = gaps[type] ?? NativeSequenceGaps()
+        let before = g.dropped
+        g.note(seq)
+        gaps[type] = g
+        let new = g.dropped &- before
+        guard new > 0 else { return }
+        if failClosed { denied &+= new } else { allowed &+= new }
+    }
+
+    /// A new client numbers its messages afresh; the counts stay.
+    mutating func reset() { gaps = [:] }
+}
+
+/// Answering an AUTH message when the kernel enforces its deadline itself (fail-closed, macOS 27):
+/// whatever is not answered by the deadline is denied, and no NOTIFY event follows. An allow given
+/// at or after the deadline, or one es_respond did not deliver, is therefore a denial that nothing
+/// else would record. Outside the EndpointSecurity guard so it is unit-tested on any host.
+enum NativeLateAnswer {
+    /// ES_RESPOND_RESULT_SUCCESS and ES_RESPOND_RESULT_ERR_DUPLICATE_RESPONSE (ESTypes.h).
+    static let respondSuccess: UInt32 = 0
+    static let respondDuplicate: UInt32 = 4
+
+    /// Sends the answer through `send` (allow or not; it returns es_respond's raw result) and returns
+    /// true when the kernel denied an access the daemon allowed. In fail-closed mode an allow is never
+    /// sent once `now()` (Mach absolute time, read just before es_respond) has reached the message's
+    /// deadline: the kernel has denied the access by then or is about to, and sending a deny instead
+    /// makes the outcome the same whoever is first, so recording it as denied is never wrong. A
+    /// delivery failure leaves the message to its deadline (denied too); a duplicate means an earlier
+    /// answer stands, which is not this one's to judge. In any other mode a late answer is sent as
+    /// decided and nothing is reported: in kill mode the kernel kills the daemon and allows the access.
+    /// A deadline of 0 (never set by the kernel for AUTH) is not taken as passed.
+    static func answer(allow: Bool, failClosed: Bool, deadline: UInt64, now: () -> UInt64, send: (Bool) -> UInt32) -> Bool {
+        let late = failClosed && allow && deadline != 0 && now() >= deadline
+        let result = send(allow && !late)
+        guard failClosed && allow else { return false }
+        return late || (result != respondSuccess && result != respondDuplicate)
+    }
 }
 
 /// How long ask mode may hold an AUTH message (docs/ASK_MODE.md): remaining = deadline − now,
@@ -409,16 +465,263 @@ final class NativeClientGate: @unchecked Sendable {
     }
 }
 
+/// Calls of one client's handler block, so that a stop can tell when the messages the kernel queued
+/// before es_unsubscribe_all have been handled where es_sync_client is missing (before macOS 27).
+/// Outside the EndpointSecurity guard so it is unit-tested on any host.
+final class NativeHandlerActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inside = 0
+    private var calls: UInt64 = 0
+
+    func enter() {
+        lock.lock()
+        inside += 1
+        calls &+= 1
+        lock.unlock()
+    }
+
+    func leave() {
+        lock.lock()
+        inside -= 1
+        lock.unlock()
+    }
+
+    private var snapshot: (inside: Int, calls: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        return (inside, calls)
+    }
+
+    /// Waits until no call is running and none has started for `quiet` seconds, at most `timeout`.
+    /// False if that never happened: messages are still coming, or a call is stuck.
+    func waitQuiet(_ quiet: TimeInterval, waitAtMost timeout: TimeInterval) -> Bool {
+        let start = DispatchTime.now().uptimeNanoseconds
+        let end = start &+ UInt64(max(timeout, 0) * 1e9)
+        let quietNs = UInt64(max(quiet, 0) * 1e9)
+        var seen = snapshot
+        var quietSince = start
+        while true {
+            let t = DispatchTime.now().uptimeNanoseconds
+            let s = snapshot
+            if s.inside > 0 || s.calls != seen.calls {
+                seen = s
+                quietSince = t
+            } else if t &- quietSince >= quietNs {
+                return true
+            }
+            if t >= end { return false }
+            Thread.sleep(forTimeInterval: min(max(quiet / 4, 0.001), 0.01))
+        }
+    }
+}
+
+/// Before a client is deleted, after es_unsubscribe_all: the kernel still delivers what it queued
+/// before, and an AUTH message among it should get the daemon's answer, not be left to the client's
+/// teardown. Outside the EndpointSecurity guard so it is unit-tested on any host.
+enum NativeDrain {
+    /// How long a drain may take per client.
+    static let wait: TimeInterval = 1
+    /// Before macOS 27: the handler counts as drained once it has been idle this long.
+    static let quiet: TimeInterval = 0.05
+
+    #if canImport(Darwin)
+    /// The block es_sync_client runs: an Objective-C block, which ES copies and calls later, from its
+    /// own queue, once every message queued in front of the marker has been handled (or when the client
+    /// is destroyed).
+    typealias SyncBlock = @convention(block) () -> Void
+
+    /// es_sync_client (macOS 27, ESClient.h) as a C function pointer: absent from the SDKs older Xcode
+    /// versions build with, so it is looked up at run time. It must not be called from the client's own
+    /// handler block. Returns es_return_t (ES_RETURN_SUCCESS = 0).
+    typealias SyncClientFunction = @convention(c) (OpaquePointer, @escaping SyncBlock) -> UInt32
+
+    static func syncClientFunction(_ symbol: UnsafeMutableRawPointer?) -> SyncClientFunction? {
+        symbol.map { unsafeBitCast($0, to: SyncClientFunction.self) }
+    }
+    #else
+    // Linux Swift has no blocks (scripts/dev/es-typecheck compiles this file there).
+    typealias SyncBlock = () -> Void
+    #endif
+    static let syncClientName = "es_sync_client"
+
+    /// `sync` places a sync marker whose block is the given one and returns whether that worked (nil
+    /// where es_sync_client is missing). Otherwise, or if placing failed, `quiet` waits for the
+    /// handler to go idle. True once drained; false at `timeout`: the caller must not delete the client
+    /// then (a call may still be running on it; the process is stopping anyway).
+    static func run(sync: ((@escaping SyncBlock) -> Bool)?, quiet: (TimeInterval) -> Bool,
+                    waitAtMost timeout: TimeInterval = NativeDrain.wait) -> Bool {
+        if let sync {
+            let done = DispatchSemaphore(value: 0)
+            // The block only signals: it may also run long after this returns (timeout) or at teardown.
+            if sync({ done.signal() }) { return done.wait(timeout: .now() + timeout) == .success }
+        }
+        return quiet(timeout)
+    }
+
+    /// What became of a client at a stop or an aborted setup.
+    enum Outcome: Equatable {
+        case deleted
+        /// The drain timed out on a client whose handler reads message memory outside its gate: not
+        /// deleted, so that no message is freed under a handler still reading it.
+        case keptUndrained
+        /// A call inside the gate (an es_* call, or a read of message memory) was still running at the
+        /// timeout: not deleted (es_delete_client must not run alongside it).
+        case keptBusy
+    }
+
+    /// After es_unsubscribe_all: `drain` (`run`), then `close` the client's gate (bounded; true when
+    /// nothing is inside) and `delete` it. `gatedOnly`: every es_* call and every read of message memory
+    /// of the client's handler runs inside its gate (the process client: the conversion is gated, the
+    /// process tree update after it is not), so a drain that timed out only means a slow delivery,
+    /// which the delete does not touch: the gate decides alone. Otherwise (the file client: the
+    /// watchdog's and the NOTIFY path's reads are outside the gate) the client is kept undeleted.
+    static func retire(gatedOnly: Bool, drain: () -> Bool, close: () -> Bool, delete: () -> Void) -> Outcome {
+        guard drain() || gatedOnly else { return .keptUndrained }
+        guard close() else { return .keptBusy }
+        delete()
+        return .deleted
+    }
+}
+
+/// The default mute set of a new ES client (ESClient.h, es_new_client): macOS mutes most AUTH events
+/// of some system programs (those watchdogd monitors, for example) for every client, so their accesses
+/// arrive as NOTIFY events only and can never be asked about or blocked. Mute inversion does not clear
+/// it, and the header advises against unmuting it, so it is only read at connect (es_muted_paths_events)
+/// and reported. Outside the EndpointSecurity guard so it is unit-tested on any host.
+enum NativeDefaultMutes {
+    /// es_mute_path_type_t: ES_MUTE_PATH_TYPE_PREFIX and ES_MUTE_PATH_TYPE_LITERAL mute a program by its
+    /// executable path; TARGET_PREFIX (2) and TARGET_LITERAL (3) mute targets, which inverted target
+    /// muting replaces with the monitored paths anyway.
+    static let programPrefix: UInt32 = 0
+    static let programLiteral: UInt32 = 1
+
+    struct Entry: Equatable {
+        let type: UInt32
+        let path: String
+        let events: [UInt32]
+    }
+
+    /// The program paths whose muted events include any of `authEvents` (the AUTH events the file
+    /// client answers), with only those events, sorted by path.
+    static func programs(_ entries: [Entry], authEvents: Set<UInt32>) -> [Entry] {
+        entries.compactMap { e -> Entry? in
+            guard e.type == programPrefix || e.type == programLiteral else { return nil }
+            let muted = e.events.filter(authEvents.contains)
+            return muted.isEmpty ? nil : Entry(type: e.type, path: e.path, events: muted)
+        }.sorted { $0.path.utf8.lexicographicallyPrecedes($1.path.utf8) }
+    }
+
+    /// The log line for `programs` (`name` names an event type).
+    static func logLine(_ programs: [Entry], name: (UInt32) -> String) -> String {
+        guard !programs.isEmpty else {
+            return "Endpoint Security default mute set: no program is muted for the AUTH events WhoRead answers"
+        }
+        let list = programs.map { p in
+            (p.type == programPrefix ? "\(p.path)* " : "\(p.path) ") + "(" + p.events.map(name).joined(separator: ", ") + ")"
+        }
+        return "Endpoint Security default mute set: macOS sends no AUTH event for \(programs.count) program path"
+            + (programs.count == 1 ? "" : "s") + " (their accesses are recorded but can never be asked about or blocked): "
+            + list.joined(separator: "; ")
+    }
+}
+
+/// Which processes opened a monitored file for writing, so that a close reporting the file as mapped
+/// writable is charged only to one of them (`es_event_close_t.was_mapped_writable`, message version
+/// >= 6). The flag only says that something mapped the vnode writable at some point while it was alive
+/// (header): on its own it would charge every later reader of the file. A shared writable mapping needs
+/// a descriptor opened with FWRITE (mmap fails with EACCES otherwise), and such an open is recorded, so
+/// a close of that process is a possible modification through the mapping, which no write call shows
+/// (`modified` stays false). A process is its pid with its start (fork) time: a descriptor survives exec,
+/// and a reused pid starts later. Entries are not dropped at exit: the process client's exit can be
+/// handled before the file client's closes of that process's descriptors (no order between two
+/// clients), and those closes are the common case. Bounded instead: past `capacity` the oldest entries
+/// go (their mapped closes are then not reported). Outside the EndpointSecurity guard so it is
+/// unit-tested on any host.
+struct NativeWritableOpens {
+    static let capacity = 4096
+
+    /// A process: pid and start time (es_process_t.start_time in microseconds, message version >= 3;
+    /// nil before, when only the pid tells processes apart).
+    struct Owner: Hashable {
+        let pid: Int32
+        let start: UInt64?
+    }
+
+    private struct Entry: Hashable {
+        let owner: Owner
+        let path: NativeMutePlan.Path
+    }
+
+    private var entries = Set<Entry>()
+    /// Insertion order, oldest first from `head`.
+    private var order: [Entry] = []
+    private var head = 0
+
+    var count: Int { entries.count }
+
+    mutating func noteWriteOpen(_ owner: Owner, path: String) {
+        let e = Entry(owner: owner, path: NativeMutePlan.Path(path))
+        guard entries.insert(e).inserted else { return }
+        order.append(e)
+        while entries.count > NativeWritableOpens.capacity, head < order.count {
+            entries.remove(order[head])
+            head += 1
+        }
+        if head > NativeWritableOpens.capacity {
+            order.removeFirst(head)
+            head = 0
+        }
+    }
+
+    /// Entries kept for eviction order (tests: it stays bounded).
+    var orderCount: Int { order.count }
+
+    func contains(_ owner: Owner, path: String) -> Bool {
+        entries.contains(Entry(owner: owner, path: NativeMutePlan.Path(path)))
+    }
+}
+
+/// files-5: an existing directory a rename lands on is judged by everything it can hold, because a
+/// swap (renamex_np RENAME_SWAP) moves it, with its contents, to the source path, and Endpoint Security
+/// does not report the rename's flags. An EMPTY directory carries nothing out, so a rename onto it is
+/// judged as a rename to a new path (a write; what the source brings in is still judged). A plain
+/// rename(2) onto a directory succeeds only while it is empty (ENOTEMPTY otherwise, checked by the file
+/// system when the rename happens), so it never carries anything out. For a swap, the stat is the
+/// kernel's at authorization: only what is put into the directory between the AUTH event and the swap
+/// can leave with it, and moving anything in is itself judged (the moved file is the carried source of
+/// its own rename, clone or copy), so only new content written there in that window by someone else
+/// could. Emptiness is read only where it is exact: on APFS a directory reports st_nlink = 2 + its
+/// entries (files, directories, links, fifos alike) and st_size = 32 × st_nlink; other file systems
+/// (network homes among them) report these fields their own way, and a dataless directory (a cloud
+/// folder whose contents are not local, SF_DATALESS) lists nothing but still has contents. Outside the
+/// EndpointSecurity guard so it is unit-tested on any host.
+enum NativeEmptyDirectory {
+    /// SF_DATALESS (sys/stat.h).
+    static let datalessFlag: UInt32 = 0x4000_0000
+
+    /// `onAPFS`: the directory's device is a local APFS volume (statfs f_fstypename).
+    static func isEmpty(mode: UInt32, nlink: UInt32, size: Int64, flags: UInt32, onAPFS: Bool) -> Bool {
+        onAPFS && mode & 0o170000 == 0o040000 && nlink == 2 && size == 64 && flags & datalessFlag == 0
+    }
+}
+
 /// Liveness of the file client's handler block, which the kernel calls serially: one call that never
 /// returns holds up every message behind it. In the default kill mode the kernel kills the daemon at
 /// the first missed AUTH deadline and launchd starts a new one. In fail-closed mode (macOS 27) nothing
 /// does: every AUTH access behind the stuck call is denied at its deadline, for as long as the daemon
 /// lives, and nothing is recorded. The watchdog notices one call that has been running far longer than
-/// any deadline and calls `onStall` (the source logs and exits, so launchd starts a fresh daemon; the
-/// enforcement setting is untouched, and the auth-armed marker left behind makes the next start report
-/// an unclean stop). Only a call that entered and has not returned counts, never idle time. Uptime
-/// clock: it pauses while the Mac sleeps. Outside the EndpointSecurity guard so it is unit-tested on
-/// any host.
+/// any deadline and calls `onStall` (the source logs, leaves a stall marker and exits, so launchd starts
+/// a fresh daemon; the enforcement setting is untouched, and the next start reports an unclean stop).
+/// Only a call that entered and has not returned counts, never idle time. Uptime clock: it pauses while
+/// the Mac sleeps. Outside the EndpointSecurity guard so it is unit-tested on any host.
+///
+/// A wedge that comes back after every restart would otherwise restart the daemon every two minutes.
+/// Each restart costs the ancestry of processes started before it and leaves a gap with no client (the
+/// accesses in it are allowed and not recorded), and a system that sees its ES client torn down again
+/// and again may throttle or refuse it (not documented either way; docs/ASK_MODE.md names the risk),
+/// which would leave nothing enforced at all. So the shortest stall
+/// doubles with each watchdog exit of the last `backoffWindow` (`floor(recentExits:)`), up to
+/// `maximumStall`: a recurring wedge then keeps failing closed (denied) for longer between restarts
+/// instead of churning, and the unclean-stop report counts the exits.
 final class NativeHandlerWatchdog: @unchecked Sendable {
     /// No AUTH deadline comes near this (they are seconds to tens of seconds). A restart costs the
     /// ancestry of processes started before it, so only a real wedge may cause one.
@@ -429,6 +732,15 @@ final class NativeHandlerWatchdog: @unchecked Sendable {
     static let maximumStall: TimeInterval = 900
     /// How often the timer looks.
     static let interval: TimeInterval = 10
+    /// Watchdog exits this recent count toward the backoff.
+    static let backoffWindow: TimeInterval = 3600
+
+    /// The shortest stall after `recentExits` watchdog exits in the last `backoffWindow`: doubling from
+    /// `minimumStall`, never above `maximumStall`.
+    static func floor(recentExits: Int) -> TimeInterval {
+        let doublings = min(max(recentExits, 0), 16)
+        return min(minimumStall * Double(1 << doublings), maximumStall)
+    }
 
     private let lock = NSLock()
     /// When the call inside started (uptime ns), nil while none is.
@@ -439,9 +751,13 @@ final class NativeHandlerWatchdog: @unchecked Sendable {
     private var cancelled = false
     private var timer: DispatchSourceTimer?
     private let now: () -> UInt64
+    /// The shortest stall (`floor(recentExits:)`).
+    let floor: TimeInterval
 
-    init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) {
+    init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+         floor: TimeInterval = NativeHandlerWatchdog.minimumStall) {
         self.now = now
+        self.floor = min(max(floor, NativeHandlerWatchdog.minimumStall), NativeHandlerWatchdog.maximumStall)
     }
 
     /// A handler call starts. `deadlineSpan`: for an AUTH message, the nanoseconds between its creation
@@ -469,7 +785,7 @@ final class NativeHandlerWatchdog: @unchecked Sendable {
 
     private var limitLocked: TimeInterval {
         let byDeadline = min(NativeHandlerWatchdog.deadlineFactor * Double(longestDeadline) / 1e9, NativeHandlerWatchdog.maximumStall)
-        return max(NativeHandlerWatchdog.minimumStall, byDeadline)
+        return max(floor, byDeadline)
     }
 
     /// How long the call inside has been running, when that is past `limit`; nil otherwise. A stall is
@@ -566,6 +882,12 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     /// and es_exec_arg on every exec.
     private var fileGate: NativeClientGate?
     private var procGate: NativeClientGate?
+    /// The clients' handler calls, for the drain before a delete where es_sync_client is missing
+    /// (client thread only).
+    private var fileActivity: NativeHandlerActivity?
+    private var procActivity: NativeHandlerActivity?
+    /// The shortest stall the file handler's watchdog waits for (DaemonCore.watchdogStallFloor).
+    private let watchdogFloor: TimeInterval
     /// The file client's handler watchdog, armed once the client is connected. Under `lock`: stop()
     /// cancels it before waiting for the client thread.
     private var fileWatchdog: NativeHandlerWatchdog?
@@ -595,8 +917,22 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private var denials = NativeDenialBacklog()
     private var fileSequence = NativeSequenceGaps()
     private var processSequence = NativeSequenceGaps()
+    /// The file client's deadline miss mode is fail-closed: an answer after the deadline, and an AUTH
+    /// message the kernel drops, mean denied (NativeLateAnswer, NativeAuthDrops).
+    private var fileFailClosed = false
+    private var authDrops = NativeAuthDrops()
+    /// Accesses allowed but answered too late, or not delivered, in fail-closed mode: the kernel denied them.
+    private var lateDenials: UInt64 = 0
+    /// Program paths the file client's default mute set mutes for its AUTH events (nil: not read).
+    private var defaultMutedPrograms: Int?
+    /// Processes with a monitored file open for writing (was_mapped_writable closes).
+    private var writableOpens = NativeWritableOpens()
+    /// Local APFS volumes (st_dev), where a directory's stat tells whether it is empty.
+    private var apfsDevices = Set<Int32>()
     // Client thread only.
     private var readdir = false
+    /// The default mute set last logged, so a reconnect logs it only when it changed.
+    private var loggedDefaultMutes: [NativeDefaultMutes.Entry]?
     private var retryTimer: DispatchSourceTimer?
     private var retryDelay = NativeESSource.initialRetryDelay
     private var lastError: String?
@@ -606,11 +942,13 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     /// How long `delete` waits for the es_* calls still running on a client before giving up on it.
     static let deleteWait: TimeInterval = 1
-    /// How long `stop` waits for the client thread. It covers closeAsks' bounded wait and both clients'
-    /// deletes (`stopWaitCovers`), plus some for the broker's own denyAll, so that held accesses are
-    /// answered and the clients deleted by us before the process exits.
-    static let stopWait: TimeInterval = 5
-    static var stopWaitCovers: TimeInterval { NativeHeldMessages.denyAllWait + 2 * deleteWait }
+    /// How long `stop` waits for the client thread. It covers closeAsks' bounded waits (the broker's
+    /// denyAll, then the held messages) and both clients' drains and deletes (`stopWaitCovers`), so
+    /// that held and queued accesses are answered and the clients deleted by us before the process exits.
+    static let stopWait: TimeInterval = 8
+    static var stopWaitCovers: TimeInterval {
+        AskBroker.denyAllWait + NativeHeldMessages.denyAllWait + 2 * (NativeDrain.wait + deleteWait)
+    }
     private static let initialRetryDelay: TimeInterval = 5
     private static let maxRetryDelay: TimeInterval = 60
     /// NOTIFY events queued for analysis. Past this, new ones are dropped (and counted) instead of
@@ -628,9 +966,17 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         self.core = core
         self.decider = core.enforcer
         self.readdir = core.currentSettings.readdirEnabled
+        self.watchdogFloor = core.watchdogStallFloor
+        NativeStallMarker.setPath(core.config.inMemoryStore ? nil : core.config.watchdogStallMarkerPath)
     }
 
     public var state: SourceState { stateBox.get() }
+
+    public var authCounts: SourceAuthCounts? {
+        lock.lock(); defer { lock.unlock() }
+        return SourceAuthCounts(lateDenied: lateDenials, droppedDenied: authDrops.denied, droppedAllowed: authDrops.allowed,
+                                defaultMutedPrograms: defaultMutedPrograms)
+    }
 
     public var droppedEvents: UInt64 {
         lock.lock(); defer { lock.unlock() }
@@ -689,18 +1035,9 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             // Armed by a connect that ran after the cancel above.
             self.disarmWatchdog()
             self.closeAsks()
-            if let c = self.fileClient {
-                _ = es_unsubscribe_all(c)
-                NativeESSource.delete(c, gate: self.fileGate)
-            }
-            if let c = self.procClient {
-                _ = es_unsubscribe_all(c)
-                NativeESSource.delete(c, gate: self.procGate)
-            }
-            self.fileClient = nil
-            self.procClient = nil
-            self.fileGate = nil
-            self.procGate = nil
+            if let c = self.fileClient { NativeESSource.retire(c, gate: self.fileGate, activity: self.fileActivity, gatedOnly: false) }
+            if let c = self.procClient { NativeESSource.retire(c, gate: self.procGate, activity: self.procActivity, gatedOnly: true) }
+            self.forgetClients()
             self.publish {
                 $0.running = false
                 $0.deadlineMissMode = nil
@@ -719,28 +1056,40 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         guard !stopped, fileClient == nil else { return }
         var proc: OpaquePointer?
         let pGate = NativeClientGate()
-        let r1 = es_new_client(&proc, NativeESSource.gated(pGate) { [weak self] _, message in self?.handleProcess(message) })
+        let pActivity = NativeHandlerActivity()
+        // Only the conversion (message memory, es_exec_arg) runs inside the gate, not the process tree
+        // update after it: a slow analyzer must not make a delete give up on the client.
+        let r1 = es_new_client(&proc, NativeESSource.tracked(pActivity, NativeESSource.converting(pGate, NativeESSource.processMessage) {
+            [weak self] message in self?.receiveProcess(message)
+        }))
         guard r1 == ES_NEW_CLIENT_RESULT_SUCCESS, let proc else {
             fail(r1)
             return
         }
         procGate = pGate
+        procActivity = pActivity
         var file: OpaquePointer?
         let gate = NativeClientGate()
-        let watchdog = NativeHandlerWatchdog()
-        let r2 = es_new_client(&file, NativeESSource.watched(watchdog) { [weak self] client, message in
+        let fActivity = NativeHandlerActivity()
+        let watchdog = NativeHandlerWatchdog(floor: watchdogFloor)
+        let r2 = es_new_client(&file, NativeESSource.watched(watchdog, NativeESSource.tracked(fActivity) { [weak self] client, message in
             self?.handleFile(client, message, gate)
-        })
+        }))
         guard r2 == ES_NEW_CLIENT_RESULT_SUCCESS, let file else {
             // Subscribed to nothing yet, so its handler never runs: no wait needed.
             _ = es_delete_client(proc)
             procGate = nil
+            procActivity = nil
             fail(r2)
             return
         }
         fileGate = gate
+        fileActivity = fActivity
         // Before anything is subscribed: the file client is the one that answers AUTH messages.
         let deadlineMode = NativeESSource.setDeadlineMissMode(file)
+        // Before any mute of ours: what is muted now is the default mute set.
+        logDefaultMutes(NativeESSource.defaultMutes(file))
+        refreshAPFSDevices()
         var token = NativeESSource.selfAuditToken()
         _ = es_mute_process(proc, &token)
         _ = es_mute_process(file, &token)
@@ -768,6 +1117,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         authSubscribed = false
         fileSequence.reset()
         processSequence.reset()
+        authDrops.reset()
+        fileFailClosed = deadlineMode.mode == .failClosed
         lock.unlock()
         askGate.lock()
         asksOpen = true
@@ -846,28 +1197,59 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         disarm()
         disarmWatchdog()
         closeAsks()
-        _ = es_unsubscribe_all(file)
-        NativeESSource.delete(file, gate: fileGate)
+        NativeESSource.retire(file, gate: fileGate, activity: fileActivity, gatedOnly: false)
         // The process client may already be subscribed (a later step failed): its handler may be running.
-        _ = es_unsubscribe_all(proc)
-        NativeESSource.delete(proc, gate: procGate)
-        procClient = nil
-        fileClient = nil
-        fileGate = nil
-        procGate = nil
+        NativeESSource.retire(proc, gate: procGate, activity: procActivity, gatedOnly: true)
+        forgetClients()
         report(error: message, hint: "Endpoint Security setup failed; retrying.")
         scheduleRetry()
     }
 
-    /// es_delete_client once no other es_* call on the client is running (header: not safe concurrently
-    /// with any of them). If one still is after the wait, the client is not deleted under it: the process
-    /// is stopping (the kernel tears the client down), or a retry replaces it. Client thread.
-    static func delete(_ client: OpaquePointer, gate: NativeClientGate?) {
-        guard gate?.close(waitAtMost: deleteWait) ?? true else {
-            Log.error("Endpoint Security client not deleted: a call on it was still running after \(Int(deleteWait)) s")
-            return
+    /// The clients are gone (deleted, or left to the kernel's teardown). Client thread.
+    private func forgetClients() {
+        procClient = nil
+        fileClient = nil
+        fileGate = nil
+        procGate = nil
+        fileActivity = nil
+        procActivity = nil
+        lock.lock()
+        fileFailClosed = false
+        lock.unlock()
+    }
+
+    /// Unsubscribes a client, lets its handler work through what the kernel queued before (NativeDrain:
+    /// es_sync_client on macOS 27, an idle handler before), then deletes it once no other es_* call on
+    /// it is running (header: es_delete_client is not safe concurrently with any of them). A client that
+    /// cannot be deleted safely in time is left alone (NativeDrain.retire): the process is stopping and
+    /// the kernel tears it down, or a retry replaces it. `gatedOnly`: see NativeDrain.retire (the process
+    /// client). Client thread (es_sync_client must not be called from the client's handler).
+    static func retire(_ client: OpaquePointer, gate: NativeClientGate?, activity: NativeHandlerActivity?, gatedOnly: Bool) {
+        _ = es_unsubscribe_all(client)
+        #if canImport(Darwin)
+        let sync = NativeDrain.syncClientFunction(NativeDeadlineMissMode.symbol(NativeDrain.syncClientName)).map { f in
+            { (block: @escaping NativeDrain.SyncBlock) in f(client, block) == ES_RETURN_SUCCESS.rawValue }
         }
-        _ = es_delete_client(client)
+        #else
+        let sync: ((@escaping NativeDrain.SyncBlock) -> Bool)? = nil
+        #endif
+        var drained = true
+        let outcome = NativeDrain.retire(gatedOnly: gatedOnly, drain: {
+            drained = NativeDrain.run(sync: sync, quiet: { activity?.waitQuiet(NativeDrain.quiet, waitAtMost: $0) ?? true })
+            return drained
+        }, close: { gate?.close(waitAtMost: deleteWait) ?? true }, delete: { _ = es_delete_client(client) })
+        switch outcome {
+        case .deleted where !drained:
+            Log.warning("Endpoint Security process client deleted although its handler had not finished the queued messages "
+                        + "within \(Int(NativeDrain.wait)) s (a slow process tree update; nothing was running on the client)")
+        case .deleted:
+            break
+        case .keptUndrained:
+            Log.error("Endpoint Security client not deleted: its handler did not finish the queued messages within "
+                      + "\(Int(NativeDrain.wait)) s")
+        case .keptBusy:
+            Log.error("Endpoint Security client not deleted: a call on it was still running after \(Int(deleteWait)) s")
+        }
     }
 
     /// Cancels the file client's watchdog (client thread; stop() also cancels it from its own thread).
@@ -903,18 +1285,125 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     /// The file client's handler is stuck (NativeHandlerWatchdog): exit, so launchd starts a fresh
     /// daemon. Touches nothing the stuck call may hold (Log's lock, the source's locks, the client
-    /// thread): one write(2) to stderr, where Log writes as well, then _exit. The auth-armed marker
-    /// stays, so the next start reports an unclean stop; the enforcement setting is untouched.
+    /// thread): one write(2) to stderr, where Log writes as well, the stall marker for the next start
+    /// (on a thread of its own, given at most a second), then _exit. The auth-armed marker stays too;
+    /// the enforcement setting is untouched.
     static func exitForStall(_ seconds: TimeInterval) {
         let line = "\(RFC3339.format(Date(), fractionDigits: 3)) ERROR Endpoint Security file handler stuck in one call for "
             + "\(Int(seconds)) s: exiting so launchd starts a new daemon (enforcement setting unchanged)\n"
         line.withCString { _ = write(STDERR_FILENO, $0, strlen($0)) }
+        NativeStallMarker.write(seconds: seconds)
         _exit(70) // EX_SOFTWARE
     }
 
-    /// A handler block that runs `body` inside `gate` (nothing once the gate is closed for deletion).
-    static func gated(_ gate: NativeClientGate, _ body: @escaping es_handler_block_t) -> es_handler_block_t {
-        { client, message in gate.use { body(client, message) } }
+    /// A handler block that tells `activity` when each call of `body` starts and returns.
+    static func tracked(_ activity: NativeHandlerActivity, _ body: @escaping es_handler_block_t) -> es_handler_block_t {
+        { client, message in
+            activity.enter()
+            defer { activity.leave() }
+            body(client, message)
+        }
+    }
+
+    /// A handler block that converts each message inside `gate` (it reads message memory, and may call
+    /// es_* functions such as es_exec_arg) and hands the result to `deliver` outside it, so that a slow
+    /// `deliver` never keeps a delete waiting. Once the gate is closed for deletion, nothing is converted
+    /// or delivered.
+    static func converting<T>(_ gate: NativeClientGate, _ convert: @escaping (UnsafePointer<es_message_t>) -> T,
+                              deliver: @escaping (T) -> Void) -> es_handler_block_t {
+        { _, message in
+            var value: T?
+            gate.use { value = convert(message) }
+            if let value { deliver(value) }
+        }
+    }
+
+    /// Reads the file client's mute set right after es_new_client, which is then the default mute set
+    /// (NativeDefaultMutes): the programs it mutes for the AUTH events the client answers. nil when it
+    /// cannot be read. Never unmuted (the header advises against it). Client thread.
+    static func defaultMutes(_ client: OpaquePointer) -> [NativeDefaultMutes.Entry]? {
+        var set: UnsafeMutablePointer<es_muted_paths_t>?
+        // An optional pointer has the layout of the C pointer it stands for (nil = NULL).
+        let r = withUnsafeMutablePointer(to: &set) { p in
+            p.withMemoryRebound(to: UnsafeMutablePointer<es_muted_paths_t>.self, capacity: 1) { es_muted_paths_events(client, $0) }
+        }
+        guard r == ES_RETURN_SUCCESS, let set else { return nil }
+        defer { es_release_muted_paths(set) }
+        return NativeDefaultMutes.programs(mutedPathEntries(UnsafePointer(set)), authEvents: Set(authFileEvents.map(\.rawValue)))
+    }
+
+    /// The entries of an es_muted_paths_t (es_muted_paths_events), copied out.
+    static func mutedPathEntries(_ set: UnsafePointer<es_muted_paths_t>) -> [NativeDefaultMutes.Entry] {
+        let s = set.pointee
+        guard s.count > 0, let paths = s.paths else { return [] }
+        return (0..<s.count).map { i in
+            let p = paths[i]
+            let events: [UInt32]
+            if p.event_count > 0, let list = p.events {
+                events = (0..<p.event_count).map { list[$0].rawValue }
+            } else {
+                events = []
+            }
+            return NativeDefaultMutes.Entry(type: p.type.rawValue, path: string(p.path), events: events)
+        }
+    }
+
+    /// The AUTH file events by name, for the log.
+    static let authEventNames: [UInt32: String] = [
+        ES_EVENT_TYPE_AUTH_OPEN.rawValue: "open", ES_EVENT_TYPE_AUTH_RENAME.rawValue: "rename", ES_EVENT_TYPE_AUTH_CLONE.rawValue: "clone",
+        ES_EVENT_TYPE_AUTH_COPYFILE.rawValue: "copyfile", ES_EVENT_TYPE_AUTH_LINK.rawValue: "link", ES_EVENT_TYPE_AUTH_UNLINK.rawValue: "unlink",
+        ES_EVENT_TYPE_AUTH_TRUNCATE.rawValue: "truncate", ES_EVENT_TYPE_AUTH_EXCHANGEDATA.rawValue: "exchangedata",
+        ES_EVENT_TYPE_AUTH_CREATE.rawValue: "create", ES_EVENT_TYPE_AUTH_SETMODE.rawValue: "setmode",
+        ES_EVENT_TYPE_AUTH_SETOWNER.rawValue: "setowner", ES_EVENT_TYPE_AUTH_SETACL.rawValue: "setacl",
+        ES_EVENT_TYPE_AUTH_SETATTRLIST.rawValue: "setattrlist", ES_EVENT_TYPE_AUTH_MOUNT.rawValue: "mount",
+    ]
+
+    /// Publishes the default mute set's size and logs it when it differs from the last one logged.
+    /// Client thread.
+    private func logDefaultMutes(_ programs: [NativeDefaultMutes.Entry]?) {
+        lock.lock()
+        defaultMutedPrograms = programs?.count
+        lock.unlock()
+        guard let programs else {
+            Log.warning("Endpoint Security default mute set could not be read (es_muted_paths_events failed)")
+            return
+        }
+        guard programs != loggedDefaultMutes else { return }
+        loggedDefaultMutes = programs
+        Log.info(NativeDefaultMutes.logLine(programs) { NativeESSource.authEventNames[$0] ?? "event \($0)" })
+    }
+
+    /// The local APFS volumes (statfs f_fsid.val[0], which is their st_dev), from the kernel's mount
+    /// table without waiting on any file system (getfsstat MNT_NOWAIT: a dead network mount cannot
+    /// block it). Client thread.
+    private func refreshAPFSDevices() {
+        let devices = NativeESSource.localAPFSDevices()
+        lock.lock()
+        apfsDevices = devices
+        lock.unlock()
+    }
+
+    static func localAPFSDevices() -> Set<Int32> {
+        #if canImport(Darwin)
+        let n = getfsstat(nil, 0, MNT_NOWAIT)
+        guard n > 0 else { return [] }
+        // Room for mounts added between the two calls.
+        var mounts = [Darwin.statfs](repeating: Darwin.statfs(), count: Int(n) + 8)
+        let got = mounts.withUnsafeMutableBufferPointer { buf in
+            getfsstat(buf.baseAddress, Int32(buf.count * MemoryLayout<Darwin.statfs>.stride), MNT_NOWAIT)
+        }
+        guard got > 0 else { return [] }
+        return Set(mounts.prefix(Int(got)).compactMap { fs -> Int32? in
+            var fs = fs
+            let type = withUnsafeBytes(of: &fs.f_fstypename) { raw -> String in
+                let bytes = raw.bindMemory(to: UInt8.self)
+                return String(decoding: bytes[..<(bytes.firstIndex(of: 0) ?? bytes.endIndex)], as: UTF8.self)
+            }
+            return type == "apfs" && fs.f_flags & UInt32(MNT_LOCAL) != 0 ? fs.f_fsid.val.0 : nil
+        })
+        #else
+        return []
+        #endif
     }
 
     /// Before the ES clients are deleted (client thread): hold nothing more, then deny everything held
@@ -925,7 +1414,11 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         askGate.lock()
         asksOpen = false
         askGate.unlock()
-        decider.askBroker?.denyAll()
+        // Bounded: a response stuck on the broker's queue must not hold up the stop. Whatever it did not
+        // answer is denied just below (fail closed).
+        if decider.askBroker?.denyAll() == false {
+            Log.warning("ask mode: the broker did not answer its held accesses within \(Int(AskBroker.denyAllWait)) s; denying them here")
+        }
         let missed = heldMessages.denyAll()
         if missed > 0 { Log.warning("ask mode: \(missed) held accesses left unanswered by the broker; denied") }
     }
@@ -1060,6 +1553,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     public func updateMonitoring(prefixes: [String], ancestors: [String], readdir newReaddir: Bool) {
         clientThread.run {
+            // Volumes come and go; the catalog changes with them (homes on external volumes).
+            if self.fileClient != nil { self.refreshAPFSDevices() }
             let ok = self.applyMuting(prefixes: prefixes, ancestors: ancestors)
             if newReaddir != self.readdir, let file = self.fileClient {
                 // NOTIFY only: listings are never blocked (Enforcer), so there is no AUTH_READDIR.
@@ -1137,30 +1632,42 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     // MARK: - Handlers
 
-    private func handleProcess(_ msg: UnsafePointer<es_message_t>) {
+    /// What the process client's handler copies out of a message (inside its gate).
+    struct ProcessMessage {
+        let event: SourceEvent?
+        /// global_seq_num (message version >= 4).
+        let sequence: UInt64?
+    }
+
+    /// Reads the message and, for an exec, its arguments (es_exec_arg): only inside the client's gate.
+    static func processMessage(_ msg: UnsafePointer<es_message_t>) -> ProcessMessage {
         let m = msg.pointee
-        if m.version >= 4 {
-            lock.lock()
-            processSequence.note(m.global_seq_num)
-            lock.unlock()
-        }
-        let time = NativeESSource.date(m.time)
-        let event: SourceEvent
+        let sequence: UInt64? = m.version >= 4 ? m.global_seq_num : nil
+        let time = date(m.time)
         switch m.event_type {
         case ES_EVENT_TYPE_NOTIFY_FORK:
-            event = .fork(parent: NativeESSource.record(m.process, version: m.version),
-                          child: NativeESSource.record(m.event.fork.child, version: m.version), time: time)
+            return ProcessMessage(event: .fork(parent: record(m.process, version: m.version),
+                                               child: record(m.event.fork.child, version: m.version), time: time),
+                                  sequence: sequence)
         case ES_EVENT_TYPE_NOTIFY_EXEC:
-            var target = NativeESSource.record(m.event.exec.target, version: m.version)
-            target.argv = NativeESSource.execArgs(msg)
-            event = .exec(process: NativeESSource.record(m.process, version: m.version), target: target, time: time)
+            var target = record(m.event.exec.target, version: m.version)
+            target.argv = execArgs(msg)
+            return ProcessMessage(event: .exec(process: record(m.process, version: m.version), target: target, time: time),
+                                  sequence: sequence)
         case ES_EVENT_TYPE_NOTIFY_EXIT:
-            event = .exit(process: NativeESSource.record(m.process, version: m.version), time: time)
+            return ProcessMessage(event: .exit(process: record(m.process, version: m.version), time: time), sequence: sequence)
         default:
-            return
+            return ProcessMessage(event: nil, sequence: sequence)
         }
+    }
+
+    /// The process client's handler, after the conversion (outside its gate).
+    private func receiveProcess(_ message: ProcessMessage) {
+        lock.lock()
+        if let s = message.sequence { processSequence.note(s) }
+        lock.unlock()
         // Process events update the in-memory tree synchronously so AUTH decisions see them asap.
-        sink?.receive(event, context: .monitorOnly)
+        if let event = message.event { sink?.receive(event, context: .monitorOnly) }
     }
 
     private func handleFile(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ gate: NativeClientGate) {
@@ -1171,7 +1678,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             gate.use { handleAuth(client, msg, gate) }
             return
         }
-        let activity = NativeESSource.activity(msg)
+        let activity = convert(msg)
         // `.afterAuth` only when this access really passed an AUTH check: AUTH subscribed and
         // enforcement live right now (the kill switch unsubscribes asynchronously). An access held in
         // ask mode and allowed by the answer passed AUTH too, so it is `.afterAuth` as well.
@@ -1181,6 +1688,13 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         let enforcing = activity != nil && core?.enforcement.isActive == true
         lock.lock()
         if m.version >= 4 { fileSequence.note(m.global_seq_num) }
+        // A descriptor opened with FWRITE, the only kind a shared writable mapping can be made from (an
+        // O_TRUNC open without it writes, but cannot map): a later close reporting a writable mapping may
+        // be this process's.
+        if m.event_type == ES_EVENT_TYPE_NOTIFY_OPEN, UInt32(bitPattern: m.event.open.fflag) & OperationSemantics.fwrite != 0,
+           let a = activity, a.operation == .open, let t = a.targets.first {
+            writableOpens.noteWriteOpen(NativeESSource.owner(m), path: t.path)
+        }
         let context: RuleContext = authSubscribed && enforcing ? .afterAuth : .monitorOnly
         let full = activity != nil && pendingNotify >= NativeESSource.maxPendingNotify
         if activity != nil {
@@ -1200,21 +1714,21 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private func handleAuth(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ gate: NativeClientGate) {
         let m = msg.pointee
         let start = mach_absolute_time()
-        let activity = NativeESSource.activity(msg)
+        lock.lock()
+        if m.version >= 4 { fileSequence.note(m.global_seq_num) }
+        let failClosed = fileFailClosed
+        if m.version >= 2 { authDrops.note(type: m.event_type.rawValue, seq: m.seq_num, failClosed: failClosed) }
+        lock.unlock()
+        let activity = convert(msg)
         var decision = activity.map { decider.decide($0) } ?? .failOpen()
         if decision.verdict == .ask, let activity {
             // Held: the broker answers it later, and held accesses stay out of the latency stats.
-            if hold(client, msg, activity, decision, gate) {
-                lock.lock()
-                if m.version >= 4 { fileSequence.note(m.global_seq_num) }
-                lock.unlock()
-                return
-            }
+            if hold(client, msg, activity, decision, gate, failClosed: failClosed) { return }
             // Not held (no broker or question, too little time, too many held, nobody to answer,
             // stopping): denied at once, recorded and timed like any other denial.
             decision = NativeESSource.askDenial(decision)
         }
-        NativeESSource.respond(client, msg, decision)
+        let deniedLate = NativeESSource.respond(client, msg, decision, failClosed: failClosed)
         let end = mach_absolute_time()
         let tb = NativeESSource.timebase
         // Measured from the event's Mach time (comparable to mach_absolute_time, header), so time
@@ -1223,16 +1737,17 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         let begin = m.mach_time > 0 ? min(start, m.mach_time) : start
         let micros = (end &- begin) &* UInt64(tb.numer) / UInt64(tb.denom) / 1000
         decider.recordResponse(micros: micros, missedDeadline: end >= m.deadline)
-        lock.lock()
-        if m.version >= 4 { fileSequence.note(m.global_seq_num) }
-        lock.unlock()
-        if decision.verdict == .deny, let activity { recordDenial(activity, decision) }
+        if decision.verdict == .deny, let activity {
+            recordDenial(activity, decision)
+        } else if deniedLate {
+            recordLateDenial(activity)
+        }
     }
 
     /// Ask mode: hands a `.ask` access to the broker. True when held (the broker answers it, exactly
     /// once, through the closure); false when the caller must deny it at once.
     private func hold(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ activity: FileActivity,
-                      _ ask: RuleDecision, _ gate: NativeClientGate) -> Bool {
+                      _ ask: RuleDecision, _ gate: NativeClientGate, failClosed: Bool) -> Bool {
         guard let broker = decider.askBroker, let request = decider.askRequest(for: activity, decision: ask) else { return false }
         let tb = NativeESSource.timebase
         let plan = NativeAskBudget(deadline: msg.pointee.deadline, now: mach_absolute_time(), numer: tb.numer, denom: tb.denom)
@@ -1262,11 +1777,17 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             }
             let allowed = final.verdict == .allow
             // closeAsks answers every held message before the gate closes, so it is open here.
+            var deniedLate = false
             gate.use {
-                NativeESSource.respond(client, msg, allow: allowed, cache: false)
+                deniedLate = NativeESSource.respond(client, msg, allow: allowed, cache: false, failClosed: failClosed)
                 es_release_message(msg)
             }
-            if !allowed { self?.recordDenial(activity, final) }
+            if !allowed {
+                self?.recordDenial(activity, final)
+            } else if deniedLate {
+                // Answered "allow" after the deadline (a slow broker queue): the kernel denied it.
+                self?.recordLateDenial(activity)
+            }
         }, release: { es_release_message(msg) })
         let heldMessages = self.heldMessages
         let respond: @Sendable (Bool) -> Void = { allow in heldMessages.finish(held, allow: allow) }
@@ -1292,6 +1813,20 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         RuleDecision(verdict: .deny, reason: .askUser, askKey: ask.askKey)
     }
 
+    /// What an access the daemon allowed is recorded as when the kernel denied it after all
+    /// (NativeLateAnswer): denied, by no rule. No alert: nothing the user can answer or allow would have
+    /// changed it (`whoread status` counts these, and the event shows it).
+    static let lateDenial = RuleDecision(verdict: .deny, reason: .deadlineMissed, suppressAlert: true)
+
+    /// The kernel denied an access the daemon allowed (fail-closed): counted, and recorded as a denial
+    /// when the message could be converted.
+    private func recordLateDenial(_ activity: FileActivity?) {
+        lock.lock()
+        lateDenials &+= 1
+        lock.unlock()
+        if let activity { recordDenial(activity, NativeESSource.lateDenial) }
+    }
+
     /// A denied access produces no NOTIFY: record it off the callback path. The backlog merges repeats
     /// and counts the excess instead of growing without bound (NativeDenialBacklog).
     private func recordDenial(_ activity: FileActivity, _ decision: RuleDecision) {
@@ -1309,29 +1844,39 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     }
 
     /// Only `.allow` allows: an undecided `.ask` never gets here (handleFile holds or denies it), and
-    /// would be denied.
-    static func respond(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ d: RuleDecision) {
+    /// would be denied. Returns true when the kernel denied it although it was allowed (NativeLateAnswer).
+    @discardableResult
+    static func respond(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ d: RuleDecision, failClosed: Bool) -> Bool {
         let allow = d.verdict == .allow
         // Cache only if no enforced rule denies this process anything here: a cached narrower mask
         // would deny a later open in the kernel with no AUTH event (no log, no alert), and keep doing
         // so after the kill switch.
-        respond(client, msg, allow: allow, cache: allow && d.cacheable && d.policyDenied.isEmpty)
+        return respond(client, msg, allow: allow, cache: allow && d.cacheable && d.policyDenied.isEmpty, failClosed: failClosed)
     }
 
     /// Any thread (an answer to a held message comes from the broker's queue; the message is retained).
-    static func respond(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, allow: Bool, cache: Bool) {
-        let result: es_respond_result_t
-        if msg.pointee.event_type == ES_EVENT_TYPE_AUTH_OPEN {
-            // Deny with 0 and never cache it. Allow with UINT32_MAX (header: unless intentionally
-            // denying flags): an allow never needs a mask, because any requested bit an enforced rule
-            // denies already makes the verdict deny.
-            result = es_respond_flags_result(client, msg, allow ? UInt32.max : 0, allow && cache)
-        } else {
-            // CREATE, RENAME, CLONE, COPYFILE, LINK, UNLINK, TRUNCATE, EXCHANGEDATA, SETACL, SETATTRLIST: no
-            // caching (header). SETMODE, SETOWNER and MOUNT could be cached, but their cache key (executable,
-            // file) ignores the process chain, so a cached allow would also let the same program through
-            // under an AI agent: never cached.
-            result = es_respond_auth_result(client, msg, allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY, false)
+    /// `failClosed`: the client's deadline miss mode. Returns true when the kernel denied the access
+    /// although `allow` was wanted: in fail-closed mode an allow is not sent at or after the deadline
+    /// (a deny is), and an allow es_respond did not deliver is denied at the deadline (NativeLateAnswer).
+    @discardableResult
+    static func respond(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, allow: Bool, cache: Bool, failClosed: Bool) -> Bool {
+        let isOpen = msg.pointee.event_type == ES_EVENT_TYPE_AUTH_OPEN
+        var result = ES_RESPOND_RESULT_SUCCESS
+        let deniedLate = NativeLateAnswer.answer(allow: allow, failClosed: failClosed, deadline: msg.pointee.deadline,
+                                                 now: { mach_absolute_time() }) { send in
+            if isOpen {
+                // Deny with 0 and never cache it. Allow with UINT32_MAX (header: unless intentionally
+                // denying flags): an allow never needs a mask, because any requested bit an enforced rule
+                // denies already makes the verdict deny.
+                result = es_respond_flags_result(client, msg, send ? UInt32.max : 0, send && cache)
+            } else {
+                // CREATE, RENAME, CLONE, COPYFILE, LINK, UNLINK, TRUNCATE, EXCHANGEDATA, SETACL, SETATTRLIST: no
+                // caching (header). SETMODE, SETOWNER and MOUNT could be cached, but their cache key (executable,
+                // file) ignores the process chain, so a cached allow would also let the same program through
+                // under an AI agent: never cached.
+                result = es_respond_auth_result(client, msg, send ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY, false)
+            }
+            return result.rawValue
         }
         if result != ES_RESPOND_RESULT_SUCCESS {
             // Logging writes to disk: never on the callback thread. Copy plain values, not `msg`.
@@ -1339,6 +1884,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             let t = msg.pointee.event_type.rawValue
             reportQueue.async { Log.error("es_respond failed (\(r)) for event type \(t)") }
         }
+        return deniedLate
     }
 
     // MARK: - Conversion
@@ -1430,12 +1976,48 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         Date(timeIntervalSince1970: TimeInterval(ts.tv_sec) + TimeInterval(ts.tv_nsec) / 1_000_000_000)
     }
 
-    /// Same per-operation semantics as the eslogger parser (OperationSemantics).
-    static func activity(_ msg: UnsafePointer<es_message_t>) -> FileActivity? {
+    /// The message's FileActivity, with the source's own state for what the message alone cannot tell
+    /// (the local APFS volumes; which processes opened a file for writing). Any thread; takes `lock`
+    /// only for a rename onto an existing file and a close of an unmodified, mapped file.
+    private func convert(_ msg: UnsafePointer<es_message_t>) -> FileActivity? {
+        NativeESSource.activity(msg, onAPFS: { dev in
+            lock.lock(); defer { lock.unlock() }
+            return apfsDevices.contains(dev)
+        }, openedForWriting: { owner, path in
+            lock.lock(); defer { lock.unlock() }
+            return writableOpens.contains(owner, path: path)
+        })
+    }
+
+    /// The message's process for NativeWritableOpens: pid and start time (message version >= 3).
+    static func owner(_ m: es_message_t) -> NativeWritableOpens.Owner {
+        let p = m.process.pointee
+        let start: UInt64? = m.version >= 3
+            ? UInt64(clamping: Int64(p.start_time.tv_sec)) &* 1_000_000 &+ UInt64(clamping: Int64(p.start_time.tv_usec))
+            : nil
+        return NativeWritableOpens.Owner(pid: audit_token_to_pid(p.audit_token), start: start)
+    }
+
+    /// Whether an existing file reported by ES is an empty directory (NativeEmptyDirectory).
+    static func isEmptyDirectory(_ f: UnsafeMutablePointer<es_file_t>, onAPFS: (Int32) -> Bool) -> Bool {
+        let st = f.pointee.stat
+        let mode = UInt32(st.st_mode)
+        // Cheap checks first: the device lookup takes a lock.
+        guard mode & 0o170000 == 0o040000, st.st_nlink == 2 else { return false }
+        return NativeEmptyDirectory.isEmpty(mode: mode, nlink: UInt32(st.st_nlink), size: Int64(st.st_size), flags: st.st_flags,
+                                            onAPFS: onAPFS(Int32(st.st_dev)))
+    }
+
+    /// Same per-operation semantics as the eslogger parser (OperationSemantics). `onAPFS` tells whether a
+    /// device (st_dev) is a local APFS volume; `openedForWriting` whether a process opened a path
+    /// for writing (NativeWritableOpens). Both are asked only when the message needs them.
+    static func activity(_ msg: UnsafePointer<es_message_t>, onAPFS: (Int32) -> Bool = { _ in false },
+                         openedForWriting: (NativeWritableOpens.Owner, String) -> Bool = { _, _ in false }) -> FileActivity? {
         let m = msg.pointee
         let e = m.event
         let targets: [FileTarget]
         let op: FileOperation
+        var note: String?
         switch m.event_type {
         case ES_EVENT_TYPE_AUTH_OPEN, ES_EVENT_TYPE_NOTIFY_OPEN:
             // A directory open (stat says so) only lists names: reported as readdir.
@@ -1444,12 +2026,30 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             targets = r.1
         case ES_EVENT_TYPE_NOTIFY_CLOSE:
             op = .close
-            targets = OperationSemantics.close(reported(e.close.target), modified: e.close.modified)
+            let target = reported(e.close.target)
+            // `modified`: written through write calls on this descriptor. A file changed only through a
+            // writable mapping reports modified false and was_mapped_writable true (message version >= 6,
+            // header), but the flag covers the vnode's whole life: it is charged only to a process that
+            // opened this file for writing itself (NativeWritableOpens), and marked as a possible
+            // modification (EventNote.mappedWritable).
+            var modified = e.close.modified
+            if !modified && m.version >= 6 && e.close.was_mapped_writable && openedForWriting(owner(m), target.path) {
+                modified = true
+                note = EventNote.mappedWritable
+            }
+            targets = OperationSemantics.close(target, modified: modified)
         case ES_EVENT_TYPE_AUTH_RENAME, ES_EVENT_TYPE_NOTIFY_RENAME:
             op = .rename
             let dst: ReportedPath
             if e.rename.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
-                dst = reported(e.rename.destination.existing_file)
+                let existing = e.rename.destination.existing_file
+                if isEmptyDirectory(existing, onAPFS: onAPFS) {
+                    // Nothing below it to carry out (files-5): judged as a rename to a new path, which the
+                    // source's object replaces (its type is the source's).
+                    dst = ReportedPath(string(existing.pointee.path), truncated: existing.pointee.path_truncated)
+                } else {
+                    dst = reported(existing)
+                }
             } else {
                 dst = newPath(e.rename.destination.new_path.dir, e.rename.destination.new_path.filename)
             }
@@ -1528,7 +2128,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         guard !targets.isEmpty else { return nil }
         let seq: UInt64? = m.version >= 4 ? m.global_seq_num : nil
         return FileActivity(time: date(m.time), sequence: seq, operation: op, process: record(m.process, version: m.version),
-                            targets: targets)
+                            targets: targets, note: note)
     }
 
     static func selfAuditToken() -> audit_token_t {

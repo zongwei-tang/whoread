@@ -297,7 +297,41 @@ final class AskUIModelTests: XCTestCase {
         // Shown in Settings while the daemon reports it.
         XCTAssertNil(model(status()).uncleanStopText)
         XCTAssertEqual(model(stopped).uncleanStopText,
-                       "The monitor stopped unexpectedly while it could block (stopped at 2026-10-05 01:00 while AUTH was subscribed). Enforcement stays as you set it.")
+                       "The monitor stopped unexpectedly (stopped at 2026-10-05 01:00 while AUTH was subscribed). Enforcement stays as you set it.")
+    }
+
+    func testAccessesTheKernelDroppedAreShown() {
+        // No event can show them (the kernel dropped the messages): the app says how many there were.
+        XCTAssertNil(model(status()).kernelDropsText)
+        var s = status()
+        s.sourceAuth = SourceAuthCounts(lateDenied: 4, defaultMutedPrograms: 3)
+        XCTAssertNil(model(s).kernelDropsText, "late denials are recorded as events")
+        s.sourceAuth = SourceAuthCounts(droppedDenied: 5)
+        let denied = model(s).kernelDropsText ?? ""
+        XCTAssertTrue(denied.contains("5 file accesses") && denied.contains("denied"), denied)
+        s.sourceAuth = SourceAuthCounts(droppedDenied: 1, droppedAllowed: 2)
+        let both = model(s, language: .zhHans).kernelDropsText ?? ""
+        XCTAssertTrue(both.contains("1 次") && both.contains("拒绝") && both.contains("2 次") && both.contains("放行"), both)
+        for key: L in [.authDroppedDeniedFormat, .authDroppedAllowedFormat] {
+            XCTAssertNotEqual(L10n.t(key, .en), L10n.t(key, .zhHans), "\(key) is translated")
+        }
+    }
+
+    func testAWatchdogExitWhileOnlyMonitoringIsNotCalledAStopWhileBlocking() {
+        // The daemon also reports a watchdog exit while it only monitored (file events were lost). The
+        // app's wording around the daemon's note must not claim it could block then.
+        let monitoring = status(uncleanStop: "the previous daemon was exited by its watchdog: its event handler was stuck in one "
+                                + "call for 130 s (monitoring only: the file events behind it were not recorded); found at start "
+                                + "2026-10-05T01:00:00Z")
+        for language in [Language.en, .zhHans] {
+            let notice = NotificationPlanner().plan(status: monitoring, language: language).first?.body ?? ""
+            let shown = model(monitoring, language: language).uncleanStopText ?? ""
+            for text in [notice, shown] {
+                XCTAssertTrue(text.contains("monitoring only"), text)
+                XCTAssertFalse(text.contains("could block"), text)
+                XCTAssertFalse(text.contains("可拦截"), text)
+            }
+        }
     }
 
     // MARK: - Menu bar and status
