@@ -654,6 +654,40 @@ final class RedactorCoverageTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 2)
     }
 
+    /// `;`, `&&`, `||`, `|` and `&` end a command with no space around them too: the command after one
+    /// has its own rules, and a loop written `for …;do …;done > FILE` is a loop.
+    func testOperatorsWithNoSpaceAroundThem() {
+        assertRedacted(["/bin/bash", "-c", "ls;curl -u admin:Hunter2pw https://x"], ["/bin/bash", "-c", "ls;curl -u admin:\(R) https://x"])
+        assertRedacted(["/bin/bash", "-c", "cd /tmp&&mysql -uroot -pHunter2pw"], ["/bin/bash", "-c", "cd /tmp&&mysql -uroot -p\(R)"])
+        assertRedacted(["/bin/bash", "-c", "x=1;htpasswd -nb bob Hunter2pw"], ["/bin/bash", "-c", "x=1;htpasswd -nb bob \(R)"])
+        assertRedacted(["/bin/bash", "-c", "cd /tmp;echo Hunter2pw > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "cd /tmp;echo \(R) > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "for x in 'Hunter2pw';do echo $x;done > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "for x in '\(R)';do echo $x;done > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "while true;do echo Hunter2pw;break;done > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "while true;do echo \(R);break;done > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "if true;then echo Hunter2pw;fi > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "if true;then echo \(R);fi > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "{ echo Hunter2pw;} > ~/WhoReadTestVault/n"], ["/bin/bash", "-c", "{ echo \(R);} > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "if mysql -pHunter2pw;then echo ok;fi"], ["/bin/bash", "-c", "if mysql -p\(R);then echo ok;fi"])
+        // In text that is not a command line (a connection string, YAML fed to a program), an operator
+        // may be part of a value: what is glued to a redacted value goes with it.
+        assertRedacted(["/bin/sh", "-c", "kubectl apply -f - <<EOF\nstringData:\n  password: Hun;ter&2pw|x\nEOF"],
+                       ["/bin/sh", "-c", "kubectl apply -f - <<EOF\nstringData:\n  password: \(R)\nEOF"], secrets: ["Hun", "ter", "2pw"])
+        assertRedacted(["dotnet", "ef", "database", "update", "--connection", "Server=db;User Id=sa;Password=Hun;ter2pw"],
+                       ["dotnet", "ef", "database", "update", "--connection", "Server=db;User Id=sa;Password=\(R)"], secrets: ["Hun", "ter2pw"])
+        assertRedacted(["curl", "-d", "user=bob password=Hun&ter2pw", "https://x"], ["curl", "-d", "user=bob password=\(R)", "https://x"],
+                       secrets: ["Hun", "ter2pw"])
+        assertRedacted(["/bin/sh", "-c", "cat <<EOF > ~/WhoReadTestVault/n\nHun;ter&2pw\nEOF"], ["/bin/sh", "-c", "cat <<EOF > ~/WhoReadTestVault/n\n\(R)\nEOF"],
+                       secrets: ["Hun", "ter", "2pw"])
+        assertKept([
+            ["/bin/sh", "-c", "echo hello;ls -la"], ["/bin/sh", "-c", "for x in a b;do echo $x;done"], ["/bin/sh", "-c", "x=1;y=2;ls"],
+            ["/bin/sh", "-c", "find . -name '*.o' -exec rm {} \\;"], ["/bin/sh", "-c", "make 2>&1|tee log"], ["/bin/sh", "-c", "cmd &>/dev/null&"],
+            ["/bin/sh", "-c", "echo ${x//;/,}"], ["/bin/sh", "-c", "cmd >|out.txt"], ["git", "commit", "-m", "Fix a;b and c&&d, e|f"],
+            ["psql", "-c", "SELECT a||b FROM t; SELECT 1"], ["/bin/sh", "-c", "case $1 in a|b) echo x;; esac"],
+        ])
+    }
+
     /// The command after `if`, `while`, `until`, `elif` and `!` is a program with its own rules.
     func testCommandsInConditionsKeepTheirFlagRules() {
         assertRedacted(["/bin/sh", "-c", "if curl -u admin:Hunter2pw https://x; then echo ok; fi"],

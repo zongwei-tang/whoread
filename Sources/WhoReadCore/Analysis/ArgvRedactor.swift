@@ -264,10 +264,19 @@ public enum ArgvRedactor {
     /// Redacts a sequence of arguments (an argv, or the tokens of a command line). `firstIsProgram`:
     /// element 0 is the program and is kept as is. `lineStarts`: indices of tokens that begin a new
     /// line of a command line (a new command, or a heredoc's body and end). `outputRedirected`: what
-    /// the command line writes goes to a file or a pipe (`sh -c '…' > FILE`).
+    /// the command line writes goes to a file or a pipe (`sh -c '…' > FILE`). `glued`: indices of
+    /// tokens written right after the one before, with no space (`b` and `;` in `a;b`).
     static func redactSequence(_ tokens: [String], firstIsProgram: Bool, depth: Int = 0, lineStarts: Set<Int> = [],
-                               outputRedirected: Bool = false) -> [String] {
+                               outputRedirected: Bool = false, glued: Set<Int> = []) -> [String] {
         var out = tokens
+        // `Password=a;b` in a connection string, `password: a&b` in a heredoc fed to a program: text
+        // that is not a command line may hold an operator in a value. A word glued by one to a value
+        // redacted just before it goes too (`swallow`); data is not a value (`echo pw;ls`).
+        var swallow = -1
+        var swallowed = -1
+        var dataAt = -1
+        // The last word of a heredoc body replaced (words glued to it share its placeholder).
+        var bodyRun = -1
         var pending: ValueRule?
         var program: String?
         var flags: (next: [String: ValueRule], attached: [String: ValueRule]) = ([:], [:])
@@ -346,6 +355,13 @@ public enum ArgvRedactor {
                 startProgram(basename(raw), at: 0)
                 continue
             }
+            if i == swallow {
+                // The redacted value before it covers the operator and this word.
+                out[i - 1] = ""
+                out[i] = ""
+                swallowed = i
+                continue
+            }
             if let h = heredoc {
                 if h.delimiter == nil {
                     // `<< EOF`: this word is the delimiter (still redacted like any word).
@@ -364,7 +380,11 @@ public enum ArgvRedactor {
                     }
                     if h.redactBody {
                         usedInData(raw)
-                        if !isExpansion(raw) { out[i] = placeholder }
+                        // `a;b`: one placeholder for the words and operators glued together.
+                        if !isExpansion(raw) {
+                            out[i] = glued.contains(i) && bodyRun == i - 1 ? "" : placeholder
+                            bodyRun = i
+                        }
                         continue
                     }
                     // A script read from the heredoc (`python3 - <<EOF`): its lines are words with no
@@ -388,6 +408,10 @@ public enum ArgvRedactor {
                 }
             }
             if isSeparator(raw) {
+                if i > 0, glued.contains(i), glued.contains(i + 1), controlOperators.contains(raw), !shellKeywords.contains(tokens[i + 1]),
+                   swallowed == i - 1 || (dataAt != i - 1 && out[i - 1] != tokens[i - 1] && endsInPlaceholder(out[i - 1])) {
+                    swallow = i + 1
+                }
                 resetCommand(at: i + 1)
                 continue
             }
@@ -422,6 +446,7 @@ public enum ArgvRedactor {
             if groups.loopData.contains(i) {
                 usedInData(word)
                 if !isExpansion(word) { emit(placeholder) }
+                dataAt = i
                 continue
             }
 
@@ -441,6 +466,7 @@ public enum ArgvRedactor {
                 } else {
                     usedInData(data)
                     if !isExpansion(data) { emit("<<<" + placeholder) }
+                    dataAt = i
                 }
                 continue
             }
@@ -455,6 +481,7 @@ public enum ArgvRedactor {
                 hereString = false
                 usedInData(word)
                 if !isExpansion(word) { emit(placeholder) }
+                dataAt = i
                 continue
             }
             // `cat <(echo pw)`: a command of its own whose output goes into a pipe.
@@ -468,6 +495,7 @@ public enum ArgvRedactor {
                 if dataMode && !r.data.isEmpty {
                     usedInData(r.data)
                     out[i] = (isExpansion(r.data) ? r.data : placeholder) + r.operatorAndTarget + suffix
+                    dataAt = i
                 } else if !r.data.isEmpty {
                     out[i] = redactToken(r.data) + r.operatorAndTarget + suffix
                 }
@@ -482,6 +510,7 @@ public enum ArgvRedactor {
                     continue
                 }
                 dataSeen = true
+                dataAt = i
                 // `pw|tee FILE`: the data ends at a pipe in the word, and what follows it is a command
                 // of its own.
                 if quote.isEmpty, let pipe = unquotedPipe(in: t) {
@@ -1330,21 +1359,27 @@ public enum ArgvRedactor {
             let token = redactToken(s)
             return token == read ? line : token
         }
-        // Words after a line break start a new command (or a heredoc's body or end).
+        // Words after a line break start a new command (or a heredoc's body or end). Words with no
+        // space before them are glued to the one before (`a;b`).
         var lineStarts = Set<Int>()
+        var glued = Set<Int>()
         var index = 0
         var afterBreak = false
+        var afterWord = false
         for piece in pieces {
             if piece.isSpace {
                 afterBreak = afterBreak || piece.text.contains(where: \.isNewline)
+                afterWord = false
             } else {
                 if afterBreak { lineStarts.insert(index) }
+                if afterWord { glued.insert(index) }
                 afterBreak = false
+                afterWord = true
                 index += 1
             }
         }
         var redacted = redactSequence(words, firstIsProgram: false, depth: depth, lineStarts: lineStarts,
-                                      outputRedirected: outputRedirected)
+                                      outputRedirected: outputRedirected, glued: glued)
         if !asWritten.isEmpty {
             let normalized = tokenize(read).filter { !$0.isSpace }.map(\.text)
             if normalized.count == words.count {
@@ -2056,7 +2091,10 @@ public enum ArgvRedactor {
         var isSpace: Bool
     }
 
-    /// Splits a command line into words and whitespace runs, keeping quotes inside words.
+    /// Splits a command line into words and whitespace runs, keeping quotes inside words. The shell's
+    /// control operators (`;`, `&&`, `||`, `|`, `&`, `;;`, `|&`) are words of their own with no space
+    /// around them too (`cd /tmp;curl …`, `ls&&mysql -p…`), except where `&` or `|` belong to a
+    /// redirect (`2>&1`, `&>FILE`, `>|FILE`) and inside `${…}`.
     static func tokenize(_ s: String) -> [Piece] {
         var pieces: [Piece] = []
         var current = ""
@@ -2065,7 +2103,12 @@ public enum ArgvRedactor {
         // `$'…'` (ANSI-C quoting): a backslash escapes the next character, `\'` included.
         var ansi = false
         var space = ""
-        for c in s {
+        var braces = 0
+        let chars = Array(s)
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            i += 1
             if escaped { current.append(c); escaped = false; continue }
             if quote == nil && c.isWhitespace {
                 if !current.isEmpty { pieces.append(Piece(text: current, isSpace: false)); current = "" }
@@ -2083,12 +2126,51 @@ public enum ArgvRedactor {
             if c == "\"" || c == "'" {
                 ansi = c == "'" && current.last == "$"
                 quote = c
+            } else if c == "{" && current.last == "$" {
+                braces += 1
+            } else if c == "}" && braces > 0 {
+                braces -= 1
+            } else if braces == 0, let op = controlOperator(chars, at: i - 1, after: current.last) {
+                if !current.isEmpty { pieces.append(Piece(text: current, isSpace: false)); current = "" }
+                pieces.append(Piece(text: op, isSpace: false))
+                i += op.count - 1
+                continue
             }
             current.append(c)
         }
         if !current.isEmpty { pieces.append(Piece(text: current, isSpace: false)) }
         if !space.isEmpty { pieces.append(Piece(text: space, isSpace: true)) }
         return pieces
+    }
+
+    /// The control operator that starts at `k` (the longest), or nil: also where `&` or `|` belong to
+    /// a redirect after `previous` (`>&2`, `2>&1`, `<&3`, `>|FILE`) or before `>` (`&>FILE`).
+    static func controlOperator(_ chars: [Character], at k: Int, after previous: Character?) -> String? {
+        func next(_ n: Int) -> Character? { k + n < chars.count ? chars[k + n] : nil }
+        switch chars[k] {
+        case ";":
+            if next(1) == ";" { return next(2) == "&" ? ";;&" : ";;" }
+            return next(1) == "&" && next(2) != ">" ? ";&" : ";"
+        case "&":
+            if previous == ">" || previous == "<" || next(1) == ">" { return nil }
+            return next(1) == "&" ? "&&" : "&"
+        case "|":
+            if previous == ">" { return nil }
+            if next(1) == "|" { return "||" }
+            return next(1) == "&" ? "|&" : "|"
+        default:
+            return nil
+        }
+    }
+
+    static let controlOperators: Set<String> = [";", "&&", "||", "|", "&", ";;", ";&", ";;&", "|&"]
+    static let shellKeywords: Set<String> = ["then", "do", "done", "fi", "else", "elif", "esac", "{", "}", "(", ")"]
+
+    /// A word whose redaction ends the word (`‹redacted›`, `pw=‹redacted›`, `'‹redacted›'`).
+    static func endsInPlaceholder(_ word: String) -> Bool {
+        var w = Substring(word)
+        while let last = w.last, last == "'" || last == "\"" { w = w.dropLast() }
+        return w.hasSuffix(placeholder)
     }
 
     static func isSeparator(_ t: String) -> Bool {
