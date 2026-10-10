@@ -10,13 +10,15 @@ import Foundation
 /// File paths are evidence and are kept wherever a secret is not expected. What a command line
 /// writes (echo/printf words sent to a file or a pipe, also from inside a loop, group, function or
 /// `if` whose output goes there or after `exec > FILE`; heredoc bodies written by cat/tee or into a
-/// file; here-strings; the values of variables and the arguments of functions or `sh -c` that such
-/// data uses) is file contents, not metadata: it is redacted, and the redirect's target kept.
-/// Secrets inside the text of a command are redacted by its syntax where it is known: SQL that sets
-/// a password or passes one to `PASSWORD()`, JSON and JavaScript objects, calls that take a user and
-/// a password (`db.auth('u', 'pw')`), AppleScript's `do shell script … password`, URL userinfo, and
-/// the arguments some tools take a password in (`htpasswd -b`, `rabbitmqctl add_user`, `dscl
-/// -passwd`, `sqlplus u/pw`).
+/// file, or read as a secret by `--password-stdin`; here-strings; what expect `send`s; the values of
+/// variables and the arguments of functions or `sh -c` that such data uses) is file contents, not
+/// metadata: it is redacted, and the redirect's target kept. A heredoc a shell reads as its script
+/// (`bash <<EOF`, `ssh host <<EOF`) is command lines. Secrets inside the text of a command are
+/// redacted by its syntax where it is known: SQL that sets, inserts or connects with a password or
+/// passes one to `PASSWORD()`, JSON and JavaScript objects, calls that take a user and a password
+/// (`db.auth('u', 'pw')`), AppleScript's `do shell script … password`, URL userinfo, and the
+/// arguments some tools take a password in (`htpasswd -b`, `rabbitmqctl add_user`, `dscl -passwd`,
+/// `sqlplus u/pw`).
 public enum ArgvRedactor {
     public static let placeholder = "‹redacted›"
 
