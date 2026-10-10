@@ -426,6 +426,13 @@ out=$(WHOREAD_VMJOB_GRACE=0 OLDVMJOB run old "$T/outside.sh" --timeout 1 2>&1); 
 [ $rc -eq 69 ] && grep -q 'runner/install.sh' <<< "$out" && [ -z "$(ls -A "$OLDSHARE/.vm/jobs" 2>/dev/null)" ] \
   && ok "run queues nothing for a runner older than vmjob.sh (69, install it again)" \
   || bad "run with a version 1 runner: rc $rc: $out; queued: $(ls -A "$OLDSHARE/.vm/jobs" 2>/dev/null)"
+# Run from a worktree under the share, vmjob names that worktree's install.sh: the main checkout's
+# runner may be the old one.
+mkdir -p "$OLDSHARE/wt/scripts/vm"
+cp "$ROOT/scripts/vm/vmjob.sh" "$OLDSHARE/wt/scripts/vm/vmjob.sh"
+out=$(WHOREAD_VM_HOST_DIR="$OLDSHARE" bash "$OLDSHARE/wt/scripts/vm/vmjob.sh" run old "$T/outside.sh" --timeout 1 2>&1); rc=$?
+[ $rc -eq 69 ] && grep -q 'sudo bash /Users/admin/wr/whoread/wt/scripts/vm/runner/install.sh ' <<< "$out" \
+  && ok "the update hint names the install.sh of the checkout vmjob.sh runs from" || bad "update hint from a worktree: rc $rc: $out"
 kill "$OLDBEAT"; wait "$OLDBEAT" 2>/dev/null
 grep -q '^runner: [2-9]' "$SHARE/.vm/heartbeat" && ok "the runner's heartbeat names a version vmjob.sh accepts" \
   || bad "runner heartbeat: $(grep '^runner:' "$SHARE/.vm/heartbeat")"

@@ -93,12 +93,14 @@ alive() {
 }
 
 # The runner that writes the heartbeat is NEED_RUNNER or newer. The VM runs the copy install.sh
-# made, so a change to scripts/vm/runner/ reaches it only when install.sh runs again.
+# made, so a change to scripts/vm/runner/ reaches it only when install.sh runs again: the install.sh
+# of this checkout (a worktree's can be newer than the main checkout's), as the VM sees it.
 runner_current() {
-  local v
+  local v install=/Users/admin/wr/whoread/scripts/vm/runner/install.sh
   v=$(sed -n 's/^runner:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$HB" 2>/dev/null | head -n 1)
   [ "${v:-0}" -ge "$NEED_RUNNER" ] && return 0
-  echo "vmjob: the runner in the VM is version ${v:-unknown}, older than these scripts (they need $NEED_RUNNER). Install it again: in the VM, sudo bash /Users/admin/wr/whoread/scripts/vm/runner/install.sh (scripts/vm/README.md, step 4)" >&2
+  case "$HERE" in "$HOST_DIR"/*) install="/Users/admin/wr/whoread/${HERE#"$HOST_DIR"/}/runner/install.sh" ;; esac
+  echo "vmjob: the runner in the VM is version ${v:-unknown}, older than these scripts (they need $NEED_RUNNER). Install it again: in the VM, sudo bash $(printf '%q' "$install") (scripts/vm/README.md, step 4)" >&2
   return 1
 }
 

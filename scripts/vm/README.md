@@ -67,9 +67,11 @@ After a VM restart the runner mounts the share at `/Users/admin/wr` by itself. I
 then finds no fresh heartbeat, macOS mounted the shared folder first: eject it as in step 3; the
 runner retries every 10 seconds.
 
-After a change to `scripts/vm/runner/` (a pull, another branch), run step 4 again: the VM runs the
-copy `install.sh` made, not the file in the share. `vmjob.sh` queues nothing for a runner older than
-itself; `run` and `ping` then exit with 69 and say so.
+After a change to `scripts/vm/runner/` (a pull, another branch), run step 4 again, with the
+`install.sh` of the checkout you run `vmjob.sh` from (for a worktree:
+`/Users/admin/wr/whoread/.worktrees/NAME/scripts/vm/runner/install.sh`): the VM runs the copy
+`install.sh` made, not the file in the share. `vmjob.sh` queues nothing for a runner older than
+itself; `run` and `ping` then exit with 69 and print the command.
 
 Optional, UNVERIFIED Tart syntax: if `tart run --help` documents a `tag=` option for `--dir`,
 `--dir=whoread:"$PWD":tag=whoread` gives the share its own tag,
