@@ -9,7 +9,8 @@
 # reboot. If it cannot read the share (privacy protection of the mount), the script grants Full
 # Disk Access to the runner through the TCC database (SIP is off in the VM) and retries; if that
 # does not help either, it falls back to a LaunchAgent in the test user's GUI session that runs each
-# job as root through a sudoers rule for the runner alone.
+# job as root through a sudoers rule for the runner alone. What it changes in the TCC database is
+# recorded, and uninstall.sh (or the next install) puts those rows back as they were.
 # Settings: WHOREAD_VM_USER (default: the user who ran sudo, else admin), WHOREAD_VM_MOUNT (default
 # <that user's home>/wr), WHOREAD_VM_TAGS (default "whoread com.apple.virtio-fs.automount").
 set -uo pipefail
@@ -40,6 +41,7 @@ DAEMON_PLIST="/Library/LaunchDaemons/$LABEL.plist"
 AGENT_LABEL=com.whoread.vmrunner.agent
 AGENT_PLIST="/Library/LaunchAgents/$AGENT_LABEL.plist"
 SUDOERS=/etc/sudoers.d/whoread-vmrunner
+TCC_RECORD=/usr/local/etc/whoread-vmrunner.tcc
 DAEMON_STATE=/var/run/whoread-vmrunner.state
 AGENT_STATE=/tmp/whoread-vmrunner-agent.state
 DAEMON_LOG=/var/log/whoread-vmrunner.log
@@ -58,6 +60,10 @@ launchctl bootout "gui/$VM_UID/$AGENT_LABEL" 2>/dev/null
 wait_gone "system/$LABEL" || fail "the runner $LABEL from an earlier install does not stop"
 wait_gone "gui/$VM_UID/$AGENT_LABEL" || fail "the runner $AGENT_LABEL from an earlier install does not stop"
 rm -f "$DAEMON_PLIST" "$AGENT_PLIST" "$SUDOERS" "$DAEMON_STATE" "$AGENT_STATE"
+if [ -f "$TCC_RECORD" ]; then
+  bash "$HERE/../tcc-fda.sh" --undo "$TCC_RECORD" \
+    || fail "could not put back the Full Disk Access rows an earlier install changed ($TCC_RECORD)"
+fi
 
 install -d -m 755 -o root -g wheel /usr/local/libexec /usr/local/etc || fail "cannot create /usr/local/libexec"
 install -m 755 -o root -g wheel "$HERE/runner.sh" "$RUNNER" || fail "cannot install $RUNNER"
@@ -121,7 +127,7 @@ state=$(wait_state "$DAEMON_STATE" 30)
 case "$state" in
   share-unreadable|share-unwritable|repo-missing)
     echo "The root runner cannot use the share ($state); granting Full Disk Access to it and retrying."
-    if bash "$HERE/../tcc-fda.sh" "$RUNNER" /bin/bash; then
+    if ( umask 077; bash "$HERE/../tcc-fda.sh" --record "$TCC_RECORD" "$RUNNER" /bin/bash ); then
       launchctl bootout "system/$LABEL" 2>/dev/null
       wait_gone "system/$LABEL" || fail "the runner $LABEL does not stop"
       start_daemon

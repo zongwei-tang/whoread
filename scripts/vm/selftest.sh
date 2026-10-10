@@ -415,6 +415,95 @@ bash "$TCC" --db "$T/tcc-future.db" /usr/local/libexec/whoreadd >/dev/null 2>&1;
   && ok "unknown required column: refused (exit 3), nothing written" || bad "unknown schema: rc $rc"
 bash "$TCC" --db "$T/tcc-new.db" relative/path >/dev/null 2>&1 && bad "relative path accepted" || ok "relative path refused"
 
+echo "== TCC grants are recorded and put back (tcc-fda.sh --record / --undo, runner/uninstall.sh)"
+# tcc_db FILE : the macOS 14+ access table with rows install.sh must leave as it found them: an
+# earlier /bin/bash row unlike what a grant writes (denied, a code requirement holding a NUL and a
+# quote byte, a text value with a quote, its own times) and another service's row for it.
+tcc_db() {
+  sqlite3 "$1" "$(sqlite3 "$T/tcc-new.db" .schema)"
+  sqlite3 "$1" "INSERT INTO access (service, client, client_type, auth_value, auth_reason, auth_version, csreq, policy_id,
+      indirect_object_identifier, flags, last_modified, boot_uuid, last_reminded) VALUES ('kTCCServiceSystemPolicyAllFiles',
+      '/bin/bash', 1, 0, 2, 1, X'FADE0C0000002700', NULL, 'UNUSED', 7, 1234, 'it''s', 99);
+    INSERT INTO access (service, client, client_type, auth_value, auth_reason, auth_version)
+      VALUES ('kTCCServiceAccessibility', '/bin/bash', 1, 2, 4, 1);"
+}
+# every row, every value as an SQL literal (text and blobs told apart), in a fixed order
+tcc_rows() { sqlite3 -cmd '.mode quote' "$1" 'SELECT * FROM access ORDER BY service, client, client_type;'; }
+RUNNER_PATH=/usr/local/libexec/whoread-vmrunner.sh
+tcc_db "$T/tcc-undo.db"
+before=$(tcc_rows "$T/tcc-undo.db")
+bash "$TCC" --db "$T/tcc-undo.db" --record "$T/tcc.record" "$RUNNER_PATH" /bin/bash "/opt/it's" >/dev/null \
+  && bash "$TCC" --db "$T/tcc-undo.db" --record "$T/tcc.record" /bin/bash >/dev/null \
+  && [ "$(sqlite3 "$T/tcc-undo.db" "SELECT count(*) FROM access WHERE service='kTCCServiceSystemPolicyAllFiles' AND auth_value=2;")" = 3 ] \
+  && ok "grants with --record written" || bad "grants with --record: $(tcc_rows "$T/tcc-undo.db")"
+out=$(bash "$TCC" --db "$T/tcc-undo.db" --undo "$T/tcc.record" 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$(tcc_rows "$T/tcc-undo.db")" = "$before" ] \
+  && ok "--undo removes the granted rows and puts back the earlier one exactly (also after two grants)" \
+  || bad "--undo: rc $rc: $out; before: $before; after: $(tcc_rows "$T/tcc-undo.db")"
+[ ! -e "$T/tcc.record" ] && ok "--undo deletes the record when done" || bad "record left after a successful undo"
+out=$(bash "$TCC" --db "$T/tcc-undo.db" --undo "$T/tcc.record" 2>&1); rc=$?
+[ $rc -eq 0 ] && [ "$(tcc_rows "$T/tcc-undo.db")" = "$before" ] && ok "--undo without a record changes nothing" || bad "--undo without a record: rc $rc: $out"
+echo 'DELETE FROM no_such_table;' > "$T/tcc.record"
+bash "$TCC" --db "$T/tcc-undo.db" --undo "$T/tcc.record" >/dev/null 2>&1; rc=$?
+[ $rc -ne 0 ] && [ -f "$T/tcc.record" ] && ok "a record that cannot be applied is kept (exit $rc)" || bad "broken record: rc $rc, record $(ls "$T/tcc.record" 2>&1)"
+
+# uninstall.sh in test mode: every system path under a stand-in root, the TCC database included.
+VR="$T/vmroot"
+VR_TCC="$VR/Library/Application Support/com.apple.TCC/TCC.db"
+VR_FILES=("$VR/Library/LaunchDaemons/com.whoread.vmrunner.plist" "$VR/Library/LaunchAgents/com.whoread.vmrunner.agent.plist"
+          "$VR/etc/sudoers.d/whoread-vmrunner" "$VR/usr/local/libexec/whoread-vmrunner.sh" "$VR/usr/local/etc/whoread-vmrunner.conf"
+          "$VR/var/run/whoread-vmrunner.state" "$VR/tmp/whoread-vmrunner-agent.state")
+vr_files() { local f; for f in "${VR_FILES[@]}"; do mkdir -p "$(dirname "$f")"; : > "$f"; done; }
+vr_left() { local f; for f in "${VR_FILES[@]}"; do [ -e "$f" ] && echo "${f#"$VR"}"; done; }
+UNINSTALL() { WHOREAD_VM_RUNNER_TEST=1 WHOREAD_VM_RUNNER_TEST_ROOT="$VR" WHOREAD_VM_USER="$(id -un)" \
+  WHOREAD_VM_RUNNER_TEST_LAUNCHCTL="${LAUNCHCTL_STANDIN:-}" bash "$ROOT/scripts/vm/runner/uninstall.sh"; }
+vr_files
+mkdir -p "$(dirname "$VR_TCC")"
+tcc_db "$VR_TCC"
+before=$(tcc_rows "$VR_TCC")
+( umask 077; bash "$TCC" --db "$VR_TCC" --record "$VR/usr/local/etc/whoread-vmrunner.tcc" "$RUNNER_PATH" /bin/bash >/dev/null ) \
+  || bad "uninstall setup: grant failed"
+out=$(UNINSTALL 2>&1); rc=$?
+[ $rc -eq 0 ] && grep -q '^OK: WhoRead VM runner removed' <<< "$out" && [ -z "$(vr_left)" ] \
+  && ok "uninstall.sh removes the runner's files" || bad "uninstall.sh: rc $rc: $out; left: $(vr_left)"
+[ "$(tcc_rows "$VR_TCC")" = "$before" ] && [ ! -e "$VR/usr/local/etc/whoread-vmrunner.tcc" ] \
+  && ok "uninstall.sh puts back the Full Disk Access rows install.sh changed" || bad "uninstall.sh TCC rows: $(tcc_rows "$VR_TCC")"
+vr_files
+echo 'DELETE FROM no_such_table;' > "$VR/usr/local/etc/whoread-vmrunner.tcc"
+out=$(UNINSTALL 2>&1); rc=$?
+[ $rc -eq 1 ] && grep -q '^FAILED: ' <<< "$out" && [ -f "$VR/usr/local/etc/whoread-vmrunner.tcc" ] && [ -z "$(vr_left)" ] \
+  && ok "uninstall.sh reports rows it could not put back (FAILED, record kept)" || bad "uninstall.sh with a broken record: rc $rc: $out"
+# launchctl bootout returns while the runner still stops its job and records the result: the
+# access it may need for that stays until the runner is gone.
+rm -f "$VR/usr/local/etc/whoread-vmrunner.tcc"
+mkdir -p "$T/lcbin"
+cat > "$T/lcbin/launchctl" <<SH
+#!/bin/bash
+case "\$1" in
+  bootout) exit 0 ;;
+  print) [ "\$2" = system/com.whoread.vmrunner ] && [ -e "$T/runner-loaded" ] ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$T/lcbin/launchctl"
+vr_files
+tcc_db_reset() { rm -f "$VR_TCC"; tcc_db "$VR_TCC"; }
+tcc_db_reset
+before=$(tcc_rows "$VR_TCC")
+( umask 077; bash "$TCC" --db "$VR_TCC" --record "$VR/usr/local/etc/whoread-vmrunner.tcc" "$RUNNER_PATH" /bin/bash >/dev/null ) \
+  || bad "uninstall setup: grant failed"
+granted=$(tcc_rows "$VR_TCC")
+: > "$T/runner-loaded"
+LAUNCHCTL_STANDIN="$T/lcbin/launchctl" UNINSTALL > "$T/uninstall.out" 2>&1 &
+UNINSTALLER=$!
+/bin/sleep 2
+[ "$(tcc_rows "$VR_TCC")" = "$granted" ] && [ -f "$VR/usr/local/etc/whoread-vmrunner.tcc" ] && [ -f "$VR/usr/local/libexec/whoread-vmrunner.sh" ] \
+  && ok "uninstall.sh changes nothing while the runner is still stopping" || bad "uninstall.sh went on while the runner ran: left $(vr_left)"
+rm -f "$T/runner-loaded"
+wait $UNINSTALLER; rc=$?
+[ $rc -eq 0 ] && [ -z "$(vr_left)" ] && [ "$(tcc_rows "$VR_TCC")" = "$before" ] \
+  && ok "uninstall.sh goes on once the runner is gone" || bad "uninstall.sh after the runner stopped: rc $rc: $(cat "$T/uninstall.out")"
+
 echo "== acceptance-m2.sh against a fake daemon (JSON handling without Python)"
 # The fake whoread reports, for every probe leaf, an access whose chain is launchd → the acceptance
 # script (its pid is in $T/m2.pid) → the leaf; with FAKE_CHAIN=wrong the script is missing from it.
