@@ -180,4 +180,54 @@ final class RedactorCoverageTests: XCTestCase {
             ["osascript", "-e", "display dialog \"Enter your password\" default answer \"\" with hidden answer"],
         ])
     }
+
+    // MARK: - key:value tokens, unquoted keys, quotes inside values
+
+    func testSecretKeyColonValueInOneWord() {
+        assertRedacted(["tool", "password:Hunter2pw"], ["tool", "password:\(R)"])
+        assertRedacted(["tool", "--db", "passwd:Hunter2pw"], ["tool", "--db", "passwd:\(R)"])
+        assertRedacted(["/bin/sh", "-c", "tool pwd:Hunter2pw api_key:Hunter2pw DB_PASSWORD:Hunter2pw"],
+                       ["/bin/sh", "-c", "tool pwd:\(R) api_key:\(R) DB_PASSWORD:\(R)"])
+        // `passwd=PW` was already redacted (key=value); kept here as coverage.
+        assertRedacted(["tool", "passwd=Hunter2pw"], ["tool", "passwd=\(R)"])
+        assertKept([
+            ["tmux", "attach", "-t", "session:1"], ["tmux", "send-keys", "-t", "work:editor", "ls", "Enter"],
+            ["git", "log", "--format=%an:%ae"], ["docker", "run", "-v", "/data:/data", "img"], ["ssh", "-L", "8080:localhost:80", "h"],
+            ["gh", "auth", "refresh", "-s", "read:packages"], ["tool", "password:"], ["tool", "password:true"],
+            ["tool", "secret_name:prod"], ["tool", "password_file:/Users/alice/WhoReadTestVault/pw"], ["tool", "pwd:/Users/alice/x"],
+            ["kubectl", "get", "secret", "app:v1"], ["git", "show", "HEAD:password.txt"],
+        ])
+    }
+
+    func testUnquotedKeysWithQuotedValues() {
+        // JavaScript objects (mongosh --eval, node -e) and YAML.
+        assertRedacted(["mongosh", "--eval", "db.createUser({user: 'bob', pwd: 'Hunter2pw', roles: []})"],
+                       ["mongosh", "--eval", "db.createUser({user: 'bob', pwd: '\(R)', roles: []})"])
+        assertRedacted(["mongosh", "--eval", "db.createUser({user:\"bob\",pwd:\"Hunter2pw\"})"],
+                       ["mongosh", "--eval", "db.createUser({user:\"bob\",pwd:\"\(R)\"})"])
+        assertRedacted(["node", "-e", "connect({host: 'db', password: \"Hunter2pw\", apiKey: 'Hunter2pw'})"],
+                       ["node", "-e", "connect({host: 'db', password: \"\(R)\", apiKey: '\(R)'})"])
+        assertRedacted(["/bin/bash", "-c", "node -e \"connect({password: 'Hunter2pw'})\""],
+                       ["/bin/bash", "-c", "node -e \"connect({password: '\(R)'})\""])
+        assertRedacted(["/bin/bash", "-c", "python3 - <<EOF\nconfig:\n  secret: \"Hunter2pw\"\nEOF"],
+                       ["/bin/bash", "-c", "python3 - <<EOF\nconfig:\n  secret: \"\(R)\"\nEOF"])
+        assertKept([
+            ["node", "-e", "console.log({user: 'bob', author: 'alice', mode: 'x'})"],
+            ["node", "-e", "f({tokenFile: '/Users/alice/x', secretName: 'prod'})"],
+        ])
+    }
+
+    func testQuotesInsideJSONAndPythonValues() {
+        assertRedacted(["curl", "-d", "{\"password\":\"Hun\\\"ter2pw\",\"user\":\"bob\"}", "https://x"],
+                       ["curl", "-d", "{\"password\":\"\(R)\",\"user\":\"bob\"}", "https://x"], secrets: ["ter2pw"])
+        assertRedacted(["curl", "-d", "{\"password\":\"Hun'ter2pw\"}", "https://x"], ["curl", "-d", "{\"password\":\"\(R)\"}", "https://x"],
+                       secrets: ["ter2pw"])
+        assertRedacted(["python3", "-c", "connect(**{'password': 'Hun\\'ter2pw', 'user': 'bob'})"],
+                       ["python3", "-c", "connect(**{'password': '\(R)', 'user': 'bob'})"], secrets: ["ter2pw"])
+        // Shell-escaped JSON: \" around the value, \\\" for a quote inside it.
+        assertRedacted(["/bin/sh", "-c", "curl -d \"{\\\"password\\\":\\\"Hun\\\\\\\"ter2pw\\\",\\\"user\\\":\\\"bob\\\"}\" https://x"],
+                       ["/bin/sh", "-c", "curl -d \"{\\\"password\\\":\\\"\(R)\\\",\\\"user\\\":\\\"bob\\\"}\" https://x"], secrets: ["ter2pw"])
+        // A backslash at the end of the value: the quote after it closes it.
+        assertRedacted(["tool", "{\"password\":\"Hunter2pw\\\\\",\"user\":\"bob\"}"], ["tool", "{\"password\":\"\(R)\",\"user\":\"bob\"}"])
+    }
 }

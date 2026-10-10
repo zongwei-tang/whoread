@@ -151,12 +151,17 @@ public enum ArgvRedactor {
     static let bareUserinfo = regex(#"(^|[\s='"(])(//[^/@\s:'"]+):([^/@\s'"]+)@"#)
     /// `scheme://<long token>@host`.
     static let urlTokenUserinfo = regex(#"(?i)\b([a-z][a-z0-9+.\-]*://)([^/@\s:'"]{20,})@"#)
-    /// A quoted secret key and its quoted value (JSON, Python dicts, YAML): `{"client_secret":"x"}`,
-    /// also with escaped quotes (`"{\"password\":\"x\"}"` in a shell command) and `auth` keys
-    /// (`{"auths":{"ghcr.io":{"auth":"<base64 user:password>"}}}`, `basic_auth`; not `author`).
-    /// `pass` and `pwd` keys as for key=value (`{"user":"bob","pass":"x"}`, `"db_pwd"`; not `bypass`,
-    /// `compass` or `passport`).
-    static let quotedPair = regex(#"(?i)(\\?["'])([a-z0-9_.\-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|authorization|private[_-]?key|access[_-]?key|credentials?)[a-z0-9_.\-]*|(?:[a-z0-9_.\-]*[_.\-])?(?:auth|pass|pwd))(\\?["']\s*:\s*\\?["'])([^"'\\\r\n]+)(\\?["'])"#)
+    /// Key names that hold a secret, in JSON, Python dicts, YAML and JavaScript objects.
+    static let secretKeyNames = #"[a-z0-9_.\-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|authorization|private[_-]?key|access[_-]?key|credentials?)[a-z0-9_.\-]*|(?:[a-z0-9_.\-]*[_.\-])?(?:auth|pass|pwd)"#
+    /// A quoted secret key and the opening quote of its value (JSON, Python dicts, YAML):
+    /// `{"client_secret":"x"}`, also with escaped quotes (`"{\"password\":\"x\"}"` in a shell command)
+    /// and `auth` keys (`{"auths":{"ghcr.io":{"auth":"<base64 user:password>"}}}`, `basic_auth`; not
+    /// `author`). `pass` and `pwd` keys as for key=value (`{"user":"bob","pass":"x"}`, `"db_pwd"`; not
+    /// `bypass`, `compass` or `passport`). The value runs to its closing quote (`valueEnd`).
+    static let quotedPair = regex(#"(?i)(\\?["'])("# + secretKeyNames + #")(\\?["']\s*:\s*)(\\?["'])"#)
+    /// The same key unquoted, with a quoted value: JavaScript objects (`mongosh --eval
+    /// 'db.createUser({user: "bob", pwd: "x"})'`, `node -e`) and YAML (`secret: "x"`).
+    static let barePair = regex(#"(?i)(?<![a-z0-9_$"'\\.\-])("# + secretKeyNames + #")(\s*:\s*)(\\?["'])"#)
     /// AppleScript run with administrator rights: `do shell script "…" [user name "bob"] password "x"`
     /// (`osascript -e`), and the same inside a double-quoted shell word (`password \"x\"`).
     static let appleScriptPassword = regex(#"(?i)(\bdo\s+shell\s+script\b[^\r\n]*?\bpassword\s+")((?:[^"\\\r\n]|\\.)*)(")"#)
@@ -1111,6 +1116,17 @@ public enum ArgvRedactor {
         if let header = redactWholeHeader(t) { return header }
         if t.hasPrefix("pass:") && t.count > 5 { return "pass:" + placeholder }
         let t = redactQuotedPairs(t)
+        // `password:PW`, `api_key:PW`: a secret's name, a colon and the value in one word (`tmux -t
+        // session:1`, `read:packages` and `HEAD:password.txt` are not: only strong names count).
+        if let colon = t.firstIndex(of: ":"), colon != t.startIndex {
+            let key = String(t[..<colon]), value = String(t[t.index(after: colon)...])
+            if !value.isEmpty, !value.hasPrefix("//"), !value.contains(placeholder),
+               key.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "_.-".contains($0)) }),
+               namesSecret(String(key.drop { $0 == "-" })), !refersToSecret(key),
+               !looksLikePath(value), !switchValues.contains(value.lowercased()) {
+                return key + ":" + placeholder
+            }
+        }
         // key=value, --flag=value, and nested `--from-literal=password=x`.
         if let eq = t.firstIndex(of: "="), eq != t.startIndex {
             let key = String(t[..<eq]), value = String(t[t.index(after: eq)...])
@@ -1138,23 +1154,73 @@ public enum ArgvRedactor {
         return String(s[lead]) + String(s[name]) + String(s[sep]) + placeholder + String(s[close])
     }
 
-    /// `"password": "x"` → `"password": "‹redacted›"`, unless the key only refers to a secret
-    /// (`"token_file": "/path"`) or the value is a path.
+    /// `"password": "x"` → `"password": "‹redacted›"`, `pwd: 'x'` → `pwd: '‹redacted›'`, unless the key
+    /// only refers to a secret (`"token_file": "/path"`, `secretName: 'prod'`) or the value is a path.
     static func redactQuotedPairs(_ s: String) -> String {
-        let ns = s as NSString
-        let matches = quotedPair.matches(in: s, range: NSRange(location: 0, length: ns.length))
+        let range = NSRange(location: 0, length: (s as NSString).length)
+        var matches: [(key: NSRange, open: NSRange)] = quotedPair.matches(in: s, range: range).map { ($0.range(at: 2), $0.range(at: 4)) }
+        matches += barePair.matches(in: s, range: range).map { ($0.range(at: 1), $0.range(at: 3)) }
         guard !matches.isEmpty else { return s }
-        var out = s
-        for m in matches.reversed() {
-            guard let keyRange = Range(m.range(at: 2), in: s), let valueRange = Range(m.range(at: 4), in: out) else { continue }
-            let key = s[keyRange].lowercased()
-            let value = String(out[valueRange])
-            if referenceSuffixes.contains(where: { key.hasSuffix($0) }) || looksLikePath(value) || switchValues.contains(value.lowercased()) {
+        let units = Array(s.utf16)
+        let ns = s as NSString
+        var values: [NSRange] = []
+        for m in matches.sorted(by: { $0.open.location < $1.open.location }) {
+            // A key inside a value already found is part of that value.
+            if let last = values.last, m.key.location < last.location + last.length { continue }
+            let start = m.open.location + m.open.length
+            let end = valueEnd(units, from: start, delimiter: Array(ns.substring(with: m.open).utf16))
+            guard end > start else { continue }
+            let value = NSRange(location: start, length: end - start)
+            let text = ns.substring(with: value)
+            if refersToSecret(ns.substring(with: m.key)) || looksLikePath(text) || switchValues.contains(text.lowercased()) { continue }
+            values.append(value)
+        }
+        guard !values.isEmpty else { return s }
+        let out = NSMutableString(string: s)
+        for v in values.reversed() { out.replaceCharacters(in: v, with: placeholder) }
+        return out as String
+    }
+
+    /// Where a quoted value starting at `start` ends (the index of its closing quote; a line break
+    /// or the end of the text when it is not closed). `"` or `'`: a backslash escapes the next
+    /// character (JSON, Python, JavaScript). `\"` (JSON in a double-quoted shell word): the shell
+    /// doubles each backslash, so a quote preceded by 1, 5, 9… backslashes closes the value, and one
+    /// preceded by 3, 7… is a quote inside it.
+    static func valueEnd(_ units: [UInt16], from start: Int, delimiter: [UInt16]) -> Int {
+        let backslash: UInt16 = 0x5C, newline: UInt16 = 0x0A, ret: UInt16 = 0x0D
+        guard let quote = delimiter.last else { return start }
+        var k = start
+        while k < units.count {
+            let c = units[k]
+            if c == newline || c == ret { return k }
+            if delimiter.count == 1 {
+                if c == backslash { k += 2; continue }
+                if c == quote { return k }
+            } else if c == backslash {
+                var run = 0
+                while k + run < units.count && units[k + run] == backslash { run += 1 }
+                if k + run < units.count && units[k + run] == quote {
+                    if run % 4 == 1 { return k + run - 1 }
+                    k += run + 1
+                    continue
+                }
+                k += run
                 continue
             }
-            out.replaceSubrange(valueRange, with: placeholder)
+            k += 1
         }
-        return out
+        return min(k, units.count)
+    }
+
+    /// A key that names where a secret is, not the secret: `token_file`, `secret-name`, `password_id`,
+    /// and in camelCase `tokenFile`, `secretName`, `passwordLength`.
+    static func refersToSecret(_ key: String) -> Bool {
+        let lower = key.lowercased()
+        if referenceSuffixes.contains(where: { lower.hasSuffix($0) }) { return true }
+        guard let cap = key.lastIndex(where: \.isUppercase), cap != key.startIndex,
+              key[key.index(before: cap)].isLowercase else { return false }
+        let word = key[cap...].lowercased()
+        return referenceSuffixes.contains { $0.dropFirst() == word }
     }
 
     static func redactTokenUserinfo(_ s: String) -> String {
@@ -1243,8 +1309,9 @@ public enum ArgvRedactor {
         guard !t.contains("="), !t.isEmpty, !t.contains("://"),
               (!t.contains("/") && !looksLikePath(t)) || t.contains(":") else { return false }
         guard t.contains(where: { "_.:".contains($0) }) else { return false }
-        let last = t.lowercased().split(whereSeparator: { "/:.".contains($0) }).last.map(String.init) ?? ""
-        if referenceSuffixes.contains(where: { last.hasSuffix($0) }) { return false }
+        let part = t.split(whereSeparator: { "/:.".contains($0) }).last.map(String.init) ?? ""
+        if refersToSecret(part) { return false }
+        let last = part.lowercased()
         return strongFragments.contains(where: { last.contains($0) }) || last.hasSuffix("authtoken") || last.hasSuffix("auth_token")
     }
 
