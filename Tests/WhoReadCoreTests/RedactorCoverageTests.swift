@@ -752,6 +752,23 @@ final class RedactorCoverageTests: XCTestCase {
         ])
     }
 
+    /// What an expect script sends to the program it spawned answers that program's prompts: a
+    /// password, usually. It is data.
+    func testExpectScriptsSendData() {
+        assertRedacted(["expect", "-c", "spawn ssh h; expect \"assword:\"; send \"Hunter2pw\\r\"; interact"],
+                       ["expect", "-c", "spawn ssh h; expect \"assword:\"; send \"\(R)\"; interact"])
+        assertRedacted(["/bin/zsh", "-c", "expect -c \"spawn sudo -k ls; expect \\\"Password:\\\"; send \\\"Hunter2pw\\r\\\"; expect eof\""],
+                       ["/bin/zsh", "-c", "expect -c \"spawn sudo -k ls; expect \\\"Password:\\\"; send \\\"\(R)\\\"; expect eof\""])
+        assertRedacted(["/bin/zsh", "-c", "expect <<EOF\nspawn passwd bob\nexpect \"New password:\"\nsend -- \"Hunter2pw\\r\"\nexpect eof\nEOF"],
+                       ["/bin/zsh", "-c", "expect <<EOF\nspawn passwd bob\nexpect \"New password:\"\nsend -- \"\(R)\"\nexpect eof\nEOF"])
+        assertRedacted(["expect", "-c", "spawn ssh h; expect assword; send -- {Hunter2pw}; interact"],
+                       ["expect", "-c", "spawn ssh h; expect assword; send -- {\(R)}; interact"])
+        assertKept([
+            ["git", "commit", "-m", "send the report"], ["expect", "-c", "spawn ls; expect eof"],
+            ["mail", "-s", "send to spawn", "bob"],
+        ])
+    }
+
     /// Loops whose words name each other's variables: each variable is followed once. Following every
     /// path instead took minutes for ten such loops (the analyzer would stall on one command line).
     func testLoopsNamingEachOtherAreFollowedOnce() {

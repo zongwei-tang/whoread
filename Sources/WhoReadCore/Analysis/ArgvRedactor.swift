@@ -208,6 +208,11 @@ public enum ArgvRedactor {
     /// (`osascript -e`), and the same inside a double-quoted shell word (`password \"x\"`).
     static let appleScriptPassword = regex(#"(?i)(\bdo\s+shell\s+script\b[^\r\n]*?\bpassword\s+")((?:[^"\\\r\n]|\\.)*)(")"#)
     static let escapedAppleScriptPassword = regex(#"(?i)(\bdo\s+shell\s+script\b[^\r\n]*?\bpassword\s+\\")([^\r\n]*?)(\\")"#)
+    /// What an expect script types into the program it spawned (`expect "assword:"; send "PW\r"`):
+    /// the answer to a prompt, so data. Also in a double-quoted shell word (`send \"PW\r\"`) and in
+    /// braces (`send -- {PW}`). Read only in text that spawns a program.
+    static let expectSend = regex(#"(\bsend\s+(?:-\S+\s+)*)(\\?")((?:[^"\\\r\n]|\\.)+?)(\\?")"#)
+    static let expectSendBraced = regex(#"(\bsend\s+(?:-\S+\s+)*\{)([^}\r\n]+)(\})"#)
     /// Sensitive query parameters: `?access_token=…`, `&sig=…`.
     static let queryParam = regex(#"(?i)([?&;][^=&\s#'"]*?(?:token|secret|passw|pwd|api[_-]?key|apikey|auth|sig|signature|credential|session|key|code)[^=&\s#'"]*=)[^&\s#'"]+"#)
     /// Well-known token formats, anywhere in an element.
@@ -1552,6 +1557,10 @@ public enum ArgvRedactor {
         t = redactQuotedPairs(t)
         t = redactSQLCredentials(t)
         t = replace(appleScriptPassword, in: t, with: "$1" + placeholder + "$3")
+        if t.contains("spawn") && t.contains("send") {
+            t = replace(expectSend, in: t, with: "$1$2" + placeholder + "$4")
+            t = replace(expectSendBraced, in: t, with: "$1" + placeholder + "$3")
+        }
         return replace(escapedAppleScriptPassword, in: t, with: "$1" + placeholder + "$3")
     }
 
