@@ -956,7 +956,17 @@ func cmdCatalog(_ c: IPCClient) throws {
     case "export":
         let data = try c.catalog().catalog.encoded() + Data("\n".utf8)
         if let path = args.value("output") ?? args.value("o") {
-            try SafeFile.replace(path, with: data, mode: 0o644)
+            // Like the history export: owner-only (it names the paths the user protects), never through
+            // or over a link or another non-regular file, and given to the user who ran sudo in their
+            // own folder (daemonfs-2).
+            let writer = try ExportWriter(path: path)
+            do {
+                try writer.write(data)
+                try writer.finish()
+            } catch {
+                writer.abandon()
+                throw error
+            }
             FileHandle.standardError.write(Data("catalog written to \(path)\n".utf8))
         } else {
             FileHandle.standardOutput.write(data)
