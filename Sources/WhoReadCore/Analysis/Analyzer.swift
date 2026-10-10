@@ -301,6 +301,9 @@ public final class Analyzer: @unchecked Sendable {
 
         var output = AnalysisOutput()
         let learning = baseline.isLearning(at: time)
+        // What the decision and access alone do not tell, recorded with every event of the access.
+        var note = activity.note
+        if case .decided(let d) = context, d.reason == .deadlineMissed { note = EventNote.deadlineMissed }
         // Rules are evaluated per category: an allow for one category must not silence another
         // category touched by the same operation (copying a key to a USB stick).
         func evaluationTargets(_ group: (category: TargetCategory, targets: [ClassifiedTarget])) -> [EvaluationTarget] {
@@ -377,7 +380,7 @@ public final class Analyzer: @unchecked Sendable {
                 path: primary.path, secondaryPath: other, viaAncestor: primary.viaAncestor,
                 categoryID: group.category.id, severity: group.category.severity, process: ArgvRedactor.redact(process),
                 chain: chainLinks, responsible: responsible, agentID: agentID, isOwner: isOwner,
-                benignServiceID: benignID, decision: eventDecision, ruleID: decision.ruleID)
+                benignServiceID: benignID, decision: eventDecision, ruleID: decision.ruleID, note: note)
 
             let keys = access.kinds.map { BaselineKey(responsibleKey: responsible.key, categoryID: group.category.id, access: $0) }
             let firstTime = !learning && benignID == nil && keys.contains { !baseline.contains($0) }

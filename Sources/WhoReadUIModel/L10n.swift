@@ -379,14 +379,21 @@ public enum L10n {
         }
     }
 
+    /// The event's decision, and its note when it has one (`EventNote`).
     public static func decision(_ e: AnalyzedEvent, _ language: Language = current) -> String {
-        if e.isBenign { return t(.decBenign, language) }
-        switch e.decision {
-        case .observed: return t(.decObserved, language)
-        case .allowed: return t(.decAllowed, language)
-        case .denied: return t(.decDenied, language)
-        case .wouldDeny: return t(.decWouldDeny, language)
+        let text: String
+        if e.isBenign {
+            text = t(.decBenign, language)
+        } else {
+            switch e.decision {
+            case .observed: text = t(.decObserved, language)
+            case .allowed: text = t(.decAllowed, language)
+            case .denied: text = t(.decDenied, language)
+            case .wouldDeny: text = t(.decWouldDeny, language)
+            }
         }
+        guard let note = e.note else { return text }
+        return text + (language == .zhHans ? "，" : ", ") + EventNote.describe(note, language: language)
     }
 
     public static func kind(_ k: ResponsibleEntity.Kind, _ language: Language = current) -> String {

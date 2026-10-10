@@ -2000,6 +2000,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         let e = m.event
         let targets: [FileTarget]
         let op: FileOperation
+        var note: String?
         switch m.event_type {
         case ES_EVENT_TYPE_AUTH_OPEN, ES_EVENT_TYPE_NOTIFY_OPEN:
             // A directory open (stat says so) only lists names: reported as readdir.
@@ -2012,10 +2013,12 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             // `modified`: written through write calls on this descriptor. A file changed only through a
             // writable mapping reports modified false and was_mapped_writable true (message version >= 6,
             // header), but the flag covers the vnode's whole life: it is charged only to a process that
-            // opened this file for writing itself (NativeWritableOpens), as a possible modification.
+            // opened this file for writing itself (NativeWritableOpens), and marked as a possible
+            // modification (EventNote.mappedWritable).
             var modified = e.close.modified
-            if !modified && m.version >= 6 && e.close.was_mapped_writable {
-                modified = openedForWriting(owner(m), target.path)
+            if !modified && m.version >= 6 && e.close.was_mapped_writable && openedForWriting(owner(m), target.path) {
+                modified = true
+                note = EventNote.mappedWritable
             }
             targets = OperationSemantics.close(target, modified: modified)
         case ES_EVENT_TYPE_AUTH_RENAME, ES_EVENT_TYPE_NOTIFY_RENAME:
@@ -2108,7 +2111,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         guard !targets.isEmpty else { return nil }
         let seq: UInt64? = m.version >= 4 ? m.global_seq_num : nil
         return FileActivity(time: date(m.time), sequence: seq, operation: op, process: record(m.process, version: m.version),
-                            targets: targets)
+                            targets: targets, note: note)
     }
 
     static func selfAuditToken() -> audit_token_t {

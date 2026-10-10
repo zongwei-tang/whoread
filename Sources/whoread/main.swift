@@ -201,11 +201,14 @@ struct Context {
     }
 
     func eventLine(_ e: AnalyzedEvent) -> [String] {
-        let decision: String
+        var decision: String
         switch e.decision {
         case .denied: decision = language == .zhHans ? "已拦截" : "BLOCKED"
         case .wouldDeny: decision = language == .zhHans ? "将被拦截" : "would block"
         default: decision = e.isBenign ? (language == .zhHans ? "系统(折叠)" : "system (folded)") : ""
+        }
+        if let note = e.note {
+            decision += (decision.isEmpty ? "" : language == .zhHans ? "，" : ", ") + EventNote.describe(note, language: language)
         }
         // `tail` prints these cells without `Format.table`: each is escaped here.
         return [Format.time(e.time), e.operation.rawValue + ":" + e.access.label,

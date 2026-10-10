@@ -178,6 +178,63 @@ final class SourceAuthCountsStatusTests: XCTestCase {
     }
 }
 
+// MARK: - Event notes
+
+final class EventNoteTests: XCTestCase {
+    private func event(note: String?) -> AnalyzedEvent {
+        let p = proc(601, "/bin/cat", platform: true)
+        return AnalyzedEvent(id: 7, time: Date(timeIntervalSince1970: 1_760_000_000), operation: .open, access: .read,
+                             path: "/Users/alice/.ssh/id_ed25519", secondaryPath: nil, categoryID: "ssh", severity: .critical, process: p,
+                             chain: [], responsible: ResponsibleEntity(kind: .binary, key: "bin:/bin/cat", displayName: "cat"), agentID: nil,
+                             isOwner: false, benignServiceID: nil, decision: .denied, ruleID: nil, note: note)
+    }
+
+    func testTheNoteIsStoredAndOlderRecordsStillDecode() throws {
+        let e = event(note: EventNote.deadlineMissed)
+        let data = try JSONEncoder().encode(e)
+        XCTAssertEqual(try JSONDecoder().decode(AnalyzedEvent.self, from: data).note, EventNote.deadlineMissed)
+        // A record written before the field existed, and one with a note this version does not know.
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "note")
+        XCTAssertNil(try JSONDecoder().decode(AnalyzedEvent.self, from: JSONSerialization.data(withJSONObject: object)).note)
+        object["note"] = "something-newer"
+        XCTAssertEqual(try JSONDecoder().decode(AnalyzedEvent.self, from: JSONSerialization.data(withJSONObject: object)).note,
+                       "something-newer")
+        // Without a note nothing is written: records stay as they were.
+        let plain = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(event(note: nil))) as? [String: Any])
+        XCTAssertNil(plain["note"])
+    }
+
+    func testTheStoreKeepsTheNote() throws {
+        let dir = TempDir()
+        var config = baseConfig(dir)
+        config.resolveOwners = false
+        let core = try DaemonCore(config: config, makeSource: { _ in FakeSource(canEnforce: true) })
+        try core.store.insert([event(note: EventNote.mappedWritable)])
+        XCTAssertEqual(try core.store.events(EventQuery(includeBenign: true)).map(\.note), [EventNote.mappedWritable])
+    }
+
+    func testTheNoteIsExportedAndDescribed() {
+        XCTAssertEqual(Exporter.csvColumns.last, "note")
+        let rows = Exporter.csv(events: [event(note: EventNote.deadlineMissed), event(note: nil)]).split(separator: "\n")
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertTrue(rows[1].hasSuffix(",deadline-missed"), String(rows[1]))
+        XCTAssertTrue(rows[2].hasSuffix(","), String(rows[2]))
+        for language in Language.allCases {
+            let late = EventNote.describe(EventNote.deadlineMissed, language: language)
+            let mapped = EventNote.describe(EventNote.mappedWritable, language: language)
+            XCTAssertFalse(late.isEmpty)
+            XCTAssertNotEqual(late, mapped)
+            XCTAssertNotEqual(late, EventNote.deadlineMissed, "named, not shown raw")
+        }
+        XCTAssertTrue(EventNote.describe(EventNote.deadlineMissed, language: .en).contains("deadline"))
+        XCTAssertTrue(EventNote.describe(EventNote.mappedWritable, language: .en).contains("possibly"))
+        // A note from a newer daemon is shown as it is, escaped (it ends up in a terminal).
+        XCTAssertEqual(EventNote.describe("newer", language: .en), "newer")
+        XCTAssertFalse(EventNote.describe("bad\u{1B}[2J", language: .en).contains("\u{1B}"))
+    }
+}
+
 // MARK: - Teardown: bounded broker, drain, process client gate
 
 /// A broker that holds (an answering app is present).
@@ -769,6 +826,7 @@ final class NativeMappedWritableCloseTests: XCTestCase {
         XCTAssertEqual(mine.operation, .close)
         XCTAssertEqual(mine.targets.map(\.path), [key])
         XCTAssertEqual(mine.targets.map(\.access), [.write], "a possible modification through its writable mapping")
+        XCTAssertEqual(mine.note, EventNote.mappedWritable, "marked as possible, unlike a close after write calls")
         XCTAssertEqual(mine.process.pid, 700)
         // Another process closing the same file: the flag is the vnode's, not its own.
         XCTAssertNil(closeMessage(key, pid: 701, modified: false, mapped: true).activity(openedForWriting: opened))
@@ -783,6 +841,23 @@ final class NativeMappedWritableCloseTests: XCTestCase {
         let written = try XCTUnwrap(closeMessage(key, pid: 701, modified: true, mapped: false)
                                         .activity(openedForWriting: { _, _ in XCTFail("not asked"); return false }))
         XCTAssertEqual(written.targets.map(\.access), [.write])
+        XCTAssertNil(written.note, "written by write calls: certain")
+        let both = try XCTUnwrap(closeMessage(key, pid: 700, modified: true, mapped: true).activity(openedForWriting: opened))
+        XCTAssertNil(both.note, "write calls modified it: certain, whatever the mapping did")
+    }
+
+    func testTheMappedCloseIsRecordedAsAPossibleWrite() throws {
+        let dir = TempDir()
+        var config = baseConfig(dir)
+        config.resolveOwners = false
+        let core = try DaemonCore(config: config, makeSource: { _ in FakeSource(canEnforce: true) })
+        let close = try XCTUnwrap(closeMessage(key, pid: 700, modified: false, mapped: true).activity(openedForWriting: { _, _ in true }))
+        core.pipeline.receive(.file(close), context: .monitorOnly)
+        core.writer.flush()
+        let events = try core.store.events(EventQuery(includeBenign: true))
+        XCTAssertEqual(events.map(\.operation), [.close])
+        XCTAssertEqual(events.map(\.access), [.write])
+        XCTAssertEqual(events.map(\.note), [EventNote.mappedWritable])
     }
 
     func testBeforeMessageVersion3ThePidAloneIsTheProcess() {
@@ -851,7 +926,17 @@ final class NativeLateDenialRecordingTests: XCTestCase {
         XCTAssertEqual(events.count, 3)
         XCTAssertEqual(Set(events.map(\.decision)), [.denied], "the kernel denied it: recorded, not lost")
         XCTAssertEqual(events.compactMap(\.ruleID), [], "no rule denied it")
+        XCTAssertEqual(events.map(\.note), Array(repeating: EventNote.deadlineMissed, count: 3), "and the event says why")
         XCTAssertEqual(try core.store.alerts(AlertQuery()).count, 0, "nothing for the user to answer")
+
+        // Any other denial carries no note.
+        let other = FileActivity(time: Date(timeIntervalSince1970: 1_760_000_102), operation: .open, process: cat,
+                                 targets: OperationSemantics.open(path: "/Users/alice/.ssh/id_rsa", fflag: OperationSemantics.fread))
+        core.pipeline.receive(.file(other), context: .decided(NativeESSource.askDenial(RuleDecision(verdict: .ask, reason: .askUser))))
+        core.writer.flush()
+        let denied = try core.store.events(EventQuery(includeBenign: true)).filter { $0.path.hasSuffix("id_rsa") }
+        XCTAssertEqual(denied.count, 1)
+        XCTAssertNil(denied.first?.note)
     }
 
     func testALateDenialOfTwoCategoriesIsNotChargedToARuleAddedSince() throws {

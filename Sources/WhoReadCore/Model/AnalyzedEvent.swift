@@ -38,12 +38,15 @@ public struct AnalyzedEvent: Codable, Hashable, Sendable, Identifiable {
     public var decision: EventDecision
     public var ruleID: String?
     public var alertID: Int64?
+    /// What the decision and the access alone do not tell (`EventNote`); nil for most events. A string,
+    /// so that a reader that does not know a value still decodes the event.
+    public var note: String?
 
     public init(
         id: Int64, time: Date, operation: FileOperation, access: AccessSet, path: String, secondaryPath: String?,
         viaAncestor: Bool = false, categoryID: String, severity: Severity, process: ProcessRecord, chain: [ChainLink],
         responsible: ResponsibleEntity, agentID: String?, isOwner: Bool, benignServiceID: String?,
-        decision: EventDecision, ruleID: String?, alertID: Int64? = nil
+        decision: EventDecision, ruleID: String?, alertID: Int64? = nil, note: String? = nil
     ) {
         self.id = id
         self.time = time
@@ -63,12 +66,39 @@ public struct AnalyzedEvent: Codable, Hashable, Sendable, Identifiable {
         self.decision = decision
         self.ruleID = ruleID
         self.alertID = alertID
+        self.note = note
     }
 
     public var isBenign: Bool { benignServiceID != nil }
 
     /// "launchd → zoom.us → cat"
     public var chainDisplay: String { chain.map(\.name).joined(separator: " → ") }
+}
+
+/// Values of `AnalyzedEvent.note` (and `FileActivity.note`).
+public enum EventNote {
+    /// Denied by the kernel, not by WhoRead: the daemon allowed the access, but its answer reached the
+    /// kernel at or after the AUTH deadline (or es_respond did not deliver it) while the native client's
+    /// deadline miss mode was fail-closed (macOS 27). No rule denied it.
+    public static let deadlineMissed = "deadline-missed"
+    /// A close that reports no write call, of a file the process had opened for writing and that was
+    /// mapped writable during the file's life (Endpoint Security's was_mapped_writable): possibly modified
+    /// through the mapping. Nothing tells whether the mapping was written to.
+    public static let mappedWritable = "mapped-writable"
+
+    /// How `whoread events` and the app name a note. One they do not know (from a newer daemon) is shown
+    /// as it is, escaped.
+    public static func describe(_ note: String, language: Language) -> String {
+        let zh = language == .zhHans
+        switch note {
+        case deadlineMissed:
+            return zh ? "内核拒绝：放行回答晚于 AUTH 时限" : "denied by the kernel: allowed after the AUTH deadline"
+        case mappedWritable:
+            return zh ? "可能经可写内存映射修改" : "possibly modified through a writable mapping"
+        default:
+            return DisplayText.escaped(note, limit: DisplayText.nameLimit)
+        }
+    }
 }
 
 public enum AlertKind: String, Codable, Sendable, CaseIterable {
