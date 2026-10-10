@@ -265,9 +265,17 @@ final class QuestionsUIModelTests: XCTestCase {
         XCTAssertEqual(m.asksError?.code, .notPermitted)
         XCTAssertEqual(m.asks, [])
         XCTAssertEqual(m.connectionProblemText, L10n.t(.errNotConsoleUser, .en))
-        XCTAssertEqual(m.asksProblemText, L10n.t(.errNotConsoleUser, .en))
+        // Said once: the menu shows the questions' problem right above the connection's.
+        XCTAssertNil(m.asksProblemText)
         XCTAssertTrue(try XCTUnwrap(m.connectionProblemText).contains("another user"))
         XCTAssertNil(m.limitedViewText, "not a limited view: nothing is served")
+        // Only the questions' read refused so far (the console changed between two reads): said there.
+        let asksOnly = AppModel(language: .en)
+        handler.consoleUID = { geteuid() }
+        _ = poll(asksOnly, unrecognised)
+        asksOnly.apply(asks: .failed(IPCError(.notPermitted, "only root or the console user may talk to the WhoRead daemon")))
+        XCTAssertNil(asksOnly.connectionProblemText)
+        XCTAssertEqual(asksOnly.asksProblemText, L10n.t(.errNotConsoleUser, .en))
 
         // A daemon that does not answer: the menu says so already, the questions note adds nothing.
         let gone = AppModel(language: .en)
@@ -411,12 +419,13 @@ final class QuestionsUIModelTests: XCTestCase {
         XCTAssertEqual(en.alwaysAllowTitle(Self.python, categoryID: "ssh", access: .readWrite),
                        "Always allow python3 (and the Apple programs it starts) to read and modify SSH keys")
         XCTAssertEqual(zh.answerSubject(Self.python), "python3（及它启动的苹果程序）")
-        // Always deny: the same app, every access, every chain.
+        // Always deny: the same app, every access, every chain; the category's expected owners exempt.
         XCTAssertEqual(en.alwaysDenyTitle(Self.terminal, categoryID: "ssh", kind: .ask),
-                       "Always deny Terminal (any program run in it) any access to SSH keys")
-        XCTAssertEqual(zh.alwaysDenyTitle(Self.terminal, categoryID: "ssh", kind: .ask), "始终拒绝 Terminal（及在其中运行的任何程序）访问 SSH 密钥")
+                       "Always deny Terminal (any program run in it, except expected owners) any access to SSH keys")
+        XCTAssertEqual(zh.alwaysDenyTitle(Self.terminal, categoryID: "ssh", kind: .ask),
+                       "始终拒绝 Terminal（及在其中运行的任何程序，owner 进程除外）访问 SSH 密钥")
         XCTAssertEqual(en.alwaysDenyTitle(Self.terminal, categoryID: "ssh", kind: .firstAccess),
-                       "Block Terminal (any program run in it) from SSH keys from now on")
+                       "Block Terminal (any program run in it, except expected owners) from SSH keys from now on")
 
         // The AI agents in the chain: an answer covers chains with no AI agent other than those (Rule.chainAgents).
         XCTAssertEqual(en.allowCoverage(Self.terminal, categoryID: "ssh", access: .read, chainAgents: []),
@@ -436,9 +445,10 @@ final class QuestionsUIModelTests: XCTestCase {
         try openQuestion()
         for (language, cover, allow, deny) in [
             (Language.en, "Allow once (10 min) and Always allow cover: Terminal (any program run in it) reading SSH keys, only when the chain has no AI agent.",
-             "Always allow Terminal (any program run in it) to read SSH keys", "Always deny Terminal (any program run in it) any access to SSH keys"),
+             "Always allow Terminal (any program run in it) to read SSH keys",
+             "Always deny Terminal (any program run in it, except expected owners) any access to SSH keys"),
             (.zhHans, "「允许一次（10 分钟）」和「始终允许」适用于：Terminal（及在其中运行的任何程序）读取 SSH 密钥，仅限调用链中没有 AI agent 时。",
-             "始终允许 Terminal（及在其中运行的任何程序）读取 SSH 密钥", "始终拒绝 Terminal（及在其中运行的任何程序）访问 SSH 密钥"),
+             "始终允许 Terminal（及在其中运行的任何程序）读取 SSH 密钥", "始终拒绝 Terminal（及在其中运行的任何程序，owner 进程除外）访问 SSH 密钥"),
         ] {
             let m = AppModel(language: language)
             _ = poll(m, signed, full: true)
@@ -479,7 +489,8 @@ final class QuestionsUIModelTests: XCTestCase {
         XCTAssertEqual(alert.allowCoverageLine(m.formatter),
                        "Always allow covers: Terminal (any program run in it) reading SSH keys, only when the chain has no AI agent.")
         XCTAssertEqual(m.answerTitle(.alwaysAllow, for: alert), "Always allow Terminal (any program run in it) to read SSH keys")
-        XCTAssertEqual(m.answerTitle(.blockFromNowOn, for: alert), "Block Terminal (any program run in it) from SSH keys from now on")
+        XCTAssertEqual(m.answerTitle(.blockFromNowOn, for: alert),
+                       "Block Terminal (any program run in it, except expected owners) from SSH keys from now on")
         XCTAssertEqual(m.answerTitle(.ignore, for: alert), "Ignore")
         // An agent in the chain scopes it (as the daemon takes the agents from the alert's chain).
         alert.chain = [ChainLink(pid: 5, name: "claude", path: "/opt/homebrew/bin/claude", signingID: nil, teamID: nil,
@@ -502,7 +513,8 @@ final class QuestionsUIModelTests: XCTestCase {
         XCTAssertTrue(planned.categoryIdentifier.hasSuffix(".app"))
         let category = try XCTUnwrap(NotificationPlanner.categories(language: .en).first { $0.identifier == planned.categoryIdentifier })
         XCTAssertEqual(category.buttons.map(\.action), planned.actions)
-        XCTAssertEqual(category.buttons.first { $0.action == .blockFromNowOn }?.title, "Block this app (any program run in it) from now on")
+        XCTAssertEqual(category.buttons.first { $0.action == .blockFromNowOn }?.title,
+                       "Block this app (any program run in it, except expected owners) from now on")
     }
 
     func testTask2VariantEveryCategoryIsRegisteredWithItsKind() {
@@ -529,6 +541,57 @@ final class QuestionsUIModelTests: XCTestCase {
             XCTAssertEqual(AlertFormatter(language: .en).alwaysAllowTitle(kind: .agent), "Always allow this AI agent (any program it runs)")
             XCTAssertEqual(AlertFormatter(language: .en).alwaysAllowTitle(kind: .binary), "Always allow this program (and the Apple programs it starts)")
         }
+    }
+
+    func testTask2VariantAlwaysDenyNamesTheOwnersItExempts() throws {
+        // "Always deny" saves a deny rule that exempts the category's expected owners (ssh run in
+        // Terminal keeps reading SSH keys): the button must not say every program in the app is denied.
+        let id = try openQuestion()
+        let m = AppModel(language: .en)
+        _ = poll(m, signed, full: true)
+        let ask = try XCTUnwrap(m.asks.first)
+        let title = m.answerTitle(.blockFromNowOn, for: ask)
+        guard case .asks = try signed.call(.answerAsk(id: id, action: .blockFromNowOn)) else { return XCTFail() }
+        let rule = try XCTUnwrap(core.rules.rules.first { $0.template == DaemonCore.blockFromNowOnTemplate })
+        XCTAssertEqual(rule.subject, .responsible(key: Self.terminal.key, teamID: nil, cdhash: nil, exceptOwners: true))
+        XCTAssertEqual(title, "Always deny Terminal (any program run in it, except expected owners) any access to SSH keys")
+        // The banner buttons, registered per kind, say it too.
+        for kind in [ResponsibleEntity.Kind.app, .agent, .binary] {
+            for alertKind in [AlertKind.ask, .firstAccess] {
+                XCTAssertTrue(AlertFormatter(language: .en).alwaysDenyTitle(kind: kind, alertKind: alertKind).contains(", except expected owners)"))
+                XCTAssertTrue(AlertFormatter(language: .zhHans).alwaysDenyTitle(kind: kind, alertKind: alertKind).hasSuffix("，owner 进程除外）"))
+            }
+        }
+        // An allow rule exempts nothing: its title and coverage name only what is charged to the app.
+        XCTAssertFalse(m.answerTitle(.alwaysAllow, for: ask).contains("owner"))
+        XCTAssertFalse(ask.allowCoverageLine(m.formatter).contains("owner"))
+    }
+
+    func testTask2VariantAllowOnceOnABlockWithoutARuleIsNamedToo() throws {
+        let m = AppModel(language: .en)
+        _ = poll(m, signed, full: true)
+        var alert = try XCTUnwrap(m.alerts.first)
+        alert.kind = .blocked
+        alert.status = .unread
+        alert.responsible = Self.terminal
+        alert.categoryID = "ssh"
+        alert.accesses = .read
+        alert.chain = []
+        // A rule's block: "allow once" lets that file through once; only "always allow" covers the app.
+        alert.ruleID = "a-deny-rule"
+        XCTAssertEqual(alert.allowCoverageLine(m.formatter),
+                       "Always allow covers: Terminal (any program run in it) reading SSH keys, only when the chain has no AI agent.")
+        // A block without a rule: "allow once" saves the 10-minute answer for the whole app, as on a question.
+        alert.ruleID = nil
+        XCTAssertEqual(alert.allowCoverageLine(m.formatter),
+                       "Allow once (10 min) and Always allow cover: Terminal (any program run in it) reading SSH keys, "
+                       + "only when the chain has no AI agent.")
+        try core.store.upsert([alert])
+        XCTAssertNil(failure(.alertAction(alertID: alert.id, action: .allowOnce), signed))
+        let saved = try XCTUnwrap(core.rules.rules.first { $0.template == DaemonCore.askAnswerTemplate })
+        XCTAssertEqual(saved.target, .category("ssh"))
+        XCTAssertEqual(saved.subject, .responsible(key: Self.terminal.key, teamID: nil, cdhash: nil))
+        XCTAssertNotNil(saved.expiresAt)
     }
 
     // MARK: - task-3: what happened to an answer is reported as it happened
@@ -826,5 +889,20 @@ final class QuestionsUIModelTests: XCTestCase {
         v.apply(asks: .failed(IPCError(.versionMismatch, "keyNotFound(…)")))
         XCTAssertNotNil(v.versionProblem)
         XCTAssertNil(v.asksProblemText)
+    }
+
+    func testTask1VariantNoLimitedViewWhileTheDaemonCannotBeRead() throws {
+        try openQuestion()
+        let m = AppModel(language: .en)
+        _ = poll(m, unrecognised, full: true, hello: true)
+        XCTAssertNotNil(m.limitedViewText)
+        // The daemon stops answering: the refusals kept from before must not say questions still arrive.
+        var down = Snapshot()
+        down.error = IPCError(.unavailable, "daemon did not answer within 15 s")
+        m.apply(down)
+        XCTAssertNil(m.limitedViewText)
+        // Back, and still not served as the app: limited again.
+        _ = poll(m, unrecognised)
+        XCTAssertNotNil(m.limitedViewText)
     }
 }

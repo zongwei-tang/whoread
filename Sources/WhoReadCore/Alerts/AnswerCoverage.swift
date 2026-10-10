@@ -12,31 +12,42 @@ import Foundation
 extension AlertFormatter {
     /// "Terminal (any program run in it)": the app, AI agent or program an answer is about, and what
     /// is charged to it.
-    public func answerSubject(_ r: ResponsibleEntity) -> String {
-        let name = DisplayText.name(r.displayName)
-        let zh = language == .zhHans
-        switch r.kind {
-        case .app:
-            return zh ? "\(name)（及在其中运行的任何程序）" : "\(name) (any program run in it)"
-        // An AI agent that is an app (Cursor, the Claude app): its path is the bundle.
-        case .agent where r.path?.lowercased().hasSuffix(".app") ?? false:
-            return zh ? "\(name)（及在其中运行的任何程序）" : "\(name) (any program run in it)"
-        case .agent:
-            return zh ? "\(name)（及它运行的任何程序）" : "\(name) (any program it runs)"
-        case .binary:
-            return zh ? "\(name)（及它启动的苹果程序）" : "\(name) (and the Apple programs it starts)"
-        }
-    }
+    public func answerSubject(_ r: ResponsibleEntity) -> String { subjectText(r, exceptOwners: false) }
 
     /// The same without a name, for notification buttons (registered once per kind, not per question):
     /// "this app (any program run in it)".
-    public func answerSubject(kind: ResponsibleEntity.Kind) -> String {
+    public func answerSubject(kind: ResponsibleEntity.Kind) -> String { subjectText(kind: kind, exceptOwners: false) }
+
+    /// `exceptOwners`: the subject of a deny rule saved from an answer, which exempts the category's
+    /// expected owners (ssh for SSH keys) wherever they run (`RuleSubject.responsible`, `exceptOwners`).
+    private func subjectText(_ r: ResponsibleEntity, exceptOwners: Bool) -> String {
+        // An AI agent that is an app (Cursor, the Claude app): its path is the bundle.
+        let inApp = r.kind == .agent && (r.path?.lowercased().hasSuffix(".app") ?? false)
+        return DisplayText.name(r.displayName) + scope(inApp ? .app : r.kind, exceptOwners: exceptOwners)
+    }
+
+    private func subjectText(kind: ResponsibleEntity.Kind, exceptOwners: Bool) -> String {
         let zh = language == .zhHans
+        let name: String
         switch kind {
-        case .app: return zh ? "此应用（及在其中运行的任何程序）" : "this app (any program run in it)"
-        case .agent: return zh ? "此 AI agent（及它运行的任何程序）" : "this AI agent (any program it runs)"
-        case .binary: return zh ? "此程序（及它启动的苹果程序）" : "this program (and the Apple programs it starts)"
+        case .app: name = zh ? "此应用" : "this app"
+        case .agent: name = zh ? "此 AI agent" : "this AI agent"
+        case .binary: name = zh ? "此程序" : "this program"
         }
+        return name + scope(kind, exceptOwners: exceptOwners)
+    }
+
+    /// " (any program run in it)": what is charged to an app, AI agent or program.
+    private func scope(_ kind: ResponsibleEntity.Kind, exceptOwners: Bool) -> String {
+        let zh = language == .zhHans
+        let what: String
+        switch kind {
+        case .app: what = zh ? "及在其中运行的任何程序" : "any program run in it"
+        case .agent: what = zh ? "及它运行的任何程序" : "any program it runs"
+        case .binary: what = zh ? "及它启动的苹果程序" : "and the Apple programs it starts"
+        }
+        let except = exceptOwners ? (zh ? "，owner 进程除外" : ", except expected owners") : ""
+        return zh ? "（\(what)\(except)）" : " (\(what)\(except))"
     }
 
     /// "Always allow Terminal (any program run in it) to read SSH keys".
@@ -53,11 +64,13 @@ extension AlertFormatter {
     }
 
     /// The deny rule of "always deny" (a question) or "block from now on" (an alert): the same app, AI
-    /// agent or program, on the whole category, read and write, in every chain.
-    /// "Always deny Terminal (any program run in it) any access to SSH keys".
+    /// agent or program, on the whole category, read and write, in every chain, except the category's
+    /// expected owners (ssh run in Terminal keeps reading SSH keys). The title says so: it must not
+    /// claim more is blocked than the rule blocks.
+    /// "Always deny Terminal (any program run in it, except expected owners) any access to SSH keys".
     public func alwaysDenyTitle(_ r: ResponsibleEntity, categoryID: String, kind: AlertKind) -> String {
         let category = categoryText(categoryID)
-        let subject = answerSubject(r)
+        let subject = subjectText(r, exceptOwners: true)
         switch (language, kind) {
         case (.zhHans, .ask): return "始终拒绝 \(subject)访问 \(category)"
         case (.en, .ask): return "Always deny \(subject) any access to \(category)"
@@ -66,9 +79,9 @@ extension AlertFormatter {
         }
     }
 
-    /// "Always deny this app (any program run in it)" / "Block this app (any program run in it) from now on".
+    /// "Always deny this app (any program run in it, except expected owners)" / "Block this app (…) from now on".
     public func alwaysDenyTitle(kind: ResponsibleEntity.Kind, alertKind: AlertKind) -> String {
-        let subject = answerSubject(kind: kind)
+        let subject = subjectText(kind: kind, exceptOwners: true)
         switch (language, alertKind) {
         case (.zhHans, .ask): return "始终拒绝" + subject
         case (.en, .ask): return "Always deny " + subject

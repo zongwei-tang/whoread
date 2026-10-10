@@ -82,13 +82,16 @@ extension AskRequest {
 extension Alert {
     /// "Always allow covers: Terminal (any program run in it) reading SSH keys, only when the chain has
     /// no AI agent." for an open alert that offers "always allow" (it saves the same app × category
-    /// answer as a question); a question's alert names "allow once" too. nil otherwise.
+    /// answer as a question). Where "allow once" saves the 10-minute answer for the whole app too (a
+    /// question's alert, a block without a rule) it is named as well; on a rule's block it allows only
+    /// that file, once (DaemonCore.apply). nil otherwise.
     public func allowCoverageLine(_ f: AlertFormatter, agentName: (String) -> String = { $0 }) -> String? {
         guard status != .resolved, availableActions.contains(.alwaysAllow) else { return nil }
         // The AI agents the answer is scoped to, as the daemon takes them from an alert.
         let agents = chain.compactMap(\.agentID)
         let coverage = f.allowCoverage(responsible, categoryID: categoryID, access: accesses, chainAgents: agents, agentName: agentName)
-        return L10n.f(kind == .ask ? .askCoversFormat : .alertCoversFormat, coverage, language: f.language)
+        let allowOnceIsAppWide = kind == .ask || (kind == .blocked && ruleID == nil)
+        return L10n.f(allowOnceIsAppWide ? .askCoversFormat : .alertCoversFormat, coverage, language: f.language)
     }
 }
 

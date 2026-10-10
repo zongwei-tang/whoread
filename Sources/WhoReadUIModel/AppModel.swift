@@ -503,8 +503,11 @@ public final class AppModel {
 
     /// "Limited view: …" while the daemon does not serve this app as the signed WhoRead app: what is
     /// missing, that questions still arrive and can be denied, and what allowing and the rest need.
-    /// Never an error state: the rest of the app keeps working.
+    /// Never an error state: the rest of the app keeps working. Not while the daemon cannot be read at
+    /// all (not running, another version, another user): then no question arrives either, and the
+    /// failures kept from before would say they do.
     public var limitedViewText: String? {
+        guard lastError == nil else { return nil }
         var missing = refusedParts.map { L10n.partName($0, language) }
         if asksPathsHidden { missing.append(L10n.t(.limitedAskPaths, language)) }
         guard !missing.isEmpty else { return nil }
@@ -536,7 +539,9 @@ public final class AppModel {
         // Another version: `versionProblem` says so in words, shown above everything else.
         if e.code == .versionMismatch, versionProblem != nil { return nil }
         switch e.code {
-        case .notPermitted: return L10n.t(.errNotConsoleUser, language)
+        // Another user than the one at the console: `connectionProblemText` says it already (next to
+        // this in the menu); said once.
+        case .notPermitted: return connectionProblemText == nil ? L10n.t(.errNotConsoleUser, language) : nil
         // The status was read: the daemon runs, this read got no reply in time.
         case .unavailable: return L10n.f(.asksCannotReadFormat, L10n.t(.errNoAnswer, language), language: language)
         default: return L10n.f(.asksCannotReadFormat, L10n.message(for: e, language), language: language)
