@@ -23,10 +23,10 @@ public final class ReplaySource: EventSource, @unchecked Sendable {
     private var cancelled = false
     private let done = DispatchSemaphore(value: 0)
 
-    public init(path: String, realtime: Bool = false, prefixes: [String]? = nil) {
+    public init(path: String, realtime: Bool = false, prefixes: [String]? = nil, ancestors: [String] = []) {
         self.path = path
         self.realtime = realtime
-        self.prefilter = prefixes.map { LinePrefilter(prefixes: $0) }
+        self.prefilter = prefixes.map { LinePrefilter(prefixes: $0, ancestors: ancestors) }
     }
 
     public var state: SourceState { stateBox.get() }
@@ -98,7 +98,7 @@ public final class ReplaySource: EventSource, @unchecked Sendable {
 
     public func updateMonitoring(prefixes: [String], ancestors: [String], readdir: Bool) {
         prefilterLock.lock()
-        if prefilter != nil { prefilter = LinePrefilter(prefixes: prefixes) }
+        if prefilter != nil { prefilter = LinePrefilter(prefixes: prefixes, ancestors: ancestors) }
         prefilterLock.unlock()
     }
 }

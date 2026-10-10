@@ -43,9 +43,10 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
             + (readdir ? ["readdir"] : [])
     }
 
-    public init(executable: String = "/usr/bin/eslogger", prefixes: [String], readdir: Bool = false) {
+    /// `ancestors`: proper ancestors of the prefixes (a symlink created at one is an event).
+    public init(executable: String = "/usr/bin/eslogger", prefixes: [String], ancestors: [String] = [], readdir: Bool = false) {
         self.executable = executable
-        self.prefilter = LinePrefilter(prefixes: prefixes)
+        self.prefilter = LinePrefilter(prefixes: prefixes, ancestors: ancestors)
         self.readdir = readdir
     }
 
@@ -93,7 +94,7 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
 
     public func updateMonitoring(prefixes: [String], ancestors: [String], readdir: Bool) {
         filterLock.lock()
-        prefilter = LinePrefilter(prefixes: prefixes)
+        prefilter = LinePrefilter(prefixes: prefixes, ancestors: ancestors)
         filterLock.unlock()
         lock.lock()
         let restart = readdir != self.readdir

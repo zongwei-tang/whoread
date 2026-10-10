@@ -14,8 +14,8 @@ ALLOWED = {
     'ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'sk-abcdefghijklmnopqrstuvwx',
     'glpat-AbCdEf1234567890xyz',
 }
-ALLOWED_EMAIL = re.compile(r'(example\.(com|org)$|@github\.com$|@gitlab\.com$|noreply)', re.I)
-ALLOWED_HOME = re.compile(r'^/(Users|home)/(a|alice|alicex|bob|carol|erin|link|gone|nobody\d*|zongwei|you|user|runner|admin|test|me|x)\.?$', re.I)
+ALLOWED_EMAIL = re.compile(r'(example\.(com|org)$|@github\.com$|@gitlab\.com$|noreply|^hunter2\w*@)', re.I)
+ALLOWED_HOME = re.compile(r'^/(Users|home)/(a|u\d*|new|alice|alicex|bob|carol|erin|link|gone|nobody\d*|zongwei|you|user|runner|admin|test|me|x)\.?$', re.I)
 PATTERNS = {
     'private key': re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----'),
     'aws key': re.compile(r'\b(AKIA|ASIA)[0-9A-Z]{16}\b'),

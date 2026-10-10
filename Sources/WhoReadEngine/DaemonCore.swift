@@ -548,13 +548,15 @@ public final class DaemonCore: @unchecked Sendable {
 
     static func defaultSource(_ core: DaemonCore) throws -> EventSource {
         // Every byte-distinct spelling: ES compares VFS paths, the eslogger prefilter compares bytes.
-        let prefixes = core.analyzer.classifier.mutePaths
+        let classifier = core.analyzer.classifier
+        let prefixes = classifier.mutePaths
         switch core.config.source {
         case .eslogger:
-            return EsloggerSource(executable: core.config.esloggerPath, prefixes: prefixes, readdir: core.currentSettings.readdirEnabled)
+            return EsloggerSource(executable: core.config.esloggerPath, prefixes: prefixes, ancestors: classifier.ancestors,
+                                  readdir: core.currentSettings.readdirEnabled)
         case .replay:
             guard let path = core.config.replayPath else { throw IPCError(.invalid, "replay source needs a file") }
-            return ReplaySource(path: path, realtime: core.config.replayRealtime, prefixes: prefixes)
+            return ReplaySource(path: path, realtime: core.config.replayRealtime, prefixes: prefixes, ancestors: classifier.ancestors)
         case .native:
             #if canImport(EndpointSecurity)
             return NativeESSource(core: core)

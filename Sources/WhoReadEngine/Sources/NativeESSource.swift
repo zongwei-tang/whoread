@@ -1033,7 +1033,13 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
                 dst = reported(file)
             } else {
                 if notify { return nil }
-                dst = newPath(e.create.destination.new_path.dir, e.create.destination.new_path.filename)
+                var path = newPath(e.create.destination.new_path.dir, e.create.destination.new_path.filename)
+                // What is being created: a symlink at a parent of monitored prefixes is decided, a
+                // directory is not. The header does not say whether `mode` holds the file type
+                // (UNVERIFIED): used only when it does, the type stays unknown otherwise.
+                let mode = UInt32(e.create.destination.new_path.mode)
+                if mode & 0o170000 != 0 { path.isDirectory = OperationSemantics.isDirectory(mode: mode) }
+                dst = path
             }
             targets = OperationSemantics.create(dst)
         default:

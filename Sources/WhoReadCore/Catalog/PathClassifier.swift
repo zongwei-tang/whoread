@@ -299,10 +299,19 @@ public final class PathClassifier: @unchecked Sendable {
     /// categories on one prefix the highest severity wins, then catalog order.
     /// A truncated path gets the category's worst-case severity: its real name is unknown.
     ///
-    /// A category registered at a prefix only because a link leads there wins only when it is more
-    /// severe than what the path classifies as without it: anyone can create links in their own files
-    /// (`ln -s ~/.ssh/id_ed25519 ~/x` plus a path rule on `~/x`), and that must not turn an ssh key
-    /// into a Custom/high file that critical-file and ssh rules no longer cover.
+    /// Some prefixes only add severity (`addsSeverityOnly`): nested in another category's prefix,
+    /// they never demote what the path classifies as without them.
+    /// - A category registered at a prefix only because a link leads there wins only when more
+    ///   severe (ties go to the shallower prefix): anyone can create links in their own files
+    ///   (`ln -s ~/.ssh/id_ed25519 ~/x` plus a path rule on `~/x`), and that must not turn an ssh key
+    ///   into a Custom/high file that critical-file and ssh rules no longer cover.
+    /// - A custom path (`whoread catalog add-path custom ~/.ssh/work`) is meant to monitor more, not
+    ///   to demote the ssh keys in it. It wins ties: only root or the app adds one inside another
+    ///   prefix, on purpose, and a carve-out in a cloud folder must not be decided by an answer
+    ///   about cloud-storage.
+    /// - A project root inside another prefix (a cloud folder) keeps its `.env` (it wins ties), but a
+    ///   project root inside `~/.aws` does not turn the credentials there into project-secrets/high
+    ///   files.
     public func classify(normalized path: String, truncated: Bool = false) -> Classification? {
         let originalComponents = PathNormalizer.components(path)
         let folded = PathNormalizer.components(PathNormalizer.fold(path))
@@ -314,11 +323,12 @@ public final class PathClassifier: @unchecked Sendable {
             return (categoryOrder[a.categoryID] ?? 0) < (categoryOrder[b.categoryID] ?? 0)
         }
 
-        var viaLink: Classification?
+        // The best classification by prefixes that only add severity, so far (deeper ones first).
+        var additive: (c: Classification, depth: Int, winsTies: Bool)?
         for (match, depth) in terminals(folded) {
             let relative = originalComponents[depth...].joined(separator: "/")
             var best: Classification?
-            var bestViaLink: Classification?
+            var bestAdditive: (c: Classification, winsTies: Bool)?
             for categoryID in match.terminal {
                 guard let spec = categoriesByID[categoryID] else { continue }
                 let severity: Severity?
@@ -330,21 +340,38 @@ public final class PathClassifier: @unchecked Sendable {
                 if let severity {
                     let c = Classification(categoryID: categoryID, severity: severity,
                                            prefix: match.terminalPath ?? "", relativePath: relative)
-                    if match.viaLinkOnly.contains(categoryID) {
-                        if bestViaLink.map({ better(c, $0) }) ?? true { bestViaLink = c }
+                    if let winsTies = addsSeverityOnly(spec, viaLink: match.viaLinkOnly.contains(categoryID)) {
+                        if bestAdditive.map({ better(c, $0.c) }) ?? true { bestAdditive = (c, winsTies) }
                     } else if best.map({ better(c, $0) }) ?? true {
                         best = c
                     }
                 }
             }
-            // Ties go to the shallower prefix: a link only adds severity.
-            if let b = bestViaLink, viaLink.map({ b.severity >= $0.severity }) ?? true { viaLink = b }
+            // A shallower one replaces a deeper one unless the deeper one is more severe (or as severe
+            // and winning ties).
+            if let b = bestAdditive {
+                let keep = additive.map { $0.c.severity > b.c.severity || ($0.winsTies && $0.c.severity == b.c.severity) } ?? false
+                if !keep { additive = (b.c, depth, b.winsTies) }
+            }
             if let best {
-                if let v = viaLink, v.severity > best.severity { return v }
+                // On the same prefix, only a more severe one wins.
+                if let a = additive, a.c.severity > best.severity || (a.winsTies && a.depth > depth && a.c.severity == best.severity) {
+                    return a.c
+                }
                 return best
             }
         }
-        return viaLink
+        return additive?.c
+    }
+
+    /// nil for a prefix that classifies what is below it whatever shallower prefixes say (a standard
+    /// category: a Safari file in a home on an external volume is Safari's, at Safari's severity).
+    /// Otherwise the prefix only adds severity (see `classify`), and the result says whether it wins
+    /// ties with a shallower prefix: links do not, custom paths and project roots do.
+    func addsSeverityOnly(_ spec: CategorySpec, viaLink: Bool) -> Bool? {
+        if viaLink { return false }
+        if spec.kind == .custom || spec.kind == .projectRoots { return true }
+        return nil
     }
 
     /// For a path that did not classify: the categories below it, most severe first, if it is a
@@ -360,7 +387,26 @@ public final class PathClassifier: @unchecked Sendable {
             if !node.terminal.isEmpty && i < folded.count - 1 { return [] }
         }
         if node === root { return [] }
-        return node.subtree.sorted { a, b in
+        return mostSevereFirst(node.subtree)
+    }
+
+    /// Every category registered at or below the path, most severe first, wherever the path is: unlike
+    /// `categoriesBelow`, also for a path inside another prefix. Moving or cloning a directory carries
+    /// the files of every prefix inside it, so moving `/Volumes/Ext/bob/.config` (a home on an external
+    /// volume) carries gh and gcloud, not only "volumes", and moving a cloud folder that holds a
+    /// project root carries the project's keys.
+    public func categoriesInside(normalized path: String) -> [String] {
+        var node = root
+        for component in PathNormalizer.components(PathNormalizer.fold(path)) {
+            guard let next = node.children[component] else { return [] }
+            node = next
+        }
+        if node === root { return [] }
+        return mostSevereFirst(node.subtree)
+    }
+
+    private func mostSevereFirst(_ ids: Set<String>) -> [String] {
+        ids.sorted { a, b in
             let sa = categoriesByID[a]?.severity ?? .medium
             let sb = categoriesByID[b]?.severity ?? .medium
             if sa != sb { return sa > sb }
@@ -372,21 +418,37 @@ public final class PathClassifier: @unchecked Sendable {
     /// exclusions), at the category's base severity. Used for directories inside a pattern-only
     /// category (a project folder): moving one carries the `.env`/`*.pem` files inside.
     public func containingCategory(normalized path: String) -> TargetCategory? {
+        containingCategories(normalized: path).first
+    }
+
+    /// The categories whose prefixes contain the path (at or above it) and may classify files below it,
+    /// deepest first, at base severity, ignoring `matchOnlyPatterns` (but not exclusions). The walk
+    /// stops at the first standard category: what is below it is that category's (see `classify`).
+    /// Prefixes that only add severity do not stop it: the `.pem` under a custom path inside a project
+    /// root is still a project secret.
+    public func containingCategories(normalized path: String) -> [TargetCategory] {
         let originalComponents = PathNormalizer.components(path)
         let folded = PathNormalizer.components(PathNormalizer.fold(path))
-        guard originalComponents.count == folded.count else { return nil }
+        guard originalComponents.count == folded.count else { return [] }
+        let name = originalComponents.last ?? ""
+        var out: [TargetCategory] = []
         for (match, depth) in terminals(folded) {
             let relative = originalComponents[depth...].joined(separator: "/")
-            let name = originalComponents.last ?? ""
+            var standard = false
             for categoryID in match.terminal {
                 guard let spec = categoriesByID[categoryID] else { continue }
                 let excluded = spec.patterns.contains { p in
                     p.exclude && p.glob.matches(p.matchesRelativePath ? relative : name)
                 }
-                if !excluded { return TargetCategory(id: categoryID, severity: spec.severity) }
+                if excluded { continue }
+                if !out.contains(where: { $0.id == categoryID }) {
+                    out.append(TargetCategory(id: categoryID, severity: spec.severity))
+                }
+                if addsSeverityOnly(spec, viaLink: match.viaLinkOnly.contains(categoryID)) == nil { standard = true }
             }
+            if standard { break }
         }
-        return nil
+        return out
     }
 
     /// Whether a classified path may be a directory holding other files of its category: true unless a

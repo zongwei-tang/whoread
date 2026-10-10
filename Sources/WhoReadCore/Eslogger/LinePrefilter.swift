@@ -10,10 +10,12 @@ import Foundation
 ///   parents of sensitive dirs may be moved)
 /// - create → parse with a `new_path` (split dir+name) destination; an `existing_file` one carries
 ///   the full path, so it goes through the prefix test like an open (every file creation on the
-///   system is a create event)
+///   system is a create event), or, at exactly a proper ancestor of a prefix (a symlink planted at
+///   `~/.config`), through the ancestor test
 /// - `close` with `"modified":false` → drop
-/// - any JSON string starting with a monitored prefix, plain or under `/System/Volumes/Data`
-///   (ASCII case-insensitive, `/` or `\/` escaped) → parse
+/// - any JSON string starting with a monitored prefix (or, on a create line, equal to an ancestor),
+///   plain or under `/System/Volumes/Data` (ASCII case-insensitive, `/` or `\/` escaped, `"`, `\` and control
+///   characters JSON-escaped) → parse
 /// - lines containing `\u` escapes → parse (non-ASCII paths may be escaped)
 ///
 /// False positives only cost a parse; false negatives would lose events, so every rule errs open.
@@ -29,18 +31,24 @@ public final class LinePrefilter: @unchecked Sendable {
         case escape = 6
         case create = 7
         case newPath = 8
+        /// A JSON string equal to an ancestor of a prefix: only matters on a create line.
+        case ancestor = 9
     }
 
     private var automaton: AhoCorasick
     /// Set when some prefix has no usable ASCII fragment: every file event must then be parsed.
     private var parseAllFileEvents = false
+    /// Set when some ancestor is not ASCII (it cannot be matched exactly): every create is parsed.
+    private var parseAllCreates = false
 
-    public init(prefixes: [String]) {
-        (automaton, parseAllFileEvents) = LinePrefilter.build(prefixes)
+    /// `ancestors`: proper ancestors of the prefixes (`PathClassifier.ancestors`). Only a create at
+    /// exactly one of them matters here (rename and clone lines are always parsed).
+    public init(prefixes: [String], ancestors: [String] = []) {
+        (automaton, parseAllFileEvents, parseAllCreates) = LinePrefilter.build(prefixes, ancestors)
     }
 
-    public func update(prefixes: [String]) {
-        (automaton, parseAllFileEvents) = LinePrefilter.build(prefixes)
+    public func update(prefixes: [String], ancestors: [String] = []) {
+        (automaton, parseAllFileEvents, parseAllCreates) = LinePrefilter.build(prefixes, ancestors)
     }
 
     /// Needle for a prefix. Non-ASCII prefixes (e.g. a project root under a Chinese folder name)
@@ -62,12 +70,40 @@ public final class LinePrefilter: @unchecked Sendable {
         return best.count >= 4 ? best : nil
     }
 
-    private static func build(_ prefixes: [String]) -> (AhoCorasick, Bool) {
+    /// How `s` appears inside a JSON string: `\` and `"` escaped, control characters as their short
+    /// escape (`\n`, `\r`, `\t`, `\b`, `\f`) or `\u00XX` (a line with `\u` is parsed anyway). Escaping
+    /// is per character, so it also holds for a fragment taken from the middle of a path.
+    static func jsonEscaped(_ s: String) -> String {
+        var out = ""
+        for scalar in s.unicodeScalars {
+            switch scalar {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case "\u{8}": out += "\\b"
+            case "\u{C}": out += "\\f"
+            case _ where scalar.value < 0x20: out += String(format: "\\u%04x", scalar.value)
+            default: out.unicodeScalars.append(scalar)
+            }
+        }
+        return out
+    }
+
+    private static func build(_ prefixes: [String], _ ancestors: [String]) -> (AhoCorasick, Bool, Bool) {
         var parseAll = false
+        var parseAllCreates = false
         var patterns: [(bytes: [UInt8], tag: UInt8)] = []
         func add(_ s: String, _ tag: Tag) {
             let bytes = Array(s.utf8).map(lower)
             if !bytes.isEmpty { patterns.append((bytes, tag.rawValue)) }
+        }
+        /// `s` as JSON writes it, with `/` plain and escaped as `\/` (eslogger has used both).
+        func addJSON(_ s: String, before: String = "", after: String = "", _ tag: Tag) {
+            let escaped = jsonEscaped(s)
+            add(before + escaped + after, tag)
+            if escaped.contains("/") { add(before + escaped.replacingOccurrences(of: "/", with: "\\/") + after, tag) }
         }
         for key in ["\"exec\":", "\"fork\":", "\"exit\":"] { add(key, .lifecycle) }
         for key in ["\"rename\":", "\"clone\":", "\"copyfile\":", "\"link\":", "\"exchangedata\":"] {
@@ -89,16 +125,26 @@ public final class LinePrefilter: @unchecked Sendable {
                 // match every /System/Volumes/… path (process executables included). The firmlinked
                 // spelling is added explicitly instead.
                 for v in [p] + PathNormalizer.defaultFirmlinkRoots.map({ $0 + p }) {
-                    add("\"" + v, .prefix)
-                    add("\"" + v.replacingOccurrences(of: "/", with: "\\/"), .prefix)
+                    addJSON(v, before: "\"", .prefix)
                 }
             } else {
                 // An ASCII fragment of a non-ASCII prefix can start mid-string: keep it unanchored.
-                add(p, .prefix)
-                if p.contains("/") { add(p.replacingOccurrences(of: "/", with: "\\/"), .prefix) }
+                addJSON(p, .prefix)
             }
         }
-        return (AhoCorasick(patterns: patterns), parseAll)
+        // An ancestor is matched as a whole JSON string, and only on a create line: `"/Users/alice"`
+        // must not let every event in the home through, and opening (listing) the home or its
+        // Library folder is frequent and never sensitive.
+        for ancestor in ancestors {
+            guard ancestor.utf8.allSatisfy({ $0 < 0x80 }) else {
+                parseAllCreates = true
+                continue
+            }
+            for v in [ancestor] + PathNormalizer.defaultFirmlinkRoots.map({ $0 + ancestor }) {
+                addJSON(v, before: "\"", after: "\"", .ancestor)
+            }
+        }
+        return (AhoCorasick(patterns: patterns), parseAll, parseAllCreates)
     }
 
     @inline(__always)
@@ -113,7 +159,7 @@ public final class LinePrefilter: @unchecked Sendable {
         }
         func has(_ t: Tag) -> Bool { seen & (1 << t.rawValue) != 0 }
         if has(.lifecycle) || has(.multiPath) { return .parse }
-        if has(.create) && has(.newPath) { return .parse }
+        if has(.create) && (has(.newPath) || has(.ancestor) || parseAllCreates) { return .parse }
         if has(.close) && has(.notModified) { return .drop }
         if has(.prefix) || has(.escape) || parseAllFileEvents { return .parse }
         return .drop

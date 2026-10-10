@@ -33,6 +33,8 @@ public final class Analyzer: @unchecked Sendable {
     public let attributor: Attributor
 
     private let lock = NSLock()
+    /// Serializes classifier swaps (never taken by event analysis).
+    private let replacing = NSLock()
     private var _classifier: PathClassifier
     private var _benign: BenignClassifier
     private var _readdirEnabled = false
@@ -85,12 +87,16 @@ public final class Analyzer: @unchecked Sendable {
         return _classifier
     }
 
+    /// Swaps the classifier. The rules are recompiled first, without holding any lock event analysis
+    /// or the AUTH path takes, then both swap back to back; concurrent swaps cannot leave the rules
+    /// and the analyzer on different classifiers.
     public func replace(classifier: PathClassifier, benign: BenignClassifier? = nil) {
+        replacing.lock(); defer { replacing.unlock() }
+        rules.replace(classifier: classifier)
         lock.lock()
         _classifier = classifier
         if let benign { _benign = benign }
         lock.unlock()
-        rules.replace(classifier: classifier)
     }
 
     private func takeEventID() -> Int64 {
@@ -137,44 +143,97 @@ public final class Analyzer: @unchecked Sendable {
         return classifyTargets(activity)
     }
 
-    /// Classifies the targets of an activity.
+    /// Operations whose destination receives a whole object from elsewhere: planting a directory (or,
+    /// for `create`, a symlink) at a parent of monitored prefixes changes what is found below it.
+    static let carryingInOperations: Set<FileOperation> = [.rename, .clone, .copyfile]
+
+    /// Classifies the targets of an activity. A path that carries files in or out (the source of a
+    /// move or clone, its destination, a symlink created in place of a directory) is also judged by
+    /// what it can hold; those categories come as a second entry for the same target, `viaAncestor`.
     func classifyTargets(_ activity: FileActivity) -> [ClassifiedTarget] {
         let classifier = self.classifier
+        let targets = activity.targets
+        let paths = targets.map { classifier.normalizer.normalize($0.path) }
         var out: [ClassifiedTarget] = []
-        for t in activity.targets {
-            let path = classifier.normalizer.normalize(t.path)
-            let carries = t.role == .source && Analyzer.carryingOperations.contains(activity.operation)
-            if let c = classifier.classify(normalized: path, truncated: t.truncated) {
-                var severity = c.severity
-                // A directory of the category may hold its most sensitive files (moving a browser
-                // profile carries Cookies): judge it by the worst file it can contain. When the source
-                // does not say, a path a specific file pattern named (`.env.tmp`, `History`) is taken
-                // as a file; anything else may be a directory.
-                let mayBeDirectory = t.isDirectory ?? classifier.mayContainFiles(c)
-                if carries && mayBeDirectory, let m = classifier.maxSeverity(c.categoryID), m > severity {
-                    severity = m
-                }
-                out.append(ClassifiedTarget(target: t, path: path, categories: [TargetCategory(id: c.categoryID, severity: severity)],
+        for (i, t) in targets.enumerated() {
+            let path = paths[i]
+            let direct = classifier.classify(normalized: path, truncated: t.truncated)
+            let carriesOut = t.role == .source && Analyzer.carryingOperations.contains(activity.operation)
+            // A new directory carries nothing (tools create ~/.config all the time); a new symlink at a
+            // parent of monitored prefixes redirects them (`ln -s /tmp/evil ~/.config`). The type of a
+            // create is known from its stat once it exists; an AUTH_CREATE may not say (nil).
+            let carriesIn = t.role == .destination
+                && (Analyzer.carryingInOperations.contains(activity.operation) || (activity.operation == .create && t.isDirectory == false))
+            guard carriesOut || carriesIn else {
+                out.append(ClassifiedTarget(target: t, path: path,
+                                            categories: direct.map { [TargetCategory(id: $0.categoryID, severity: $0.severity)] } ?? [],
                                             viaAncestor: false))
                 continue
             }
-            if carries {
-                // Moving or cloning a parent directory carries every category below it.
-                let below = classifier.categoriesBelow(normalized: path).compactMap { id -> TargetCategory? in
-                    guard let spec = classifier.spec(id) else { return nil }
-                    return TargetCategory(id: id, severity: classifier.maxSeverity(id) ?? spec.severity)
+            // The other end of the move. A move or clone puts the source's object at the destination,
+            // so the destination has the source's type.
+            let otherRole: TargetRole = carriesOut ? .destination : .source
+            let other = targets.indices.first { $0 != i && targets[$0].role == otherRole }
+            var isDirectory = t.isDirectory
+            if isDirectory == nil, carriesIn, activity.operation != .create, let other { isDirectory = targets[other].isDirectory }
+            // A directory of the category may hold its most sensitive files (moving a browser profile
+            // carries Cookies): judge it by the worst file it can contain. When the source does not say,
+            // a path a specific file pattern named (`.env.tmp`, `History`) is taken as a file; anything
+            // else may be a directory.
+            let mayBeDirectory = activity.operation != .create && (isDirectory ?? direct.map(classifier.mayContainFiles) ?? true)
+            /// A pattern-only category (a project) leaves its prefixes only when the directory does: a
+            /// refactor inside the project keeps base severity, `mv ~/code/app/certs /tmp/c` (or into an
+            /// excluded `node_modules`) is judged by the keys it can carry.
+            /// The files land below the other end, so a path there is judged, not the folder itself:
+            /// exclusions name folders (`**/node_modules/**`) and match only below them, so a folder
+            /// renamed to `app/node_modules` is covered while every key it brings is not.
+            func leavesCategory(_ id: String) -> Bool {
+                guard classifier.spec(id)?.matchOnlyPatterns == true else { return true }
+                guard let other else { return true }
+                return !classifier.containingCategories(normalized: paths[other] + "/x").contains { $0.id == id }
+            }
+
+            var categories: [TargetCategory] = []
+            if let c = direct {
+                var severity = c.severity
+                if carriesOut && mayBeDirectory, let m = classifier.maxSeverity(c.categoryID), m > severity, leavesCategory(c.categoryID) {
+                    severity = m
                 }
-                if !below.isEmpty {
-                    out.append(ClassifiedTarget(target: t, path: path, categories: below, viaAncestor: true))
-                    continue
-                }
-                // A folder inside a pattern-only category (a project): it carries the .env/.pem inside.
-                if t.isDirectory == true, let c = classifier.containingCategory(normalized: path) {
-                    out.append(ClassifiedTarget(target: t, path: path, categories: [c], viaAncestor: true))
-                    continue
+                categories.append(TargetCategory(id: c.categoryID, severity: severity))
+            }
+            var carried: [TargetCategory] = []
+            func carry(_ c: TargetCategory) {
+                guard c.id != direct?.categoryID else { return }
+                if let k = carried.firstIndex(where: { $0.id == c.id }) {
+                    if c.severity > carried[k].severity { carried[k].severity = c.severity }
+                } else {
+                    carried.append(c)
                 }
             }
-            out.append(ClassifiedTarget(target: t, path: path, categories: [], viaAncestor: false))
+            // Every prefix inside it moves with it, wherever it is (a parent of ~/.config, a home on an
+            // external volume, a cloud folder holding a project root or a link target).
+            for id in classifier.categoriesInside(normalized: path) {
+                guard let spec = classifier.spec(id) else { continue }
+                carry(TargetCategory(id: id, severity: classifier.maxSeverity(id) ?? spec.severity))
+            }
+            // A folder inside a pattern-only category (a project): it carries the .env/.pem inside.
+            if mayBeDirectory {
+                for c in classifier.containingCategories(normalized: path) {
+                    var c = c
+                    if carriesOut, let m = classifier.maxSeverity(c.id), m > c.severity, leavesCategory(c.id) { c.severity = m }
+                    carry(c)
+                }
+            }
+            if !categories.isEmpty || carried.isEmpty {
+                out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false))
+            }
+            if !carried.isEmpty {
+                // Most severe first (a question names the first of the most severe), else as found.
+                let sorted = carried.enumerated().sorted { a, b in
+                    a.element.severity != b.element.severity ? a.element.severity > b.element.severity : a.offset < b.offset
+                }.map(\.element)
+                out.append(ClassifiedTarget(target: t, path: path, categories: sorted, viaAncestor: true))
+            }
         }
         return out
     }

@@ -148,8 +148,13 @@ final class ClassifierRound1Tests: XCTestCase {
         }
         let sub = rename("/Users/alice/code/web", dir: true)
         XCTAssertEqual(sub.events.map(\.categoryID), ["project-secrets"])
-        XCTAssertEqual(sub.events.first?.severity, .high, "base severity: renaming project folders is not critical")
+        // files-2: leaving the project, the folder is judged by the keys it can carry.
+        XCTAssertEqual(sub.events.first?.severity, .critical)
         XCTAssertEqual(sub.events.first?.viaAncestor, true)
+        let refactor = h.file(.rename, mv, OperationSemantics.rename(ReportedPath("/Users/alice/code/web", isDirectory: true),
+                                                                     ReportedPath("/Users/alice/code/web2")), 5)
+        XCTAssertEqual(refactor.events.map(\.categoryID), ["project-secrets"])
+        XCTAssertEqual(refactor.events.first?.severity, .high, "base severity: renaming folders inside the project is not critical")
         let root = rename("/Users/alice/code", dir: true)
         XCTAssertEqual(root.events.map(\.categoryID), ["project-secrets"])
         XCTAssertTrue(rename("/Users/alice/code/web/main.swift", dir: false).events.isEmpty, "a plain file is not a carrier")

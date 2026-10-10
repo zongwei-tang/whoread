@@ -175,8 +175,10 @@ public enum OperationSemantics {
 
     public static func readdir(path: String) -> [FileTarget] { readdir(ReportedPath(path)) }
 
+    /// `isDirectory` (from the created object's stat, when the source has one) tells a new symlink or
+    /// node from a new directory: only the first can redirect a monitored prefix below it.
     public static func create(_ file: ReportedPath) -> [FileTarget] {
-        [FileTarget(path: file.path, role: .destination, access: .write, truncated: file.truncated)]
+        [FileTarget(path: file.path, role: .destination, access: .write, truncated: file.truncated, isDirectory: file.isDirectory)]
     }
 
     public static func create(path: String) -> [FileTarget] { create(ReportedPath(path)) }

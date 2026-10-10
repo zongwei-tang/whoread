@@ -103,6 +103,8 @@ public final class RuleEngine: @unchecked Sendable {
     private let lock = NSLock()
     private var compiled: [CompiledRule] = []
     private var classifier: PathClassifier
+    /// Bumped whenever the classifier is replaced: a recompile for an older one is dropped.
+    private var classifierGeneration = 0
     /// An "allow once" use was consumed since the last `takeConsumed()` (callers persist it).
     private var consumed = false
     private let attributor: Attributor?
@@ -159,17 +161,45 @@ public final class RuleEngine: @unchecked Sendable {
                             chainAgents: rule.chainAgents.map(Set.init))
     }
 
-    public func replace(rules: [Rule], classifier: PathClassifier? = nil) {
-        lock.lock(); defer { lock.unlock() }
-        if let classifier { self.classifier = classifier }
-        compiled = rules.map { RuleEngine.compile($0, self.classifier) }
+    /// Compiled `rules`, reusing the entries of `old` (compiled against the same classifier) whose rule
+    /// is unchanged. Compiling expands every path for every home and follows links: redoing all 512
+    /// rules for each edit or answer held the lock the AUTH path evaluates under for tens of ms.
+    static func compile(_ rules: [Rule], _ classifier: PathClassifier, reusing old: [CompiledRule]) -> [CompiledRule] {
+        var byID: [String: CompiledRule]?
+        return rules.enumerated().map { i, rule in
+            if i < old.count, old[i].rule == rule { return old[i] }
+            if byID == nil { byID = Dictionary(old.map { ($0.rule.id, $0) }, uniquingKeysWith: { first, _ in first }) }
+            if let c = byID?[rule.id], c.rule == rule { return c }
+            return compile(rule, classifier)
+        }
     }
 
-    /// Swaps the classifier and recompiles the current rules atomically (no stale rule snapshot).
-    public func replace(classifier: PathClassifier) {
+    public func replace(rules: [Rule], classifier: PathClassifier? = nil) {
         lock.lock(); defer { lock.unlock() }
+        if let classifier {
+            self.classifier = classifier
+            classifierGeneration &+= 1
+            compiled = rules.map { RuleEngine.compile($0, classifier) }
+        } else {
+            compiled = RuleEngine.compile(rules, self.classifier, reusing: compiled)
+        }
+    }
+
+    /// Swaps the classifier and recompiles the current rules (no stale rule snapshot). The recompile
+    /// runs outside the lock, so evaluation goes on (against the old classifier) meanwhile; a rule that
+    /// changed in between (an edit, a used "allow once") is compiled again from its current state.
+    public func replace(classifier: PathClassifier) {
+        lock.lock()
+        classifierGeneration &+= 1
+        let generation = classifierGeneration
+        let snapshot = compiled.map(\.rule)
+        lock.unlock()
+        let fresh = snapshot.map { RuleEngine.compile($0, classifier) }
+        lock.lock(); defer { lock.unlock() }
+        // A later replacement owns the classifier now.
+        guard generation == classifierGeneration else { return }
         self.classifier = classifier
-        compiled = compiled.map { RuleEngine.compile($0.rule, classifier) }
+        compiled = RuleEngine.compile(compiled.map(\.rule), classifier, reusing: fresh)
     }
 
     /// Read-modify-write of the rule list under the engine lock. Returns the new list.
@@ -178,7 +208,7 @@ public final class RuleEngine: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         var list = compiled.map(\.rule)
         try f(&list)
-        compiled = list.map { RuleEngine.compile($0, classifier) }
+        compiled = RuleEngine.compile(list, classifier, reusing: compiled)
         return list
     }
 
@@ -507,11 +537,12 @@ public final class RuleEngine: @unchecked Sendable {
         guard compiled.contains(where: { deadAnswer($0.rule) || $0.rule.exceptions.contains { !$0.isLive(at: now) } }) else {
             return false
         }
-        compiled = compiled.filter { !deadAnswer($0.rule) }.map { c in
+        let list = compiled.filter { !deadAnswer($0.rule) }.map { c in
             var r = c.rule
             r.exceptions.removeAll { !$0.isLive(at: now) }
-            return RuleEngine.compile(r, classifier)
+            return r
         }
+        compiled = RuleEngine.compile(list, classifier, reusing: compiled)
         return true
     }
 
