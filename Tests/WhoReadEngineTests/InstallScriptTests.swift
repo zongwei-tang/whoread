@@ -8,8 +8,8 @@ import Darwin
 import WhoReadCore
 @testable import WhoReadEngine
 
-// Regression tests for scripts/install-dev-daemon.sh: the dev daemon's log file (daemonfs-1) and the
-// directories it installs into.
+// Regression tests for scripts/install-dev-daemon.sh: the dev daemon's log file (a macos-3 variant) and
+// the directories it installs into (macos-4 variants).
 
 private func exists(_ path: String) -> Bool {
     var st = stat()
@@ -105,7 +105,7 @@ final class InstallScriptLogTests: XCTestCase {
         XCTAssertEqual(entries(logs), ["whoreadd.log"])
     }
 
-    // daemonfs-1: `: >> whoreadd.log` appended to, and chmod 600 changed, the file a link pointed to.
+    // macos-3 variant: `: >> whoreadd.log` appended to, and chmod 600 changed, the file a link pointed to.
     func testLinkAtTheLogFileIsMovedAsideNotFollowed() throws {
         XCTAssertEqual(mkdir(logs, 0o700), 0)
         let target = dir.path("target")
@@ -129,7 +129,7 @@ final class InstallScriptLogTests: XCTestCase {
         XCTAssertFalse(exists(target))
     }
 
-    // daemonfs-1-variant: chown and chmod of a file with a second name change that other file too, and
+    // macos-3 variant: chown and chmod of a file with a second name change that other file too, and
     // launchd would append the daemon's output to it.
     func testHardLinkedLogFileIsMovedAside() throws {
         XCTAssertEqual(mkdir(logs, 0o700), 0)
@@ -161,7 +161,7 @@ final class InstallScriptLogTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: log)), Data())
     }
 
-    // daemonfs-1-variant: the directory itself, a link to elsewhere (install -d and chmod 700 followed
+    // macos-3 variant: the directory itself, a link to elsewhere (install -d and chmod 700 followed
     // it), or one others could change entries in.
     func testLinkedLogDirectoryIsMovedAsideNotFollowed() throws {
         let elsewhere = dir.path("elsewhere")
@@ -210,7 +210,7 @@ final class InstallScriptLogTests: XCTestCase {
         XCTAssertEqual(entries(logs), ["whoreadd.log"])
     }
 
-    // daemonfs-1-variant: `install -d` chowned an existing data directory to root (adopting whatever
+    // macos-4 variant: `install -d` chowned an existing data directory to root (adopting whatever
     // its owner left in it) and chmod-ed, and copied the defaults into, whatever a link there pointed to.
     func testDataDirectoryOthersCouldChangeIsRefusedNotAdopted() throws {
         let data = dir.path("data")

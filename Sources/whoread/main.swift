@@ -113,7 +113,7 @@ func makeClient() throws -> IPCClient {
 }
 
 /// The service name the running daemon wrote to its data directory, unless someone other than root
-/// could have written it there: such a name could lead the CLI to another service (daemonfs-3).
+/// could have written it there: such a name could lead the CLI to another service (macos-4).
 func announcedServiceName() -> String? {
     do {
         return try TrustedFile.machServiceName(inDataDirectory: WhoReadPaths.dataDirectory)
@@ -958,7 +958,7 @@ func cmdCatalog(_ c: IPCClient) throws {
         if let path = args.value("output") ?? args.value("o") {
             // Like the history export: owner-only (it names the paths the user protects), never through
             // or over a link or another non-regular file, and given to the user who ran sudo in their
-            // own folder (daemonfs-2).
+            // own folder (privacy-4).
             let writer = try ExportWriter(path: path)
             do {
                 try writer.write(data)

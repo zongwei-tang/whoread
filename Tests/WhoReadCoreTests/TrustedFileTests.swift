@@ -8,8 +8,8 @@ import Darwin
 @testable import WhoReadCore
 
 /// Files the CLI, the app and a root daemon read from places only root should be able to change:
-/// the daemon's Mach service name (daemonfs-3) and the default catalog, agent and benign lists
-/// (daemonfs-4). The tests run as a user, who stands in for root as the trusted owner.
+/// the daemon's Mach service name and the default catalog, agent and benign lists (macos-4 variants).
+/// The tests run as a user, who stands in for root as the trusted owner.
 final class TrustedFileTests: XCTestCase {
     private var dir = ""
     private let me = geteuid()
@@ -60,7 +60,7 @@ final class TrustedFileTests: XCTestCase {
         #endif
     }
 
-    // MARK: - mach-service (daemonfs-3)
+    // MARK: - mach-service
 
     func testTrustedServiceNameIsRead() throws {
         let data = try dataDirectory()
@@ -74,7 +74,7 @@ final class TrustedFileTests: XCTestCase {
         XCTAssertNil(try TrustedFile.machServiceName(inDataDirectory: path("empty"), owner: me))
     }
 
-    // daemonfs-3: the CLI and the app took the name from any mach-service file, so whoever could
+    // macos-4 variant: the CLI and the app took the name from any mach-service file, so whoever could
     // write the data directory could point them at another service.
     func testDataDirectoryOthersCanWriteIsNotTrusted() throws {
         let data = try dataDirectory()
@@ -173,7 +173,7 @@ final class TrustedFileTests: XCTestCase {
     }
 }
 
-/// daemonfs-4: a root daemon took its catalog, agent and benign lists from any directory, even one
+/// macos-4 variant: a root daemon took its catalog, agent and benign lists from any directory, even one
 /// others could change: whoever could write it could drop sensitive categories or make every program
 /// a benign service.
 final class TrustedDefaultDataTests: XCTestCase {
@@ -284,7 +284,7 @@ final class TrustedDefaultDataTests: XCTestCase {
         }
     }
 
-    // daemonfs-4-variant: the other candidates (in a bundle's Resources, next to the executable,
+    // macos-4 variant: the other candidates (in a bundle's Resources, next to the executable,
     // WHOREAD_DATA_DIR) are checked too; one that fails is skipped, never read.
     func testUntrustedSearchCandidateIsSkipped() throws {
         let first = try copyOfDefaults("Resources")

@@ -206,7 +206,7 @@ final class StoreDirectoryTests: XCTestCase {
         }
     }
 
-    // daemonfs-5: the store ran mkdir -p for a missing directory (as root, through whatever links
+    // macos-4 variant: the store ran mkdir -p for a missing directory (as root, through whatever links
     // the path held) instead of leaving that to the checked data directory.
     func testMissingDirectoryIsNotCreated() throws {
         let missing = dir.appendingPathComponent("missing").path
@@ -235,7 +235,7 @@ final class StoreDirectoryTests: XCTestCase {
         XCTAssertFalse(exists(dir.appendingPathComponent("db.sqlite").path))
     }
 
-    // daemonfs-5-variant: an existing entry at the database path was opened by SQLite and chmod-ed
+    // macos-4 variant: an existing entry at the database path was opened by SQLite and chmod-ed
     // through a link, into whatever file it pointed to.
     func testDatabasePathThatIsALinkIsNotFollowed() throws {
         let target = dir.appendingPathComponent("target").path

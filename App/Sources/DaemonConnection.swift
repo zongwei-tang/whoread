@@ -55,7 +55,7 @@ final class DaemonConnection {
     /// The running daemon writes its service name; otherwise the app's Info.plist (system
     /// extension), otherwise the dev LaunchDaemon default. The written name counts only when root
     /// alone could have written it: a name someone else left there could lead the app to another
-    /// service (daemonfs-3).
+    /// service (macos-4).
     static func resolveServiceName() -> String {
         if let name = try? TrustedFile.machServiceName(inDataDirectory: WhoReadPaths.dataDirectory) {
             return name

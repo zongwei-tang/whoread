@@ -8,8 +8,8 @@ import Darwin
 import WhoReadCore
 @testable import WhoReadEngine
 
-// Regression tests for the default catalog, agent and benign lists a root daemon starts from
-// (daemonfs-4).
+// Regression tests for the default catalog, agent and benign lists a root daemon starts from (a
+// macos-4 variant).
 
 final class DefaultsTrustDaemonTests: XCTestCase {
     private func copyOfDefaults(_ dir: TempDir, _ name: String = "defaults") throws -> String {
@@ -35,7 +35,7 @@ final class DefaultsTrustDaemonTests: XCTestCase {
         XCTAssertEqual(DaemonConfiguration().defaultsOwner, geteuid() == 0 ? 0 : nil)
     }
 
-    // daemonfs-4: `--defaults DIR` was read as it was, so whoever could write DIR decided what a root
+    // macos-4 variant: `--defaults DIR` was read as it was, so whoever could write DIR decided what a root
     // daemon treats as sensitive, as an AI agent and as a benign service.
     func testDefaultsOthersCanChangeAreRefused() throws {
         let dir = TempDir()

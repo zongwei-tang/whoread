@@ -12,7 +12,7 @@ public struct DaemonConfiguration: Sendable {
     /// Directory with catalog.json / agents.json / benign.json defaults. nil = search.
     public var defaultsDirectory: String?
     /// When set, the defaults are read only where no one but this user and root can change them, nor
-    /// a directory above them (`DefaultData.locate`, daemonfs-4): root for a daemon running as root. A
+    /// a directory above them (`DefaultData.locate`, macos-4): root for a daemon running as root. A
     /// daemon (or `whoread replay`) running as a user reads them as they are.
     public var defaultsOwner: uid_t? = geteuid() == 0 ? 0 : nil
     public var source: SourceKind = .eslogger

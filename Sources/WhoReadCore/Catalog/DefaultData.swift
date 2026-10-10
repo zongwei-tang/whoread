@@ -52,7 +52,7 @@ public struct DefaultData: Sendable {
 
     /// The default data and the directory it came from: the first candidate holding catalog.json.
     ///
-    /// With `trustedOwner` (a daemon running as root, daemonfs-4), a candidate is used only when no one
+    /// With `trustedOwner` (a daemon running as root, macos-4), a candidate is used only when no one
     /// but that user and root could have changed its files, the directory or a directory on the way
     /// (`TrustedFile`): whoever could write them could drop sensitive categories, or make any program a
     /// benign service or hide an AI agent. An explicit directory that fails the check stops the start,

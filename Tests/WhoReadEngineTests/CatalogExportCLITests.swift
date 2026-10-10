@@ -9,7 +9,7 @@ import WhoReadCore
 import WhoReadIPC
 @testable import WhoReadEngine
 
-// Regression tests for `whoread catalog export --output` (daemonfs-2).
+// Regression tests for `whoread catalog export --output` (a privacy-4 variant).
 
 private func exists(_ path: String) -> Bool {
     var st = stat()
@@ -86,7 +86,7 @@ final class CatalogExportCLITests: XCTestCase {
         try body(dir, socket, stub)
     }
 
-    // daemonfs-2: the export was written 0644, readable by every user, whatever the user wanted.
+    // privacy-4 variant: the export was written 0644, readable by every user, whatever the user wanted.
     func testExportIsOwnerOnlyWhateverTheUmask() throws {
         try withStub { dir, socket, stub in
             let old = umask(0o022)
@@ -104,7 +104,7 @@ final class CatalogExportCLITests: XCTestCase {
         }
     }
 
-    // daemonfs-2: a link at the output path was replaced (SafeFile.replace renames over it) instead of
+    // privacy-4 variant: a link at the output path was replaced (SafeFile.replace renames over it) instead of
     // refused like the history export does.
     func testLinkOrDirectoryAtTheOutputPathIsRefused() throws {
         try withStub { dir, socket, _ in
