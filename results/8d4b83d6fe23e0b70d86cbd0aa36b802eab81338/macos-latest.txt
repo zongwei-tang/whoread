@@ -1,0 +1,410 @@
+# WhoRead CI report
+commit: 8d4b83d6fe23e0b70d86cbd0aa36b802eab81338
+runner: macOS 26.6.2 (25G83), arm64
+xcode: Xcode 26.6 Build version 17F113 
+swift: swift-driver version: 1.148.6 Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)
+
+## swift-build: PASS (61 s)
+
+## swift-test: FAIL (exit 1, 230 s)
+Test Suite 'All tests' started at 2026-10-10 22:13:53.839.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.070 (0.071) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.038 (0.040) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 1.232 (1.235) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.385 (0.387) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 3.101 (3.101) seconds
+	 Executed 15 tests, with 0 failures (0 unexpected) in 25.707 (25.711) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.062 (0.063) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.058 (0.058) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.006 (0.007) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.006 (0.007) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.133 (0.133) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.185 (0.186) seconds
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.507 (0.510) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.887 (0.890) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 8.918 (8.921) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.140 (0.141) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.658 (1.659) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.484 (0.486) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.193 (0.194) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.060 (0.061) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.402 (0.404) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.170 (0.171) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.007 (0.009) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.006 (0.008) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 21.840 (21.844) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.083 (0.084) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.624 (0.625) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.208 (0.209) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 28.743 (28.748) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.129 (0.131) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.115 (0.116) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.029 (0.029) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.336 (0.337) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.149 (0.150) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.374 (0.377) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.043 (0.043) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 15.215 (15.216) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 1.800 (1.803) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 4.411 (4.413) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.041 (0.042) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 2.761 (2.763) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.030 (0.032) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.009 (0.011) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 10.509 (10.511) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.457 (0.459) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.058 (0.059) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.046 (0.047) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 4.757 (4.758) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.355 (0.356) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.009 (0.010) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.036 (0.036) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.095 (0.095) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.042 (0.042) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.036 (0.037) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.002 (0.005) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.051 (0.051) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.038 (0.038) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.006 (0.006) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 5.218 (5.219) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.245 (0.246) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 5.712 (5.713) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.181 (0.181) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.139 (0.140) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.300 (0.301) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.009 (0.011) seconds
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/NativeFindingsEngineTests.swift:143: error: -[WhoReadEngineTests.NativeDeadlineMissModeTests testFunctionsAreFoundOnlyWhereTheSystemHasThem] : XCTAssertEqual failed: ("true") is not equal to ("false")
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/NativeFindingsEngineTests.swift:144: error: -[WhoReadEngineTests.NativeDeadlineMissModeTests testFunctionsAreFoundOnlyWhereTheSystemHasThem] : XCTAssertEqual failed: ("true") is not equal to ("false")
+Test Case '-[WhoReadEngineTests.NativeDeadlineMissModeTests testFunctionsAreFoundOnlyWhereTheSystemHasThem]' failed (0.354 seconds).
+	 Executed 7 tests, with 2 failures (0 unexpected) in 0.408 (0.409) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.682 (0.683) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.053 (0.053) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.076 (0.077) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.148 (0.148) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.026 (0.027) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.158 (0.159) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.006 (0.007) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.391 (0.392) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.252 (0.253) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 8.936 (8.938) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.447 (0.447) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.582 (0.584) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 2.912 (2.912) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.624 (0.625) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.143 (0.144) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.099 (0.099) seconds
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testDevUninstallKeepsTheReleaseCLILink] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testDevUninstallKeepsTheReleaseCLILink]' skipped (0.004 seconds).
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testDevUninstallPurgeRemovesNothingWhileTheExtensionIsActive] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testDevUninstallPurgeRemovesNothingWhileTheExtensionIsActive]' skipped (0.001 seconds).
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testUninstallProceedsWhenNoExtensionIsActive] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testUninstallProceedsWhenNoExtensionIsActive]' skipped (0.000 seconds).
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testUninstallStopsWhenAnExtensionIsActiveAndTheAppIsMissing] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testUninstallStopsWhenAnExtensionIsActiveAndTheAppIsMissing]' skipped (0.000 seconds).
+	 Executed 11 tests, with 4 tests skipped and 0 failures (0 unexpected) in 4.804 (4.807) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.093 (0.094) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.009 (0.010) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.077 (0.078) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.118 (0.119) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.047 (0.048) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.193 (0.194) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.741 (0.743) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 2.224 (2.225) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.153 (0.154) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 34.090 (34.092) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.034 (0.034) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.323 (0.325) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.248 (0.249) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 5.548 (5.549) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.805 (0.807) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 3.876 (3.877) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.118 (0.118) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.221 (0.221) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.152 (0.153) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.765 (0.767) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.198 (0.199) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.776 (0.777) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.217 (0.219) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.076 (0.077) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.103 (0.104) seconds
+	 Executed 662 tests, with 4 tests skipped and 2 failures (0 unexpected) in 222.133 (222.282) seconds
+Test Suite 'All tests' failed at 2026-10-10 22:17:36.123.
+	 Executed 662 tests, with 4 tests skipped and 2 failures (0 unexpected) in 222.133 (222.284) seconds
+--- last 40 lines
+Test Suite 'TrustOffRaceTests' started at 2026-10-10 22:17:35.938.
+Test Case '-[WhoReadEngineTests.TrustOffRaceTests testTrustOffFromTheConsoleUserKeepsAPrivilegedChangeMadeMeanwhile]' started.
+2026-10-10T22:17:35.970Z INFO settings changed (trustApplePrograms) by pid 1 uid 0
+2026-10-10T22:17:35.977Z INFO settings changed (projectRoots) by pid 1 uid 0
+2026-10-10T22:17:35.978Z INFO settings changed (trustApplePrograms) by pid 4242 uid 501
+2026-10-10T22:17:35.979Z INFO settings changed (trustApplePrograms) by pid 1 uid 0
+Test Case '-[WhoReadEngineTests.TrustOffRaceTests testTrustOffFromTheConsoleUserKeepsAPrivilegedChangeMadeMeanwhile]' passed (0.046 seconds).
+Test Suite 'TrustOffRaceTests' passed at 2026-10-10 22:17:35.984.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.046 (0.046) seconds
+Test Suite 'UncleanStopReviewTests' started at 2026-10-10 22:17:35.984.
+Test Case '-[WhoReadEngineTests.UncleanStopReviewTests testTheUncleanStopNoteNamesTheWatchdog]' started.
+2026-10-10T22:17:36.012Z ERROR the previous daemon stopped while enforcing (killed for a missed AUTH deadline, exited by its watchdog with the event handler stuck, a crash or a power loss); found at start 2026-10-10T22:17:35Z; enforcement stays off as set
+Test Case '-[WhoReadEngineTests.UncleanStopReviewTests testTheUncleanStopNoteNamesTheWatchdog]' passed (0.034 seconds).
+Test Suite 'UncleanStopReviewTests' passed at 2026-10-10 22:17:36.018.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.034 (0.034) seconds
+Test Suite 'UnknownAncestryTests' started at 2026-10-10 22:17:36.018.
+Test Case '-[WhoReadCoreTests.UnknownAncestryTests testABenignServiceWithUnknownAncestryIsNotBenign]' started.
+Test Case '-[WhoReadCoreTests.UnknownAncestryTests testABenignServiceWithUnknownAncestryIsNotBenign]' passed (0.024 seconds).
+Test Case '-[WhoReadCoreTests.UnknownAncestryTests testAnOwnerWithUnknownAncestryIsAskedNotAllowed]' started.
+Test Case '-[WhoReadCoreTests.UnknownAncestryTests testAnOwnerWithUnknownAncestryIsAskedNotAllowed]' passed (0.026 seconds).
+Test Case '-[WhoReadCoreTests.UnknownAncestryTests testATracedProcessKeepsItsForkTimeParent]' started.
+Test Case '-[WhoReadCoreTests.UnknownAncestryTests testATracedProcessKeepsItsForkTimeParent]' passed (0.029 seconds).
+Test Case '-[WhoReadCoreTests.UnknownAncestryTests testReparentedProcessWhoseParentWasNotSeenIsNotStartedByLaunchd]' started.
+Test Case '-[WhoReadCoreTests.UnknownAncestryTests testReparentedProcessWhoseParentWasNotSeenIsNotStartedByLaunchd]' passed (0.024 seconds).
+Test Suite 'UnknownAncestryTests' passed at 2026-10-10 22:17:36.122.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.103 (0.104) seconds
+Test Suite 'WhoReadPackageTests.xctest' failed at 2026-10-10 22:17:36.122.
+	 Executed 662 tests, with 4 tests skipped and 2 failures (0 unexpected) in 222.133 (222.282) seconds
+Test Suite 'All tests' failed at 2026-10-10 22:17:36.123.
+	 Executed 662 tests, with 4 tests skipped and 2 failures (0 unexpected) in 222.133 (222.284) seconds
+built a 20000-deep fork chain in 3.244 s
+kill-switch file took effect in 0.247 s
+fake eslogger → queryable records in 0.141 s
+readdir toggle → new eslogger in 0.125 s
+decided on a 20000-deep chain in 1.11 ms
+pruned a 4000-deep exited chain in 0.016 s
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+
+## e2e-dev-socket: PASS (11 s)
+== status
+== events --agents-only
+== alerts
+== apps
+== files
+== agents
+== export csv (first 3 lines)
+== rules
+== enforcement on (replay/eslogger cannot enforce)
+== kill switch
+== settings set language (zh means zh-Hans; an unknown value is refused, not 'system')
+== status: no learning period, enforcement never switched off automatically
+== asks (ask mode; eslogger cannot hold an access, so nothing is waiting)
+== settings set trust-apple on|off (round trip)
+== catalog add-path refuses a home or a folder above one (or the whole disk), however spelled
+== export pages past undecodable rows
+== no daemon vs. a refusal the daemon answered
+== daemon log
+
+## brew-tools: PASS (6 s)
+
+## xcodegen: PASS (0 s)
+Created project at /Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj
+
+## xcode-build: FAIL (exit 65, 61 s)
+** BUILD SUCCEEDED **
+error: error opening input file '/Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/WhoRead.build/DerivedSources/GeneratedAssetSymbols.swift' (No such file or directory)
+** BUILD FAILED **
+--- last 40 lines
+{ platform:iOS Simulator, arch:x86_64, id:BA9128D4-18C1-4D81-8EB6-C9DEA307B16B, OS:26.2, name:iPhone 17 Pro Max }
+{ platform:iOS Simulator, arch:arm64, id:E3357B30-270D-49D5-87E0-79A796ACE8A3, OS:26.4.1, name:iPhone 17 Pro Max }
+{ platform:iOS Simulator, arch:x86_64, id:E3357B30-270D-49D5-87E0-79A796ACE8A3, OS:26.4.1, name:iPhone 17 Pro Max }
+{ platform:iOS Simulator, arch:arm64, id:841190F6-F927-4F0D-B152-62A06B4040CA, OS:26.5, name:iPhone 17 Pro Max }
+{ platform:iOS Simulator, arch:x86_64, id:841190F6-F927-4F0D-B152-62A06B4040CA, OS:26.5, name:iPhone 17 Pro Max }
+{ platform:iOS Simulator, arch:arm64, id:B8094BA5-47C4-4A9C-B87E-C73669585F82, OS:26.4.1, name:iPhone 17e }
+{ platform:iOS Simulator, arch:x86_64, id:B8094BA5-47C4-4A9C-B87E-C73669585F82, OS:26.4.1, name:iPhone 17e }
+{ platform:iOS Simulator, arch:arm64, id:DF686390-8E1F-46B8-A4D9-883644620714, OS:26.5, name:iPhone 17e }
+{ platform:iOS Simulator, arch:x86_64, id:DF686390-8E1F-46B8-A4D9-883644620714, OS:26.5, name:iPhone 17e }
+{ platform:iOS Simulator, arch:arm64, id:A1194899-F789-4C4B-A9E2-EFDC6C72EB35, OS:26.2, name:iPhone Air }
+{ platform:iOS Simulator, arch:x86_64, id:A1194899-F789-4C4B-A9E2-EFDC6C72EB35, OS:26.2, name:iPhone Air }
+{ platform:iOS Simulator, arch:arm64, id:3679014C-ECDC-4161-96E5-69B96F640760, OS:26.4.1, name:iPhone Air }
+{ platform:iOS Simulator, arch:x86_64, id:3679014C-ECDC-4161-96E5-69B96F640760, OS:26.4.1, name:iPhone Air }
+{ platform:iOS Simulator, arch:arm64, id:CB15797E-6053-40B1-BB72-7F30D005A4F2, OS:26.5, name:iPhone Air }
+{ platform:iOS Simulator, arch:x86_64, id:CB15797E-6053-40B1-BB72-7F30D005A4F2, OS:26.5, name:iPhone Air }
+
+** BUILD SUCCEEDED **
+
+--- xcodebuild: WARNING: Using the first of multiple matching destinations:
+{ platform:macOS, arch:arm64, id:9f7cc8f4cb5d1110a2b986aad3ce629abb0ea5ff, name:My Mac }
+{ platform:macOS, arch:x86_64, id:9f7cc8f4cb5d1110a2b986aad3ce629abb0ea5ff, name:My Mac }
+{ platform:macOS, name:Any Mac }
+note: Disabling hardened runtime with ad-hoc codesigning. (in target 'whoreadd' from project 'WhoRead' at path '/Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj')
+** BUILD SUCCEEDED **
+
+--- xcodebuild: WARNING: Using the first of multiple matching destinations:
+{ platform:macOS, arch:arm64, id:9f7cc8f4cb5d1110a2b986aad3ce629abb0ea5ff, name:My Mac }
+{ platform:macOS, arch:x86_64, id:9f7cc8f4cb5d1110a2b986aad3ce629abb0ea5ff, name:My Mac }
+{ platform:macOS, name:Any Mac }
+error: error opening input file '/Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/WhoRead.build/DerivedSources/GeneratedAssetSymbols.swift' (No such file or directory)
+** BUILD FAILED **
+
+
+The following build commands failed:
+	SwiftDriver whoread normal arm64 com.apple.xcode.tools.swift.compiler (in target 'whoread' from project 'WhoRead' at path '/Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj')
+	Building project WhoRead with scheme WhoRead and configuration Debug
+(2 failures)
+
+note: Disabling hardened runtime with ad-hoc codesigning. (in target 'whoread' from project 'WhoRead' at path '/Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj')
+note: Disabling hardened runtime with ad-hoc codesigning. (in target 'WhoReadExtension' from project 'WhoRead' at path '/Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj')
+
+## shellcheck: FAIL (exit 1, 4 s)
+^--------^ SC2164 (warning): Use 'cd ... || exit' or 'cd ... || return' in case cd fails.
+                         ^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+        ^---------------------^ SC2206 (warning): Quote to prevent word splitting/globbing, or split robustly with mapfile or read -a.
+  https://www.shellcheck.net/wiki/SC2164 -- Use 'cd ... || exit' or 'cd ... |...
+  https://www.shellcheck.net/wiki/SC2206 -- Quote to prevent word splitting/g...
+  https://www.shellcheck.net/wiki/SC2209 -- Use var=$(command) to assign outp...
+--- last 40 lines
+
+In scripts/ci/run-ci.sh line 14:
+cd "$ROOT"
+^--------^ SC2164 (warning): Use 'cd ... || exit' or 'cd ... || return' in case cd fails.
+
+Did you mean:
+cd "$ROOT" || exit
+
+
+In scripts/vm/runner/uninstall.sh line 8:
+[ "$VM_USER" = root ] && VM_USER=admin
+                         ^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+
+
+In scripts/vm/runner/install.sh line 28:
+[ "$VM_USER" = root ] && VM_USER=admin
+                         ^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+
+
+In scripts/vm/runner/runner.sh line 39:
+VM_USER=admin
+^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+
+
+In scripts/dev/sc-build.sh line 36:
+        ${WHOREAD_SWIFTFLAGS:-})
+        ^---------------------^ SC2206 (warning): Quote to prevent word splitting/globbing, or split robustly with mapfile or read -a.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC2164 -- Use 'cd ... || exit' or 'cd ... |...
+  https://www.shellcheck.net/wiki/SC2206 -- Quote to prevent word splitting/g...
+  https://www.shellcheck.net/wiki/SC2209 -- Use var=$(command) to assign outp...
+
+## bash-syntax: PASS (0 s)
+
+## es-stub: PASS (1 s)
+skipped: the stub mirrors the macOS 27 SDK, this SDK is 26.5
+
+## vm-harness-selftest: PASS (120 s)
+69 passed, 0 failed (files: /private/var/folders/36/tjdph2t965j8snz9_vkdnw0r0000gn/T/whoread-vm-selftest.vIQrXn)
+
+## app-bundle: PASS (29 s)
+/Users/runner/work/whoread/whoread/scripts/dev/xcconfig.sh: line 172: printf: write error: Broken pipe
+== 0 failure(s)
+
+## eslogger-events: PASS (0 s)
+access
+authentication
+authorization_judgement
+authorization_petition
+btm_launch_item_add
+btm_launch_item_remove
+chdir
+chroot
+clone
+close
+copyfile
+create
+cs_invalidated
+deleteextattr
+dup
+exchangedata
+exec
+exit
+fcntl
+file_provider_materialize
+file_provider_update
+fork
+fsgetpath
+gatekeeper_user_override
+get_task
+get_task_inspect
+get_task_name
+get_task_read
+getattrlist
+getextattr
+iokit_open
+kextload
+kextunload
+link
+listextattr
+login_login
+login_logout
+lookup
+lw_session_lock
+lw_session_login
+lw_session_logout
+lw_session_unlock
+mmap
+mount
+mprotect
+od_attribute_set
+od_attribute_value_add
+od_attribute_value_remove
+od_create_group
+od_create_user
+od_delete_group
+od_delete_user
+od_disable_user
+od_enable_user
+od_group_add
+od_group_remove
+od_group_set
+od_modify_password
+open
+openssh_login
+openssh_logout
+proc_check
+proc_suspend_resume
+profile_add
+profile_remove
+pty_close
+pty_grant
+readdir
+readlink
+remote_thread_create
+remount
+rename
+screensharing_attach
+screensharing_detach
+searchfs
+setacl
+setattrlist
+setegid
+seteuid
+setextattr
+setflags
+setgid
+setmode
+setowner
+setregid
+setreuid
+settime
+setuid
+signal
+stat
+su
+sudo
+tcc_modify
+trace
+truncate
+uipc_bind
+uipc_connect
+unlink
+unmount
+utimes
+write
+xp_malware_detected
+xp_malware_remediated
+xpc_connect
+
+OVERALL: FAIL
