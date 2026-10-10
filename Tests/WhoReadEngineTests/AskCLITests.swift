@@ -143,11 +143,20 @@ final class AskCLITests: XCTestCase {
         for cell in ["Preview", "read+write", "~/.ssh/config", "0/1"] { XCTAssertTrue(preview.contains(cell), "\(cell) in \(preview)") }
         XCTAssertTrue(preview.hasSuffix("yes"), preview)
         XCTAssertTrue(en.stdout.contains("whoread ask ID allow-once|allow|deny|block|trust-apple"), "how to answer")
+        // task-2: an answer is per app, not per program; each question says what allowing covers.
+        let previewCover = try XCTUnwrap(line(en.stdout, starting: "#8 "), en.stdout)
+        XCTAssertEqual(previewCover, "#8 allow-once / allow cover: Preview (any program run in it) reading and modifying SSH keys, "
+                                     + "only when the chain has no AI agent")
+        let claudeCover = try XCTUnwrap(line(en.stdout, starting: "#7 "), en.stdout)
+        XCTAssertTrue(claudeCover.hasPrefix("#7 allow-once / allow cover: Claude Code (any program it runs) reading SSH keys, "
+                                            + "only when the chain has no AI agent other than "), claudeCover)
 
         let zh = try whoread(["asks"], socket: socket, lang: "zh-Hans")
         XCTAssertEqual(zh.status, 0, zh.stderr)
         XCTAssertTrue(zh.stdout.contains("等待/次数") && zh.stdout.contains("SSH 密钥"), zh.stdout)
         XCTAssertTrue(try XCTUnwrap(line(zh.stdout, starting: "8 ")).hasSuffix("是"))
+        XCTAssertEqual(try XCTUnwrap(line(zh.stdout, starting: "#8 ")),
+                       "#8 允许（allow-once、allow）适用于：Preview（及在其中运行的任何程序）读写 SSH 密钥，仅限调用链中没有 AI agent 时")
 
         let json = try whoread(["asks", "--json"], socket: socket)
         XCTAssertEqual(json.status, 0, json.stderr)

@@ -77,9 +77,9 @@ final class AskUIModelTests: XCTestCase {
         let m = AppModel(language: language)
         var s = Snapshot()
         s.status = status
-        s.asks = asks
         s.settings = settings
         m.apply(s)
+        m.apply(asks: .asks(asks))
         return m
     }
 
@@ -101,18 +101,21 @@ final class AskUIModelTests: XCTestCase {
 
     // MARK: - Fetching and polling
 
-    func testEveryPollFetchesQuestions() throws {
+    func testQuestionsAreReadOnTheirOwn() throws {
         // The daemon answers `.asks` (an empty list until questions open).
-        XCTAssertNil(SnapshotFetcher.fetch(client, liveAfter: nil, includeBenign: false, full: false).error)
+        XCTAssertEqual(SnapshotFetcher.fetchAsks(client), .asks([]))
 
+        // The status and history poll does not read them: they have their own connection, so a slow
+        // or refused history read never delays or hides them.
         let open = [try ask(1), try ask(2, app: "security", category: "keychain", apple: true)]
         let asking = AskingClient(client, asks: open)
         let m = AppModel(language: .en)
         m.apply(SnapshotFetcher.fetch(asking, liveAfter: nil, includeBenign: false, full: true, hello: true))
-        XCTAssertEqual(asking.asksCalls, 1)
+        XCTAssertEqual(asking.asksCalls, 0)
+        XCTAssertEqual(m.asks, [])
+        m.apply(asks: SnapshotFetcher.fetchAsks(asking))
+        XCTAssertEqual(asking.asksCalls, 1, "polling them also tells the daemon an answering app is present")
         XCTAssertEqual(m.asks, open)
-        m.apply(SnapshotFetcher.fetch(asking, liveAfter: m.liveCursor, includeBenign: false, full: false))
-        XCTAssertEqual(asking.asksCalls, 2, "fast polls too: polling tells the daemon an answering app is present")
         XCTAssertEqual(m.pollInterval, 0.25)
         XCTAssertEqual(m.menuBar.openAsks, 2)
 
@@ -120,20 +123,21 @@ final class AskUIModelTests: XCTestCase {
         m.apply(response: .asks([open[1]]))
         XCTAssertEqual(m.asks.map(\.id), [2])
         asking.asks = []
-        m.apply(SnapshotFetcher.fetch(asking, liveAfter: m.liveCursor, includeBenign: false, full: false))
+        m.apply(asks: SnapshotFetcher.fetchAsks(asking))
         XCTAssertEqual(m.asks, [])
         XCTAssertEqual(m.pollInterval, 1)
 
         // A daemon that cannot be reached cannot take answers: nothing is listed.
         asking.asks = open
-        m.apply(SnapshotFetcher.fetch(asking, liveAfter: m.liveCursor, includeBenign: false, full: false))
+        m.apply(asks: SnapshotFetcher.fetchAsks(asking))
         XCTAssertEqual(m.asks.count, 2)
-        var down = Snapshot()
-        down.error = IPCError(.unavailable, "gone")
-        m.apply(down)
+        m.apply(asks: SnapshotFetcher.fetchAsks(FailingClient()))
         XCTAssertEqual(m.asks, [])
+        XCTAssertEqual(m.asksError?.code, .unavailable)
         XCTAssertEqual(m.pollInterval, 1)
-        XCTAssertNil(m.menuBar.badge)
+        // The status poll still answers here: the badge goes back to the unread alerts.
+        XCTAssertEqual(m.menuBar.openAsks, 0)
+        XCTAssertNotEqual(m.menuBar.labelSymbol, "questionmark.circle.fill")
     }
 
     func testPollCadence() {
@@ -153,33 +157,24 @@ final class AskUIModelTests: XCTestCase {
         XCTAssertTrue(schedule.isFullDue(now: t + 13))
     }
 
-    func testTicksBetweenFastPollsFetchOnlyQuestions() throws {
+    func testStatusAndHistoryLoopIsFastOrFull() throws {
+        // The questions have their own loop (`pollInterval`); this one runs once a second.
         var schedule = PollSchedule()
         let t = AskUIModelTests.base
-        XCTAssertEqual(schedule.kind(now: t, openAsks: 2), .full)
+        XCTAssertEqual(schedule.kind(now: t), .full)
         schedule.fullStarted(at: t)
-        // 250 ms ticks: questions only, status / alerts / live tail once a second.
-        XCTAssertEqual(schedule.kind(now: t + 0.25, openAsks: 2), .asks)
-        XCTAssertEqual(schedule.kind(now: t + 0.5, openAsks: 2), .asks)
-        XCTAssertEqual(schedule.kind(now: t + 0.75, openAsks: 2), .asks)
-        XCTAssertEqual(schedule.kind(now: t + 0.999, openAsks: 2), .fast, "a timer firing a little early still polls")
+        XCTAssertEqual(schedule.kind(now: t + 1), .fast)
         schedule.fastStarted(at: t + 1)
-        XCTAssertEqual(schedule.kind(now: t + 1.25, openAsks: 2), .asks)
-        XCTAssertEqual(schedule.kind(now: t + 2.1, openAsks: 2), .fast)
-        // No question open: every tick (once a second) is a fast poll, even one right after a change.
-        XCTAssertEqual(schedule.kind(now: t + 1.25, openAsks: 0), .fast)
+        XCTAssertEqual(schedule.kind(now: t + 2), .fast)
         // Full polls keep their 10 s, and come first until settings are known.
-        XCTAssertEqual(schedule.kind(now: t + 10, openAsks: 2), .full)
-        XCTAssertEqual(schedule.kind(now: t + 1.25, openAsks: 2, needsFull: true), .full)
+        XCTAssertEqual(schedule.kind(now: t + 10), .full)
+        XCTAssertEqual(schedule.kind(now: t + 2, needsFull: true), .full)
 
-        // The questions alone, from the daemon (empty list) and from a daemon with questions open.
-        XCTAssertEqual(SnapshotFetcher.fetchAsks(client), [])
         let open = [try ask(1)]
         let asking = AskingClient(client, asks: open)
-        XCTAssertEqual(SnapshotFetcher.fetchAsks(asking), open)
-        XCTAssertEqual(asking.asksCalls, 1, "polling them also tells the daemon an answering app is present")
-        // Unreachable: nil, left to the next fast poll to report.
-        XCTAssertNil(SnapshotFetcher.fetchAsks(FailingClient()))
+        XCTAssertEqual(SnapshotFetcher.fetchAsks(asking), .asks(open))
+        // Unreachable: the reason, so the questions' loop can say why none are listed.
+        XCTAssertEqual(SnapshotFetcher.fetchAsks(FailingClient()), .failed(IPCError(.unavailable, "gone")))
         let m = AppModel(language: .en)
         m.apply(response: .asks(open))
         XCTAssertEqual(m.asks, open)
@@ -199,16 +194,19 @@ final class AskUIModelTests: XCTestCase {
         XCTAssertEqual(first.post.map(\.identifier), ["ask-1", "ask-2"], "oldest first")
         XCTAssertEqual(first.remove, [])
         XCTAssertEqual(first.post.map(\.askID), [1, 2])
-        XCTAssertEqual(first.post[0].categoryIdentifier, NotificationPlanner.categoryAsk)
+        // One category per kind of app, AI agent or program (its buttons say what an answer covers).
+        XCTAssertEqual(first.post[0].categoryIdentifier, NotificationPlanner.askCategory(apple: false, responsible: .agent))
         XCTAssertEqual(first.post[0].actions, [.allowOnce, .alwaysAllow, .keepBlocking, .blockFromNowOn])
-        XCTAssertEqual(first.post[1].categoryIdentifier, NotificationPlanner.categoryAskApple)
+        XCTAssertEqual(first.post[1].categoryIdentifier, NotificationPlanner.askCategory(apple: true, responsible: .binary))
         XCTAssertEqual(first.post[1].actions, [.allowOnce, .alwaysAllow, .keepBlocking, .blockFromNowOn, .trustApplePrograms])
         XCTAssertEqual(first.post[0].title, "Allow this access?")
         XCTAssertEqual(first.post[0].body, // guard-4: the agent line comes first
                        "AI agent in the chain: claude-code\n"
                        + "Claude Code wants to read ~/.ssh/id_ed25519: not allowed until you decide (×3)\n"
+                       + "Allow once (10 min) and Always allow cover: Claude Code (any program it runs) reading ssh, "
+                       + "only when the chain has no AI agent other than claude-code.\n"
                        + "Chain: launchd → claude → cat")
-        XCTAssertEqual(first.post[1].body.components(separatedBy: "\n").count, 2, "no agent line without an agent")
+        XCTAssertEqual(first.post[1].body.components(separatedBy: "\n").count, 3, "no agent line without an agent")
 
         // Still open (more attempts, a new hold): no new banner.
         var again = agent
@@ -233,7 +231,9 @@ final class AskUIModelTests: XCTestCase {
         let zh = NotificationPlanner().plan(asks: [agent], formatter: model(status(), language: .zhHans).formatter)
         XCTAssertEqual(zh.post.first?.title, "允许这次访问吗？")
         XCTAssertEqual(zh.post.first?.body,
-                       "调用链中有 AI agent：claude-code\nClaude Code 想要读取 ~/.ssh/id_ed25519，你决定之前不会放行（3 次）\n调用链：launchd → claude → cat")
+                       "调用链中有 AI agent：claude-code\nClaude Code 想要读取 ~/.ssh/id_ed25519，你决定之前不会放行（3 次）\n"
+                       + "「允许一次（10 分钟）」和「始终允许」适用于：Claude Code（及它运行的任何程序）读取 ssh，"
+                       + "仅限调用链中除 claude-code 外没有其他 AI agent 时。\n调用链：launchd → claude → cat")
 
         // The headline may name only the app (Terminal) the agent runs in: the agent is named too,
         // as the app knows it (an answer covers the app only as driven by that agent).
@@ -430,15 +430,21 @@ final class AskUIModelTests: XCTestCase {
         XCTAssertEqual(m.actionTitle(.keepBlocking, for: .blocked), "Keep blocking")
         XCTAssertEqual(m.actionTitle(.blockFromNowOn, for: .firstAccess), "Block from now on")
 
-        // An unsigned build (not root) cannot allow: say how to do it instead.
+        // An app the daemon does not recognise as the signed one (not root) cannot allow: say how to do
+        // it instead. Not "this build is not signed": the genuine app on a misjudged connection gets it too.
         let refused = IPCError(.notPermitted, "allowing needs root or the signed app")
         XCTAssertEqual(L10n.answerError(refused, askID: 7, action: .allowOnce, .en),
-                       "Not allowed: only the signed WhoRead app or an administrator can allow (this build is not signed). In Terminal: sudo whoread ask 7 allow-once")
+                       "Not allowed: the WhoRead monitor does not recognise this app as the signed WhoRead app, and only that app "
+                       + "or an administrator can allow. The question is still open. In Terminal: sudo whoread ask 7 allow-once")
         XCTAssertTrue(L10n.answerError(refused, askID: 7, action: .trustApplePrograms, .zhHans).hasSuffix("sudo whoread ask 7 trust-apple"))
         XCTAssertTrue(L10n.answerError(refused, askID: 7, action: .alwaysAllow, .en).hasSuffix("sudo whoread ask 7 allow"))
-        XCTAssertEqual(L10n.answerError(refused, askID: 7, action: .keepBlocking, .en), L10n.t(.errNotPermitted, .en))
+        // Denying is open to the console user: refused to another user (and that is what it says), or for a
+        // reason of its own, which the daemon's message gives.
+        let otherUser = IPCError(.notPermitted, "only root or the console user may talk to the WhoRead daemon")
+        XCTAssertEqual(L10n.answerError(otherUser, askID: 7, action: .keepBlocking, .en), L10n.t(.errNotConsoleUser, .en))
+        XCTAssertEqual(L10n.answerError(refused, askID: 7, action: .keepBlocking, .en), "The daemon refused: allowing needs root or the signed app")
         XCTAssertEqual(L10n.answerError(IPCError(.notFound, "no question #7"), askID: 7, action: .keepBlocking, .zhHans),
-                       "这个问题已经关闭（已在别处回答或已过期）。")
+                       "这个问题已经关闭：已在别处回答、已过期，或 WhoRead 监控程序已重启。如果程序再次尝试访问，会再次询问你。")
         XCTAssertEqual(L10n.answerError(IPCError(.invalid, "bad"), askID: 7, action: .alwaysAllow, .en), "The daemon refused: bad")
         XCTAssertEqual(AskAnswers.denyActions.map(AskAnswers.cliVerb), ["deny", "block"])
     }

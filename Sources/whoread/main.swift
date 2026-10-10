@@ -431,6 +431,13 @@ func cmdAsks(_ c: IPCClient) throws {
     }
     out(Format.table(rows, header: zh ? ["编号", "应用", "程序", "类别", "访问", "路径", "AI agent", "等待/次数", "苹果程序"]
                                       : ["ID", "APP", "PROGRAM", "CATEGORY", "ACCESS", "PATH", "AGENT", "WAITING/ATTEMPTS", "APPLE"]))
+    // An answer is per app, not per program (docs/ASK_MODE.md): what allowing each question covers.
+    out("")
+    for r in asks {
+        let coverage = ctx.formatter.allowCoverage(r.responsible, categoryID: r.key.categoryID, access: r.key.access,
+                                                   chainAgents: r.key.chainAgents, agentName: { ctx.agentName($0, agents) })
+        out(zh ? "#\(r.id) 允许（allow-once、allow）适用于：\(coverage)" : "#\(r.id) allow-once / allow cover: \(coverage)")
+    }
     out(zh ? "\n回答：whoread ask 编号 allow-once|allow|deny|block|trust-apple（允许需要 sudo）"
            : "\nanswer: whoread ask ID allow-once|allow|deny|block|trust-apple (allowing needs sudo)")
 }

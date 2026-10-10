@@ -21,10 +21,18 @@ struct MainWindow: View {
         }
         .padding(8)
         .safeAreaInset(edge: .top) {
-            if let problem = model.versionProblem {
-                Text(L10n.f(.errVersionMismatchFormat, problem))
-                    .font(.callout).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12)
+            VStack(alignment: .leading, spacing: 4) {
+                if let problem = model.versionProblem {
+                    Text(L10n.f(.errVersionMismatchFormat, problem)).foregroundStyle(.red)
+                } else if let problem = model.connectionProblemText {
+                    Text(problem).foregroundStyle(.red)
+                }
+                // Not recognised as the signed app: a limited view, not an error.
+                if let limited = model.limitedViewText {
+                    Text(limited).foregroundStyle(.orange).textSelection(.enabled)
+                }
             }
+            .font(.callout).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12)
         }
         .sheet(isPresented: $nav.showOnboarding) { OnboardingView() }
         .onAppear {
@@ -51,8 +59,14 @@ struct LiveView: View {
                 Spacer()
                 Button(model.feedPaused ? L10n.t(.resumeFeed) : L10n.t(.pauseFeed)) { model.feedPaused.toggle() }
             }
+            UnavailableNote(part: .live)
             if model.liveRows.isEmpty {
-                ContentUnavailableView(L10n.t(.liveEmpty), systemImage: "checkmark.shield")
+                // Refused or not read: the note says so, not "no access yet".
+                if model.unavailableNote(.live) == nil {
+                    ContentUnavailableView(L10n.t(.liveEmpty), systemImage: "checkmark.shield")
+                } else {
+                    Spacer()
+                }
             } else {
                 Table(model.liveRows, selection: $selection) {
                     TableColumn(L10n.t(.colTime)) { e in Text(e.time.formatted(date: .omitted, time: .standard)).monospacedDigit() }
@@ -134,8 +148,17 @@ struct AlertsView: View {
                 Button(L10n.t(.markAllRead)) { connection.markAllRead() }.disabled(model.unreadCount == 0)
             }
             if let err = connection.lastActionError { Text(err).foregroundStyle(.red).font(.caption).textSelection(.enabled) }
+            if model.asks.isEmpty, let problem = model.asksProblemText {
+                Text(problem).foregroundStyle(.red).font(.callout)
+            }
+            UnavailableNote(part: .alerts)
             if model.visibleAlerts.isEmpty && model.asks.isEmpty {
-                ContentUnavailableView(L10n.t(.alertsEmpty), systemImage: "bell.slash")
+                // Refused or not read: the note says so, not "no alerts".
+                if model.unavailableNote(.alerts) == nil {
+                    ContentUnavailableView(L10n.t(.alertsEmpty), systemImage: "bell.slash")
+                } else {
+                    Spacer()
+                }
             } else {
                 List {
                     // Ask mode: questions waiting for an answer come first.
@@ -172,18 +195,21 @@ struct AlertRow: View {
             if let identity = model.identityLine(alert) {
                 Text(identity).font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
             }
+            // What "always allow" covers: the app (every program run in it), not only that program.
+            if let coverage = alert.allowCoverageLine(f, agentName: model.agentName) {
+                Text(coverage).font(.caption)
+            }
             Text(f.chainLine(alert.chain)).font(.caption).foregroundStyle(.secondary)
             if alert.paths.count > 1 {
                 Text(L10n.t(.pathsSeen) + ": " + alert.paths.map(model.abbreviate).joined(separator: ", "))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             if alert.status != .resolved {
-                HStack {
-                    // An `ask` alert answers its question (same wording as the question).
-                    ForEach(alert.availableActions, id: \.self) { action in
-                        Button(model.actionTitle(action, for: alert.kind)) { connection.act(on: alert.id, action) }
-                            .help(action == .blockFromNowOn ? (model.enforcementCaveat ?? "") : "")
-                    }
+                // An `ask` alert answers its question (same wording as the question); "always allow"
+                // and "block from now on" name what they cover.
+                AnswerButtons(actions: alert.availableActions, title: { model.answerTitle($0, for: alert) },
+                              help: { $0 == .blockFromNowOn ? (model.enforcementCaveat ?? "") : "" }) {
+                    connection.act(on: alert.id, $0)
                 }
             } else if let r = alert.resolution {
                 Text("✓ " + model.actionTitle(r, for: alert.kind)).font(.caption).foregroundStyle(.secondary)
@@ -200,16 +226,23 @@ struct AlertRow: View {
 struct AppsView: View {
     @Environment(AppModel.self) private var model
     var body: some View {
-        if model.appRows.isEmpty {
-            ContentUnavailableView(L10n.t(.appsEmpty), systemImage: "app.dashed")
-        } else {
-            Table(model.appRows) {
-                TableColumn(L10n.t(.colApp)) { r in Text(r.name) }
-                TableColumn(L10n.t(.colKind)) { r in Text(L10n.kind(r.kind)) }.width(min: 70, ideal: 80)
-                TableColumn(L10n.t(.colCategories)) { r in Text(r.categories.joined(separator: ", ")).lineLimit(2) }
-                TableColumn(L10n.t(.colFirstSeen)) { r in Text(r.firstSeen.shortTime) }
-                TableColumn(L10n.t(.colLastSeen)) { r in Text(r.lastSeen.shortTime) }
-                TableColumn(L10n.t(.colCount)) { r in Text("\(r.count)").monospacedDigit() }.width(min: 50, ideal: 60)
+        VStack(alignment: .leading) {
+            UnavailableNote(part: .summaries)
+            if model.appRows.isEmpty {
+                if model.unavailableNote(.summaries) == nil {
+                    ContentUnavailableView(L10n.t(.appsEmpty), systemImage: "app.dashed")
+                } else {
+                    Spacer()
+                }
+            } else {
+                Table(model.appRows) {
+                    TableColumn(L10n.t(.colApp)) { r in Text(r.name) }
+                    TableColumn(L10n.t(.colKind)) { r in Text(L10n.kind(r.kind)) }.width(min: 70, ideal: 80)
+                    TableColumn(L10n.t(.colCategories)) { r in Text(r.categories.joined(separator: ", ")).lineLimit(2) }
+                    TableColumn(L10n.t(.colFirstSeen)) { r in Text(r.firstSeen.shortTime) }
+                    TableColumn(L10n.t(.colLastSeen)) { r in Text(r.lastSeen.shortTime) }
+                    TableColumn(L10n.t(.colCount)) { r in Text("\(r.count)").monospacedDigit() }.width(min: 50, ideal: 60)
+                }
             }
         }
     }
@@ -218,15 +251,19 @@ struct AppsView: View {
 struct FilesView: View {
     @Environment(AppModel.self) private var model
     var body: some View {
-        Table(model.fileRows) {
-            TableColumn(L10n.t(.colCategory)) { r in Text(r.name) }
-            TableColumn(L10n.t(.colSeverity)) { r in SeverityBadge(severity: r.severity) }.width(min: 70, ideal: 80)
-            TableColumn(L10n.t(.colStatus)) { r in
-                Text(r.detected ? L10n.t(.detected) : L10n.t(.notDetected)).foregroundStyle(r.detected ? .primary : .secondary)
-            }.width(min: 80, ideal: 90)
-            TableColumn(L10n.t(.colApps)) { r in Text(r.apps.joined(separator: ", ")).lineLimit(2) }
-            TableColumn(L10n.t(.colLastSeen)) { r in Text(r.lastSeen?.shortTime ?? "—") }
-            TableColumn(L10n.t(.colCount)) { r in Text("\(r.count)").monospacedDigit() }.width(min: 50, ideal: 60)
+        VStack(alignment: .leading) {
+            UnavailableNote(part: .summaries)
+            UnavailableNote(part: .catalog)
+            Table(model.fileRows) {
+                TableColumn(L10n.t(.colCategory)) { r in Text(r.name) }
+                TableColumn(L10n.t(.colSeverity)) { r in SeverityBadge(severity: r.severity) }.width(min: 70, ideal: 80)
+                TableColumn(L10n.t(.colStatus)) { r in
+                    Text(r.detected ? L10n.t(.detected) : L10n.t(.notDetected)).foregroundStyle(r.detected ? .primary : .secondary)
+                }.width(min: 80, ideal: 90)
+                TableColumn(L10n.t(.colApps)) { r in Text(r.apps.joined(separator: ", ")).lineLimit(2) }
+                TableColumn(L10n.t(.colLastSeen)) { r in Text(r.lastSeen?.shortTime ?? "—") }
+                TableColumn(L10n.t(.colCount)) { r in Text("\(r.count)").monospacedDigit() }.width(min: 50, ideal: 60)
+            }
         }
     }
 }
@@ -234,16 +271,23 @@ struct FilesView: View {
 struct AgentsView: View {
     @Environment(AppModel.self) private var model
     var body: some View {
-        if model.agentRows.isEmpty {
-            ContentUnavailableView(L10n.t(.agentsEmpty), systemImage: "sparkles")
-        } else {
-            Table(model.agentRows) {
-                TableColumn(L10n.t(.colAgent)) { r in Text(r.name) }
-                TableColumn(L10n.t(.colCategories)) { r in Text(r.categories.joined(separator: ", ")).lineLimit(2) }
-                TableColumn(L10n.t(.colBlocked)) { r in Text("\(r.blocked)").foregroundStyle(r.blocked > 0 ? .red : .primary) }
-                    .width(min: 60, ideal: 70)
-                TableColumn(L10n.t(.colLastSeen)) { r in Text(r.lastSeen.shortTime) }
-                TableColumn(L10n.t(.colCount)) { r in Text("\(r.count)").monospacedDigit() }.width(min: 50, ideal: 60)
+        VStack(alignment: .leading) {
+            UnavailableNote(part: .summaries)
+            if model.agentRows.isEmpty {
+                if model.unavailableNote(.summaries) == nil {
+                    ContentUnavailableView(L10n.t(.agentsEmpty), systemImage: "sparkles")
+                } else {
+                    Spacer()
+                }
+            } else {
+                Table(model.agentRows) {
+                    TableColumn(L10n.t(.colAgent)) { r in Text(r.name) }
+                    TableColumn(L10n.t(.colCategories)) { r in Text(r.categories.joined(separator: ", ")).lineLimit(2) }
+                    TableColumn(L10n.t(.colBlocked)) { r in Text("\(r.blocked)").foregroundStyle(r.blocked > 0 ? .red : .primary) }
+                        .width(min: 60, ideal: 70)
+                    TableColumn(L10n.t(.colLastSeen)) { r in Text(r.lastSeen.shortTime) }
+                    TableColumn(L10n.t(.colCount)) { r in Text("\(r.count)").monospacedDigit() }.width(min: 50, ideal: 60)
+                }
             }
         }
     }

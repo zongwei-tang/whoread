@@ -54,6 +54,20 @@ final class NavigationState {
     }
 }
 
+/// Why a tab's data is missing or not current (`AppModel.unavailableNote`): refused to this app,
+/// or not answered. Nothing while the data is current.
+struct UnavailableNote: View {
+    @Environment(AppModel.self) private var model
+    let part: SnapshotPart
+
+    var body: some View {
+        if let note = model.unavailableNote(part) {
+            Text(note).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 struct SeverityBadge: View {
     let severity: Severity
     var body: some View {

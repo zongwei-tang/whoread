@@ -24,6 +24,8 @@ struct RulesView: View {
                 Text(caveat).font(.caption).foregroundStyle(.orange)
             }
             if let err = connection.lastActionError { Text(err).font(.caption).foregroundStyle(.red) }
+            // Refused (not recognised as the signed app): a new block rule can still be added.
+            UnavailableNote(part: .rules)
             List(model.rules) { rule in
                 RuleRow(rule: rule) { editing = RuleDraft(rule: rule) }
             }

@@ -680,8 +680,17 @@ public final class DaemonCore: @unchecked Sendable {
             try answer(scope, action: action, peer: peer, privileged: privileged)
         }
         // An unprivileged answer (deny, block from now on) leaves the alerts open, as `apply` does.
-        if privileged { try resolveAskAlerts(answering: scope, action: action) }
+        if privileged {
+            do { try resolveAskAlerts(answering: scope, action: action) } catch { throw DaemonCore.alertsNotUpdated(error) }
+        }
         Log.info("question #\(id): \(action.rawValue) by pid \(peer.pid.map(String.init) ?? "?") (uid \(peer.euid.map(String.init) ?? "?"))")
+    }
+
+    /// The answer took effect (rule, setting, held accesses), but marking its alerts handled failed:
+    /// said as such, since a plain error reads as if the answer had been refused.
+    static func alertsNotUpdated(_ error: Error) -> IPCError {
+        Log.error("answer applied, but its alerts could not be updated: \(error)")
+        return IPCError(.internalError, "answer applied, but its alerts could not be updated: \(error)")
     }
 
     /// What an answer applies to: from a question, or from an alert (Alerts tab, monitor-only mode).
@@ -775,9 +784,17 @@ public final class DaemonCore: @unchecked Sendable {
     /// The allow rule for "allow once" (10 minutes) or "always allow": the app or agent, the category,
     /// the access, scoped to the AI agents that were in the chain.
     private func addAnswerRule(_ scope: AnswerScope, once: Bool, peer: IPCPeer, now: Date) throws {
+        guard let edit = try answerRuleEdit(scope, once: once, now: now) else { return }
+        try saveRuleChange(peer: peer, privileged: true, edit)
+    }
+
+    /// The change to the rule list that `addAnswerRule` saves (nil: nothing to save). Also tried on a
+    /// copy first where something else would be saved before it, so that a refusal (the rule limit)
+    /// leaves nothing changed.
+    private func answerRuleEdit(_ scope: AnswerScope, once: Bool, now: Date) throws -> ((inout [Rule]) throws -> Void)? {
         // An alert about metadata-only opens (neither read nor write): nothing to allow, and the rule
         // would be `.any` (read and write).
-        guard !scope.key.access.isEmpty else { return }
+        guard !scope.key.access.isEmpty else { return nil }
         let categoryID = scope.key.categoryID
         guard data.catalog.category(categoryID) != nil else {
             throw IPCError(.invalid, "category \(categoryID) is no longer in the catalog")
@@ -798,7 +815,7 @@ public final class DaemonCore: @unchecked Sendable {
             x.template == DaemonCore.askAnswerTemplate && x.action == .allow && x.target == rule.target && x.subject == rule.subject
                 && x.access == rule.access && x.chainAgents == rule.chainAgents && x.coversUnknownAncestry == rule.coversUnknownAncestry
         }
-        try saveRuleChange(peer: peer, privileged: true) { list in
+        return { list in
             // Answers expire: drop the dead ones, and the earlier "allow once" this one replaces.
             list.removeAll { $0.template == DaemonCore.askAnswerTemplate && ($0.expiresAt.map { $0 <= now } ?? false) }
             if once {
@@ -1007,6 +1024,12 @@ public final class DaemonCore: @unchecked Sendable {
         case .alwaysAllow:
             guard privileged else { throw IPCError(.notPermitted, "allowing weakens protection: run it with sudo, or use the WhoRead app") }
             if let ruleID = alert.ruleID, alert.kind == .blocked || alert.kind == .wouldBlock {
+                // The answer rule saved below must fit (the rule limit): otherwise nothing changes, not
+                // the exception alone.
+                if let edit = try answerRuleEdit(scope, once: false, now: now) {
+                    var trial = rules.rules
+                    try edit(&trial)
+                }
                 try addException(toRule: ruleID, RuleException(subject: subject, categoryID: alert.categoryID, access: access,
                                                                chainAgents: chainAgents, coversUnknownAncestry: unknownAncestry,
                                                                createdAt: now))
@@ -1026,11 +1049,17 @@ public final class DaemonCore: @unchecked Sendable {
         if privileged {
             alert.status = .resolved
             alert.resolution = action
-            try store.upsert([alert])
-            // Replaces a stale snapshot the writer may have re-queued after a failed flush.
-            writer.enqueue(alerts: [alert])
-            coalescer.updateStatus(alertID: id, status: .resolved, resolution: action)
-            if answered { try resolveAskAlerts(answering: scope, action: action, except: id) }
+            do {
+                try store.upsert([alert])
+                // Replaces a stale snapshot the writer may have re-queued after a failed flush.
+                writer.enqueue(alerts: [alert])
+                coalescer.updateStatus(alertID: id, status: .resolved, resolution: action)
+                if answered { try resolveAskAlerts(answering: scope, action: action, except: id) }
+            } catch {
+                // "Ignore" (and "keep blocking" on a block) change nothing else: then nothing changed.
+                guard action == .ignore || (action == .keepBlocking && !answered) else { throw DaemonCore.alertsNotUpdated(error) }
+                throw error
+            }
         }
         Log.info("alert #\(id): \(action.rawValue) by pid \(peer.pid.map(String.init) ?? "?") (uid \(peer.euid.map(String.init) ?? "?"))")
     }

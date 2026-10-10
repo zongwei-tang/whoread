@@ -60,13 +60,15 @@ final class DisplayUIModelTests: XCTestCase {
             let body = try XCTUnwrap(plan.post.first?.body)
             assertShowable(body, allowingLineBreaks: true)
             let lines = body.components(separatedBy: "\n")
-            XCTAssertEqual(lines.count, 4, body)
+            XCTAssertEqual(lines.count, 5, body)
             XCTAssertEqual(lines[0], language == .en ? "AI agent in the chain: Claude Code" : "调用链中有 AI agent：Claude Code")
             XCTAssertTrue(lines[1].contains("~/WhoReadTestVault/ssh/id_ed25519"), lines[1])
             XCTAssertTrue(lines[1].hasPrefix("Terminal wants to read ~∕notes\\u{a}\\u{a}\\u{a}\\u{a}\\u{202e}x"), lines[1])
             XCTAssertTrue(lines[2].contains("~/Projects/x/Terminal wants to read"), "where the program really is: \(lines[2])")
             XCTAssertTrue(lines[2].hasSuffix(language == .en ? "(not signed by an identified developer)" : "（没有已识别开发者的签名）"), lines[2])
-            XCTAssertTrue(lines[3].hasSuffix("r\\u{d}\\u{1b}[2K"), lines[3])
+            // What allowing covers names the app with its escaped name too.
+            XCTAssertTrue(lines[3].contains("Terminal wants to read ~∕notes\\u{a}"), lines[3])
+            XCTAssertTrue(lines[4].hasSuffix("r\\u{d}\\u{1b}[2K"), lines[4])
         }
     }
 
@@ -80,8 +82,9 @@ final class DisplayUIModelTests: XCTestCase {
         let body = try XCTUnwrap(planned.first?.body)
         assertShowable(body, allowingLineBreaks: true)
         let lines = body.components(separatedBy: "\n")
-        XCTAssertEqual(lines.count, 3, body)
+        XCTAssertEqual(lines.count, 4, body)
         XCTAssertTrue(lines[1].hasPrefix("Program: ~/Projects/x/"), lines[1])
+        XCTAssertTrue(lines[2].hasPrefix("Always allow covers: Terminal wants to read"), lines[2])
         XCTAssertEqual(m.identityLine(alert), lines[1])
     }
 

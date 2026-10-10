@@ -14,6 +14,9 @@ struct SettingsView: View {
             if let base = model.settings {
                 let binding = Binding(get: { draft ?? base }, set: { draft = $0 })
                 form(binding, base: base)
+            } else if model.unavailableNote(.settings) != nil {
+                // Not read (no answer, or a reply this app cannot read): say so, not a spinner for ever.
+                UnavailableNote(part: .settings).padding()
             } else {
                 ProgressView()
             }
@@ -27,6 +30,7 @@ struct SettingsView: View {
             // they are not part of the Save button's draft.
             Section(L10n.t(.setMonitoredPaths)) {
                 Text(L10n.t(.setMonitoredPathsNote)).font(.caption).foregroundStyle(.secondary)
+                UnavailableNote(part: .catalog)
                 ForEach(model.catalog?.catalog.categories ?? [], id: \.id) { c in
                     CategoryEditor(category: c, detected: model.catalog?.detected[c.id] ?? false)
                 }

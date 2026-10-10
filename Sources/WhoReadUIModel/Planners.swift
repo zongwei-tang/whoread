@@ -22,6 +22,24 @@ public struct PlannedAskNotification: Equatable, Sendable {
     public var body: String
     public var categoryIdentifier: String
     public var actions: [AlertAction]
+    /// Replaces the banner already shown for this question (now with its file path): no sound.
+    public var quiet = false
+}
+
+/// A notification category to register: the answers offered on a banner, as buttons. Button titles
+/// are registered once per category, not per notification, so "always allow" and "always deny" say
+/// what they cover by kind ("this app (any program run in it)"); the banner's body names the app.
+public struct PlannedCategory: Equatable, Sendable {
+    public struct Button: Equatable, Sendable {
+        public var action: AlertAction
+        public var title: String
+        /// Allowing saves a rule that also answers later questions: never from the lock screen.
+        public var needsUnlock: Bool
+        public var destructive: Bool
+    }
+
+    public var identifier: String
+    public var buttons: [Button]
 }
 
 /// What to change in the delivered question notifications after a poll.
@@ -67,9 +85,18 @@ public final class NotificationPlanner: @unchecked Sendable {
     private var seeded = false
     private let launchedAt: Date
     private var lastUncleanStop: String?
-    /// Questions notified: id → first asked (a restarted daemon reuses ids).
-    private var askNotified: [Int64: Date] = [:]
+    /// Questions notified: id → when first asked (another first time under the same id is another
+    /// question), and whether the banner went out incomplete (`plan(asks:)`).
+    private var askNotified: [Int64: AskBanner] = [:]
 
+    private struct AskBanner {
+        var firstAt: Date
+        /// Without the file path, or with category and AI agent ids for names.
+        var incomplete: Bool
+    }
+
+    // Category prefixes: each is registered once per kind of app, AI agent or program (".app",
+    // ".agent", ".binary"), see `categories(language:)`.
     public static let categoryBlocked = "whoread.blocked"
     public static let categoryAlert = "whoread.alert"
     public static let categoryWouldBlock = "whoread.wouldblock"
@@ -82,12 +109,61 @@ public final class NotificationPlanner: @unchecked Sendable {
 
     public static let categoryAlertApple = "whoread.alert.apple"
 
-    public static func category(for kind: AlertKind, appleProgram: Bool = false) -> String {
+    /// One category per kind of alert and kind of app, AI agent or program it is charged to (the
+    /// button titles say what an answer covers).
+    public static func category(for kind: AlertKind, appleProgram: Bool = false, responsible: ResponsibleEntity.Kind) -> String {
+        let base: String
         switch kind {
-        case .blocked: return categoryBlocked
-        case .wouldBlock: return categoryWouldBlock
-        default: return appleProgram ? categoryAlertApple : categoryAlert
+        case .blocked: base = categoryBlocked
+        case .wouldBlock: base = categoryWouldBlock
+        default: base = appleProgram ? categoryAlertApple : categoryAlert
         }
+        return base + "." + responsible.rawValue
+    }
+
+    /// A question's category: "allow all Apple programs" for an all-Apple chain, and the kind it is
+    /// charged to.
+    public static func askCategory(apple: Bool, responsible: ResponsibleEntity.Kind) -> String {
+        (apple ? categoryAskApple : categoryAsk) + "." + responsible.rawValue
+    }
+
+    /// Every category, with its button titles in `language` (registered at launch and when the
+    /// language changes).
+    public static func categories(language: Language) -> [PlannedCategory] {
+        let f = AlertFormatter(language: language)
+        let kinds: [ResponsibleEntity.Kind] = [.app, .agent, .binary]
+        func alertCategory(_ id: String, _ actions: [AlertAction], kind: ResponsibleEntity.Kind) -> PlannedCategory {
+            PlannedCategory(identifier: id + "." + kind.rawValue, buttons: actions.map { a in
+                let title: String
+                switch a {
+                case .alwaysAllow: title = f.alwaysAllowTitle(kind: kind)
+                case .blockFromNowOn: title = f.alwaysDenyTitle(kind: kind, alertKind: .firstAccess)
+                default: title = f.actionTitle(a)
+                }
+                return PlannedCategory.Button(action: a, title: title, needsUnlock: AskAnswers.isAllow(a),
+                                              destructive: a == .blockFromNowOn || a == .keepBlocking)
+            })
+        }
+        func askCategory(apple: Bool, kind: ResponsibleEntity.Kind) -> PlannedCategory {
+            PlannedCategory(identifier: NotificationPlanner.askCategory(apple: apple, responsible: kind),
+                            buttons: AskAnswers.actions(apple: apple).map { a in
+                let title: String
+                switch a {
+                case .alwaysAllow: title = f.alwaysAllowTitle(kind: kind)
+                case .blockFromNowOn: title = f.alwaysDenyTitle(kind: kind, alertKind: .ask)
+                default: title = L10n.askActionTitle(a, language)
+                }
+                return PlannedCategory.Button(action: a, title: title, needsUnlock: AskAnswers.isAllow(a), destructive: !AskAnswers.isAllow(a))
+            })
+        }
+        return kinds.flatMap { kind in [
+            alertCategory(categoryBlocked, [.allowOnce, .alwaysAllow, .keepBlocking], kind: kind),
+            alertCategory(categoryAlert, [.alwaysAllow, .blockFromNowOn, .ignore], kind: kind),
+            alertCategory(categoryAlertApple, [.alwaysAllow, .blockFromNowOn, .ignore, .trustApplePrograms], kind: kind),
+            alertCategory(categoryWouldBlock, [.alwaysAllow, .ignore], kind: kind),
+            askCategory(apple: false, kind: kind),
+            askCategory(apple: true, kind: kind),
+        ] }
     }
 
     /// `launchedAt`: alerts created before this are not notified on the first plan.
@@ -102,7 +178,11 @@ public final class NotificationPlanner: @unchecked Sendable {
 
     /// The first plan only records alerts from before launch (no burst of old notifications);
     /// alerts raised since launch notify even if the daemon was unreachable until now.
-    public func plan(_ alerts: [Alert], settings: NotificationSettings, formatter: AlertFormatter) -> [PlannedNotification] {
+    /// `alerts` nil: they were not read this time (refused, failed): nothing is planned or recorded, so
+    /// the first read that succeeds still only records what is older than the launch.
+    public func plan(_ alerts: [Alert]?, settings: NotificationSettings, formatter: AlertFormatter,
+                     agentName: (String) -> String = { $0 }) -> [PlannedNotification] {
+        guard let alerts else { return [] }
         defer { seeded = true }
         var out: [PlannedNotification] = []
         for a in alerts.sorted(by: { $0.updatedAt < $1.updatedAt }) {
@@ -123,8 +203,10 @@ public final class NotificationPlanner: @unchecked Sendable {
             let title = a.kind == .blocked ? L10n.t(.notifBlockedTitle, formatter.language) : L10n.t(.notifTitle, formatter.language)
             out.append(PlannedNotification(
                 identifier: "alert-\(a.id)-\(Int(a.createdAt.timeIntervalSince1970))-\(a.kind.rawValue)-\(a.firstEventID)", alertID: a.id, title: title,
-                body: [formatter.headline(a), formatter.identityLine(a), formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
-                categoryIdentifier: NotificationPlanner.category(for: a.kind, appleProgram: a.appleProgram), threadIdentifier: a.categoryID,
+                body: [formatter.headline(a), formatter.identityLine(a), a.allowCoverageLine(formatter, agentName: agentName),
+                       formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
+                categoryIdentifier: NotificationPlanner.category(for: a.kind, appleProgram: a.appleProgram, responsible: a.responsible.kind),
+                threadIdentifier: a.categoryID,
                 actions: a.availableActions))
         }
         return out
@@ -149,22 +231,33 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// `complete`: the reply listed every open question. The daemon caps the list (200), so a question
     /// missing from a capped reply may still be open: only a complete reply withdraws banners.
     /// The body puts the AI agents in the chain first (a collapsed banner shows only its first lines),
-    /// then the headline, where the program really is and who signed it, and the chain; names and
-    /// paths are escaped and capped (`DisplayText`).
+    /// then the headline, where the program really is and who signed it, what allowing covers (the
+    /// app, not only that program), and the chain; names and paths are escaped and capped (`DisplayText`).
+    /// A banner that went out incomplete is replaced once, quietly, when it can be complete: posted
+    /// while the daemon hid the file path from this app (`AskRequest.pathHidden`: its connection was
+    /// not taken for the app), it would keep saying that only the signed app can see the path, to the
+    /// signed app; posted before the catalog and the AI agent list were read (`namesKnown` false: the
+    /// questions are read on their own connection, often first at launch), it would name the category
+    /// and the agents by their ids ("ssh" for "SSH keys").
     public func plan(asks: [AskRequest], formatter: AlertFormatter, complete: Bool = true,
-                     agentName: (String) -> String = { $0 }) -> AskNotificationPlan {
+                     agentName: (String) -> String = { $0 }, namesKnown: Bool = true) -> AskNotificationPlan {
         var plan = AskNotificationPlan()
-        var open: [Int64: Date] = [:]
+        var open: [Int64: AskBanner] = [:]
         for a in asks.sorted(by: { ($0.firstAt, $0.id) < ($1.firstAt, $1.id) }) {
-            open[a.id] = a.firstAt
-            // Same id, other first time: a restarted daemon's new question (replaces the old banner).
-            if let seen = askNotified[a.id], abs(seen.timeIntervalSince(a.firstAt)) < 1 { continue }
+            // Same id, other first time: another question (replaces the old banner).
+            let seen = askNotified[a.id].flatMap { abs($0.firstAt.timeIntervalSince(a.firstAt)) < 1 ? $0 : nil }
+            let incomplete = a.pathHidden || !namesKnown
+            let completes = seen?.incomplete == true && !incomplete
+            // Never back to an incomplete text once the complete one was shown.
+            open[a.id] = AskBanner(firstAt: a.firstAt, incomplete: seen.map { $0.incomplete && incomplete } ?? incomplete)
+            if seen != nil && !completes { continue }
             plan.post.append(PlannedAskNotification(
                 identifier: NotificationPlanner.askIdentifier(a.id), askID: a.id, title: L10n.t(.notifAskTitle, formatter.language),
-                body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.asAlert),
-                       formatter.identityLine(a.asAlert), formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
-                categoryIdentifier: a.appleProgram ? NotificationPlanner.categoryAskApple : NotificationPlanner.categoryAsk,
-                actions: AskAnswers.actions(for: a)))
+                body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.displayAlert(formatter.language)),
+                       formatter.identityLine(a.asAlert), a.allowCoverageLine(formatter, agentName: agentName),
+                       formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
+                categoryIdentifier: NotificationPlanner.askCategory(apple: a.appleProgram, responsible: a.responsible.kind),
+                actions: AskAnswers.actions(for: a), quiet: completes))
         }
         if complete {
             plan.remove = askNotified.keys.filter { open[$0] == nil }.sorted().map(NotificationPlanner.askIdentifier)
@@ -364,6 +457,23 @@ public struct RuleDraft: Equatable, Sendable {
                     remainingUses: edited?.remainingUses, createdAt: edited?.createdAt ?? now, template: original?.template,
                     exceptions: exceptions, chainAgents: original?.chainAgents,
                     coversUnknownAncestry: original?.coversUnknownAncestry ?? false)
+    }
+}
+
+/// Saving a rule from the editor.
+public enum RuleSave {
+    /// Saves `rule` with what the daemon changes on its own taken from its current copy
+    /// (`keepingDaemonState`), read right before saving. When the daemon refuses that read (it does
+    /// not serve this app as the signed one), the rule is saved as built: such a peer may only add a
+    /// new deny or alert rule, which has no daemon state yet, and the daemon refuses anything else.
+    public static func save(_ rule: Rule, with client: IPCClient) throws -> IPCResponse {
+        let current: Rule?
+        do {
+            current = try client.rules().first { $0.id == rule.id }
+        } catch let e as IPCError where e.code == .notPermitted {
+            current = nil
+        }
+        return try client.call(.upsertRule(rule.keepingDaemonState(of: current)))
     }
 }
 
