@@ -174,7 +174,7 @@ public enum NativeDeadlineMissMode: UInt32, Sendable, CaseIterable {
 
 /// Denials queued for recording (the AUTH callback only counts under a lock). Every denial is
 /// recorded while the backlog is short. Past `mergeThreshold`, a denial identical to one still
-/// queued (same process instance, operation, targets with their access, and rule) is merged into it,
+/// queued (same process instance, operation, targets with their access, rule and reason) is merged into it,
 /// so a process looping on a denied open cannot grow the queue without bound; past `limit`, every
 /// further denial is only counted. Neither touches the AUTH response, which is sent before. Outside
 /// the EndpointSecurity guard so it is unit-tested on any host.
@@ -186,6 +186,8 @@ struct NativeDenialBacklog {
         /// Paths with their access: a denied write is not merged into a queued denied read.
         let targets: [FileTarget]
         let ruleID: String?
+        /// A denial by no rule is an unanswered question or the kernel's (a late answer): recorded apart.
+        let reason: DecisionReason
 
         init(_ activity: FileActivity, _ decision: RuleDecision) {
             pid = activity.process.pid
@@ -193,6 +195,7 @@ struct NativeDenialBacklog {
             operation = activity.operation
             targets = activity.targets
             ruleID = decision.ruleID
+            reason = decision.reason
         }
     }
 

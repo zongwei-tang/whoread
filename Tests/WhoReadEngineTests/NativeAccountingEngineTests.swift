@@ -127,6 +127,24 @@ final class NativeAuthDropsTests: XCTestCase {
     }
 }
 
+final class LateDenialBacklogTests: XCTestCase {
+    func testALateDenialIsNotMergedIntoAQueuedDenialOfTheSameAccess() throws {
+        // Both carry no rule. Merged, the late denial would be recorded as the queued one's (an unanswered
+        // question, with its alert) and lose its note.
+        let cat = proc(601, "/bin/cat", platform: true)
+        let read = FileActivity(time: Date(timeIntervalSince1970: 1_760_000_000), operation: .open, process: cat,
+                                targets: OperationSemantics.open(path: "/Users/alice/.ssh/id_ed25519", fflag: OperationSemantics.fread))
+        let asked = RuleDecision(verdict: .deny, reason: .askUser)
+        let late = RuleDecision(verdict: .deny, reason: .deadlineMissed, suppressAlert: true)
+        var b = NativeDenialBacklog()
+        for _ in 0..<NativeDenialBacklog.mergeThreshold { XCTAssertNotNil(b.admit { NativeDenialBacklog.Key(read, asked) }) }
+        XCTAssertNotNil(b.admit { NativeDenialBacklog.Key(read, asked) })
+        XCTAssertNil(b.admit { NativeDenialBacklog.Key(read, asked) }, "a repeat merges")
+        XCTAssertNotNil(b.admit { NativeDenialBacklog.Key(read, late) }, "another cause is recorded on its own")
+        XCTAssertNil(b.admit { NativeDenialBacklog.Key(read, late) })
+    }
+}
+
 // MARK: - Status
 
 /// A native-like source with AUTH counts.
