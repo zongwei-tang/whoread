@@ -1007,15 +1007,16 @@ public enum ArgvRedactor {
         var atCommand = true
         var pendingHeredoc: String?
         var body: String?
-        // Function bodies, and the commands that call a function by its name.
+        // Function bodies (each definition of a name, in order), and the commands that call a
+        // function by its name. `writes`: the call's own word sends its output on (`f>FILE`, `f|tee`).
         var pendingFunction: String?
-        var functions: [String: ClosedRange<Int>] = [:]
-        var calls: [(name: String, at: Int, ended: Bool)] = []
+        var functions: [String: [ClosedRange<Int>]] = [:]
+        var calls: [(name: String, at: Int, ended: Bool, writes: Bool)] = []
         // The first `exec > FILE`: a function called after it writes there.
         var execRedirect: Int?
 
         func close(_ frame: Frame, at end: Int, tail: String) {
-            if let name = frame.function { functions[name] = frame.start...end }
+            if let name = frame.function { functions[name, default: []].append(frame.start...end) }
             guard frame.kind != .capture else { return }
             guard frame.kind == .substitution || outputLeaves(tokens, after: end, tail: tail, lineStarts: lineStarts) else { return }
             result.redirected.formUnion(frame.start...end)
@@ -1155,8 +1156,13 @@ public enum ArgvRedactor {
                     program(String(inner))
                     atCommand = false
                 } else if !rest.isEmpty && !(rest.contains("=") && !rest.hasPrefix("-")) && !wrappers.contains(String(rest)) {
-                    program(String(rest))
-                    calls.append((String(rest), k, endsCommand))
+                    // `(f) > FILE`, `f>FILE`, `f|tee FILE`: the name ends where the word's shell
+                    // syntax starts.
+                    let name = rest.prefix { !")<>|&".contains($0) }
+                    let attached = String(rest.dropFirst(name.count))
+                    program(String(name))
+                    calls.append((String(name), k, endsCommand,
+                                  redirect(in: attached)?.isStandardOutput == true || unquotedPipe(in: attached) != nil))
                     atCommand = false
                 }
             } else if word.hasPrefix("<(") || word.hasPrefix(">(") || word.contains("$(") {
@@ -1167,14 +1173,32 @@ public enum ArgvRedactor {
             closeParentheses(closingParentheses(in: word), at: k)
         }
         // `f() { echo pw; }` then `f > FILE`, or `f` after `exec > FILE`: the body writes there. A call
-        // inside another redirected body counts too (one more pass).
-        for _ in 0..<2 where !functions.isEmpty {
-            for call in calls {
-                // `f;` ends its command at its own word: no redirect of its own follows.
-                guard let body = functions[call.name], body.upperBound < call.at,
-                      result.redirected.contains(call.at) || execRedirect.map({ $0 < call.at }) == true
-                        || (!call.ended && writesOutput(tokens, after: call.at, lineStarts: lineStarts)) else { continue }
-                result.redirected.formUnion(body)
+        // inside a body that writes there does too, however deep the chain: each call is taken at most
+        // once, until nothing changes. A call at the top runs the definition before it; one inside a
+        // body runs when that body does, so the function it names may be defined later (any
+        // definition counts then).
+        guard !functions.isEmpty else { return result }
+        let bodies = functions.values.flatMap { $0 }
+        let pending = calls.compactMap { call -> (at: Int, direct: Bool, bodies: [ClosedRange<Int>])? in
+            guard let definitions = functions[call.name] else { return nil }
+            let inBody = bodies.contains { $0.contains(call.at) }
+            let called = inBody ? definitions : definitions.last(where: { $0.upperBound < call.at }).map { [$0] } ?? []
+            guard !called.isEmpty else { return nil }
+            // `f;` ends its command at its own word: no redirect of its own follows.
+            let direct = call.writes || execRedirect.map({ $0 < call.at }) == true
+                || (!call.ended && writesOutput(tokens, after: call.at, lineStarts: lineStarts))
+            return (call.at, direct, called)
+        }
+        var taken = Set<Int>()
+        var changed = true
+        while changed {
+            changed = false
+            for (n, call) in pending.enumerated() where !taken.contains(n) && (call.direct || result.redirected.contains(call.at)) {
+                taken.insert(n)
+                for body in call.bodies where !result.redirected.isSuperset(of: body) {
+                    result.redirected.formUnion(body)
+                    changed = true
+                }
             }
         }
         return result
