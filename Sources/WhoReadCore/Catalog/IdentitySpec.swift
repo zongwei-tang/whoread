@@ -111,7 +111,8 @@ public struct IdentitySpec: Codable, Hashable, Sendable {
             if p.isPlatformBinary ? !p.isVerifiedPlatformBinary : !p.hasDistributionSignature { return false }
         }
         // Whatever the spec pins, code that another process of the user controls (get-task-allow, or it
-        // has been debugged) runs whatever that process makes it run: it is nobody's owner.
+        // has been debugged) runs whatever that process makes it run, and signed code that is no longer
+        // valid runs pages its signature does not cover: it is nobody's owner.
         if p.isControllable { return false }
         // A third-party bundle owner is only trusted once its team ID is known (resolved from
         // `codesign -dv` on this Mac): /Applications is writable by admin users.
