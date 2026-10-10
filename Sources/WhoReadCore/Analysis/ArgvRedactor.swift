@@ -12,8 +12,10 @@ import Foundation
 /// output goes there or after `exec > FILE`; heredoc bodies written by cat/tee or into a file;
 /// here-strings) is file contents, not metadata: it is redacted, and the redirect's target kept.
 /// Secrets inside the text of a command are redacted by its syntax where it is known: SQL that sets
-/// a password, JSON and JavaScript objects, AppleScript's `do shell script … password`, URL userinfo,
-/// and the arguments some tools take a password in (`htpasswd -b`, `dscl -passwd`, `sqlplus u/pw`).
+/// a password or passes one to `PASSWORD()`, JSON and JavaScript objects, calls that take a user and
+/// a password (`db.auth('u', 'pw')`), AppleScript's `do shell script … password`, URL userinfo, and
+/// the arguments some tools take a password in (`htpasswd -b`, `rabbitmqctl add_user`, `dscl
+/// -passwd`, `sqlplus u/pw`).
 public enum ArgvRedactor {
     public static let placeholder = "‹redacted›"
 
