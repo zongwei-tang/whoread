@@ -89,7 +89,10 @@ yml_setting() {
 # a Mach service only a team-signed extension publishes.
 xc() {
   local defs=(-D "MARKETING_VERSION=$MARKETING_VERSION" -D "CURRENT_PROJECT_VERSION=$CURRENT_PROJECT_VERSION"
-              -D DEVELOPMENT_LANGUAGE=en -D DEVELOPMENT_TEAM=)
+              -D DEVELOPMENT_LANGUAGE=en -D DEVELOPMENT_TEAM=
+              # The Debug value from Xcode/project.yml: these bundles are ad hoc development builds; only a
+              # Release build pins Developer ID.
+              -D "WHOREAD_SIGNING_ANCHOR=anchor apple generic")
   "$ROOT/scripts/dev/xcconfig.sh" "${defs[@]}" "$@"
 }
 

@@ -69,7 +69,7 @@ SCRATCH="$(mktemp -d "$TMPDIR/whoread-capture-test.XXXXXX")"
 echo "Capturing $DURATION s of eslogger output into $RAWDIR (root-only)"
 # Root opens the output files, inside its own directory. The events are EsloggerSource.eventNames(readdir: false).
 sudo /bin/sh -c 'umask 077; out="$1"; err="$2"; shift 2; exec "$@" > "$out" 2> "$err"' sh "$RAWDIR/raw.jsonl" "$RAWDIR/eslogger.stderr" \
-  /usr/bin/eslogger open close exec fork exit rename clone copyfile link unlink truncate exchangedata create &
+  /usr/bin/eslogger open close exec fork exit rename clone copyfile link unlink truncate exchangedata create setmode setowner setacl setattrlist mount &
 ESPID=$!
 sleep 3
 ps -p "$ESPID" >/dev/null || { echo "eslogger exited early (Full Disk Access for this terminal?): $(sudo /bin/cat "$RAWDIR/eslogger.stderr")" >&2; exit 1; }

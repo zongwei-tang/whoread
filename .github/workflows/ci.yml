@@ -20,6 +20,9 @@ concurrency:
 
 jobs:
   test:
+    # Hosted runners are free only for public repositories; a private copy runs nothing, so no
+    # Actions minutes are ever used (macOS minutes count 10x on private repositories).
+    if: ${{ !github.event.repository.private }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,7 +61,7 @@ jobs:
 
   publish:
     needs: test
-    if: always()
+    if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

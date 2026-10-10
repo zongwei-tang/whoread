@@ -193,6 +193,8 @@ kill -0 "$DECOY" 2>/dev/null && ok "an unrelated process holding a recorded pid 
 { kill "$DECOY"; wait "$DECOY"; } 2>/dev/null
 wait $WAITER; rc=$?
 [ $rc -eq 125 ] && ok "orphaned job reported interrupted (exit 125)" || bad "orphaned job: rc $rc: $(cat "$T/orphan.out")"
+# The runner recovers leftover jobs one after the other: the decoy may be marked a moment after the orphan.
+for _ in $(seq 50); do [ -f "$SHARE/.vm/results/decoy-job.status" ] && break; sleep 0.2; done
 [ "$(cat "$SHARE/.vm/results/decoy-job.status" 2>/dev/null)" = 125 ] && ok "decoy job marked interrupted" || bad "decoy job status"
 sleep 1
 grep -q 'not reached' "$SHARE/.vm/results/$ORPHAN_ID.out" && bad "the orphaned job went on" || ok "the orphaned job did not go on"

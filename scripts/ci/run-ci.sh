@@ -54,6 +54,9 @@ stage xcodegen "error|Created project|Generated" scripts/xcodegen.sh
 stage xcode-build "$ERR" scripts/build.sh Debug
 stage shellcheck "SC[0-9]+|error" bash -c 'find scripts -name "*.sh" -print0 | xargs -0 shellcheck -S warning'
 stage bash-syntax "syntax|error" bash -c 'for f in $(find scripts -name "*.sh"); do bash -n "$f" || exit 1; done'
+stage es-stub "mismatch|MISMATCH|error|skipped|stub check" bash scripts/dev/es-typecheck/check-stub.sh
+stage vm-harness-selftest "^FAIL|passed," bash scripts/vm/selftest.sh
+stage app-bundle "^FAIL|failure|error" scripts/dev/sc-app-test.sh
 # Monitor-only facts the runner can show without Full Disk Access (listing events needs no root).
 stage eslogger-events "." eslogger --list-events
 
