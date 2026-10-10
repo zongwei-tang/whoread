@@ -143,8 +143,10 @@ final class DaemonConnection {
         let check = askClientServedAsApp == nil
         askQueue.async {
             let poll = SnapshotFetcher.fetchAsks(client)
-            // Once per connection, before any question needs an "allow" on it.
-            let served = check ? SnapshotFetcher.isServedAsApp(client) : nil
+            // Once per connection, before any question needs an "allow" on it; only after a read that
+            // was answered (a daemon that does not answer would make an answer queued here wait twice).
+            var served: Bool?
+            if check, case .asks = poll { served = SnapshotFetcher.isServedAsApp(client) }
             Task { @MainActor in
                 self.askInFlight = false
                 if let served, client === self.askClient { self.askClientServedAsApp = served }
