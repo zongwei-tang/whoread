@@ -548,6 +548,7 @@ public enum ArgvRedactor {
             if shellWord, t.hasPrefix("<<") {
                 let name = heredocDelimiter(String(t.dropFirst(2)))
                 let sink = ["cat", "tee"].contains(program ?? "") || writesOutput(tokens, after: commandStart, lineStarts: lineStarts)
+                    || readsSecret(tokens[min(commandStart, i)..<i].map { unquote($0).1 })
                 let script = !sink && program.map { readsScript($0, tokens: tokens, program: programAt, lineStarts: lineStarts) } == true
                 heredoc = (name.isEmpty ? nil : name, sink, false, script)
                 continue
@@ -993,6 +994,17 @@ public enum ArgvRedactor {
         if let entrypoint, !entrypoint.isEmpty { return (words[j], basename(entrypoint)) }
         guard j + 1 < words.count else { return nil }
         return (words[j + 1], nil)
+    }
+
+    /// True when a command (its words) reads a secret from standard input, so a heredoc fed to it
+    /// is that secret: `docker login --password-stdin`, `gh auth login --with-token`, `sudo -S`,
+    /// `chpasswd`.
+    static func readsSecret(_ words: [String]) -> Bool {
+        words.contains { w in
+            let lower = w.lowercased()
+            if lower.hasSuffix("-stdin") && strongFragments.contains(where: { lower.contains($0) }) { return true }
+            return lower == "--with-token" || ["chpasswd", "chgpasswd"].contains(basename(w))
+        } || (words.contains { basename($0) == "sudo" } && words.contains { $0.count > 1 && $0.hasPrefix("-") && !$0.hasPrefix("--") && $0.contains("S") })
     }
 
     /// Shells that read a script from standard input when given no command line or script file.

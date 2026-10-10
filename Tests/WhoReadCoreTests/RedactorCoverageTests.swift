@@ -788,8 +788,15 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/zsh", "-c", "bash -s <<EOF\nfor l in '\(R)'; do echo \"$l\"; done > ~/WhoReadTestVault/pgpass\nEOF"])
         assertRedacted(["/bin/zsh", "-c", "ssh -p 2222 web bash <<'EOF'\nsshpass -p Hunter2pw ssh db\nEOF"],
                        ["/bin/zsh", "-c", "ssh -p 2222 web bash <<'EOF'\nsshpass -p \(R) ssh db\nEOF"])
+        // A program that reads a secret from standard input: the heredoc is that secret.
+        assertRedacted(["/bin/zsh", "-c", "docker login -u bob --password-stdin ghcr.io <<EOF\nHunter2pw\nEOF"],
+                       ["/bin/zsh", "-c", "docker login -u bob --password-stdin ghcr.io <<EOF\n\(R)\nEOF"])
+        assertRedacted(["/bin/zsh", "-c", "sudo -S launchctl list <<EOF\nHunter2pw\nEOF"], ["/bin/zsh", "-c", "sudo -S launchctl list <<EOF\n\(R)\nEOF"])
+        assertRedacted(["/bin/zsh", "-c", "docker exec -i web chpasswd <<EOF\nbob:Hunter2pw\nEOF"],
+                       ["/bin/zsh", "-c", "docker exec -i web chpasswd <<EOF\n\(R)\nEOF"])
         assertKept([
             ["/bin/zsh", "-c", "ssh web <<'EOF'\nuptime\ndf -h /var\nEOF"], ["/bin/zsh", "-c", "bash <<EOF\nls -la\ncd /tmp && make\nEOF"],
+            ["/bin/zsh", "-c", "sudo launchctl list <<EOF\nhello\nEOF"],
             ["/bin/zsh", "-c", "bash run.sh <<EOF\nyes\nEOF"], ["/bin/zsh", "-c", "ssh web wc -l <<EOF\nhello\nEOF"],
             ["/bin/zsh", "-c", "python3 - <<EOF\nprint('done')\nEOF"],
         ])
