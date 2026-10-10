@@ -19,17 +19,42 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     /// an SQLite error at start, rows that decode now were still never loaded).
     private var rulesLoadFailed = false
 
-    public init(path: String) throws {
+    /// Opens or creates the database at `path`. Its directory (the daemon's data directory, created
+    /// and checked before the store opens) must already exist as a real directory owned by
+    /// `directoryOwner` that others cannot change: the store creates no directories. An existing
+    /// database must be a regular file of that owner with one name, never a link, which SQLite and
+    /// the chmod below would follow.
+    public init(path: String, directoryOwner: uid_t = geteuid()) throws {
         self.path = path
         let dir = (path as NSString).deletingLastPathComponent
-        if !dir.isEmpty {
-            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        }
+        try SafeFile.checkTrustedDirectory(dir.isEmpty ? "." : dir, owner: directoryOwner)
         // Create with restrictive permissions before SQLite touches it.
-        try SafeFile.createIfAbsent(path, mode: 0o600)
+        if !(try SafeFile.createIfAbsent(path, mode: 0o600)) {
+            try SQLiteEventStore.checkExistingDatabase(path, owner: directoryOwner)
+        }
         db = try SQLiteDatabase(path: path)
         chmod(path, 0o600)
         try migrate()
+    }
+
+    struct UnsafeDatabaseFile: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    private static func checkExistingDatabase(_ path: String, owner: uid_t) throws {
+        var st = stat()
+        guard lstat(path, &st) == 0 else {
+            throw UnsafeDatabaseFile(description: "cannot inspect \(path): \(String(cString: strerror(errno)))")
+        }
+        let problem: String?
+        switch st.st_mode & S_IFMT {
+        case S_IFLNK: problem = "is a symbolic link"
+        case S_IFREG:
+            problem = st.st_uid != owner ? "is owned by uid \(st.st_uid), expected \(owner)"
+                : st.st_nlink != 1 ? "has \(st.st_nlink) hard links" : nil
+        default: problem = "is not a regular file"
+        }
+        if let problem { throw UnsafeDatabaseFile(description: "\(path) \(problem); refusing to open it") }
     }
 
     private func migrate() throws {

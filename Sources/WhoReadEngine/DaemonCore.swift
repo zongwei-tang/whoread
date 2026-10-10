@@ -377,7 +377,8 @@ public final class DaemonCore: @unchecked Sendable {
         let now = Date()
 
         try DaemonCore.prepareDataDirectory(config)
-        store = config.inMemoryStore ? InMemoryEventStore() : try SQLiteEventStore(path: config.databasePath)
+        store = config.inMemoryStore ? InMemoryEventStore()
+            : try SQLiteEventStore(path: config.databasePath, directoryOwner: config.dataDirectoryOwner)
 
         let (defaults, dir) = try DefaultData.locate(explicit: config.defaultsDirectory,
                                                      executablePath: CommandLine.arguments.first.map(Self.absolutePath))
