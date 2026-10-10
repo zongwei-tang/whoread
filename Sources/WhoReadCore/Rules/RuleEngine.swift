@@ -287,7 +287,7 @@ public final class RuleEngine: @unchecked Sendable {
                     // (`mkdir X.app; cp /bin/cat X.app/`) would otherwise be charged to that bundle.
                     if cdhash == nil, key.hasPrefix("agent:") {
                         let id = String(key.dropFirst("agent:".count))
-                        if chain.contains(where: { $0.agentID == id && (team == nil || $0.image.teamID == team) }) {
+                        if chain.contains(where: { $0.agentID == id && (team == nil || $0.agentTeamID == team) }) {
                             return !(exceptOwners && isOwner(category))
                         }
                     }

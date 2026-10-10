@@ -7,10 +7,17 @@ public struct ProcessNode: Sendable, Hashable {
     /// Parent at fork time. Not updated when the process is reparented to launchd. nil while that
     /// parent is unknown: the chain then stops here instead of reaching launchd.
     public var parentID: UInt64?
-    /// Agent ID of the current image, if it is a known AI agent.
+    /// AI agent this process is: its current image is a known agent, or an earlier image was and the
+    /// process exec'd something else since (an agent that runs `exec cat key` is still the agent).
     public var agentID: String? {
         didSet { if agentID != nil { everAgent = true } }
     }
+    /// The agent identity is held from an earlier image (see `agentID`); `heldAgentTeamID` is that
+    /// image's team.
+    var agentHeld = false
+    var heldAgentTeamID: String?
+    /// Team ID of the image that made this process an agent.
+    public var agentTeamID: String? { agentHeld ? heldAgentTeamID : image.teamID }
     public var exitedAt: Date?
     public var lastSeen: Date
     var childCount: Int
@@ -173,8 +180,7 @@ public final class ProcessTree: @unchecked Sendable {
         // Fork-scoped facts survive exec.
         if image.startTime == nil { image.startTime = node.image.startTime }
         if image.originalPPID == nil { image.originalPPID = node.image.originalPPID }
-        node.image = image
-        node.agentID = detector.detect(image)
+        adopt(image, into: &node)
         node.fromSnapshot = false
         node.lastSeen = time
         node.exitedAt = nil
@@ -303,9 +309,9 @@ public final class ProcessTree: @unchecked Sendable {
     }
 
     /// The nodes `node`'s ancestry recorded, nearest first, without launchd. An agent ancestor keeps
-    /// the identity it had when recorded: only the nearest instance of each agent (and team) is
-    /// recorded, so if it could shed that identity by exec (`exec -a claude /bin/sh` looks like Claude
-    /// Code; it forks deep, then execs /bin/sh), the farther, real agent it stood in for would be lost.
+    /// the identity (agent and team) it had when recorded: only the nearest instance of each agent (and
+    /// team) is recorded, so if that identity could change later, the farther, real agent it stood in
+    /// for would be lost.
     private func recordedAncestors(of node: ProcessNode, excluding walked: Set<UInt64>) -> [ProcessNode] {
         let a = node.ancestry
         var marks = a.agents.map(\.mark)
@@ -317,9 +323,10 @@ public final class ProcessTree: @unchecked Sendable {
         var out: [ProcessNode] = []
         for m in marks where seen.insert(m.id).inserted {
             guard var n = nodes[m.id], !n.image.isSystemRoot else { continue }
-            if let agent = recordedAgent[m.id], n.agentID != agent.agentID || n.image.teamID != agent.teamID {
+            if let agent = recordedAgent[m.id], n.agentID != agent.agentID || n.agentTeamID != agent.teamID {
                 n.agentID = agent.agentID
-                n.image.teamID = agent.teamID
+                n.agentHeld = true
+                n.heldAgentTeamID = agent.teamID
             }
             out.append(n)
         }
@@ -339,7 +346,7 @@ public final class ProcessTree: @unchecked Sendable {
         if parent.agentID != nil || parent.image.outermostAppBundle != nil { a.attributable = here }
         if !parent.image.isPlatformBinary { a.nonPlatform = here }
         if let agent = parent.agentID {
-            let team = parent.image.teamID
+            let team = parent.agentTeamID
             a.agents.removeAll { $0.agentID == agent && $0.teamID == team }
             a.agents.insert(Ancestry.AgentMark(mark: here, agentID: agent, teamID: team), at: 0)
             if a.agents.count > ProcessTree.maxAgentMarks { a.agents.removeLast(a.agents.count - ProcessTree.maxAgentMarks) }
@@ -416,8 +423,7 @@ public final class ProcessTree: @unchecked Sendable {
             // We missed an exec: adopt the new image.
             var image = p
             if image.startTime == nil { image.startTime = node.image.startTime }
-            node.image = image
-            node.agentID = detector.detect(image)
+            adopt(image, into: &node)
             node.fromSnapshot = fromSnapshot
         }
         node.lastSeen = time
@@ -426,6 +432,27 @@ public final class ProcessTree: @unchecked Sendable {
             // Only now recognised as an agent (code identity arrived after a snapshot): what it
             // started must carry it.
             refreshAncestry(below: id)
+        }
+    }
+
+    /// A new image for the same process instance (exec). A process that was an AI agent stays that agent
+    /// when the new image is not one: exec replaces the program, not who is running it. Not when it was
+    /// only a fork-time copy of its agent parent (the agent forking a shell for a command): the parent
+    /// already puts that agent in the chain, and the shell is what it started, not the agent itself.
+    private func adopt(_ image: ProcessRecord, into node: inout ProcessNode) {
+        let previous = node.agentID.map { ($0, node.agentTeamID) }
+        let parent = node.parentID.flatMap { nodes[$0] }
+        node.image = image
+        if let detected = detector.detect(image) {
+            node.agentID = detected
+            node.agentHeld = false
+            node.heldAgentTeamID = nil
+        } else if let (agent, team) = previous, !(parent?.agentID == agent && parent?.agentTeamID == team) {
+            node.agentID = agent
+            node.agentHeld = true
+            node.heldAgentTeamID = team
+        } else {
+            node.agentID = nil
         }
     }
 
