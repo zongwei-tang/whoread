@@ -8,8 +8,12 @@ import Foundation
 /// AI agents run commands as `zsh -c "<whole command>"`, so an element containing whitespace is
 /// tokenized like a shell command line and every token gets the same treatment as an argv element.
 /// File paths are evidence and are kept wherever a secret is not expected. What a command line
-/// writes (echo/printf words sent to a file or a pipe, heredoc bodies written by cat/tee or into a
-/// file, here-strings) is file contents, not metadata: it is redacted, and the redirect's target kept.
+/// writes (echo/printf words sent to a file or a pipe, also from inside a loop, group or `if` whose
+/// output goes there or after `exec > FILE`; heredoc bodies written by cat/tee or into a file;
+/// here-strings) is file contents, not metadata: it is redacted, and the redirect's target kept.
+/// Secrets inside the text of a command are redacted by its syntax where it is known: SQL that sets
+/// a password, JSON and JavaScript objects, AppleScript's `do shell script … password`, URL userinfo,
+/// and the arguments some tools take a password in (`htpasswd -b`, `dscl -passwd`, `sqlplus u/pw`).
 public enum ArgvRedactor {
     public static let placeholder = "‹redacted›"
 
@@ -254,7 +258,8 @@ public enum ArgvRedactor {
         var flags: (next: [String: ValueRule], attached: [String: ValueRule]) = ([:], [:])
         var expectProgram = true
         var skipNext = false
-        // Data a command writes (privacy-2): echo/printf words whose output goes to a file or a pipe,
+        // Data a command writes (privacy-2): echo/printf words whose output goes to a file or a pipe
+        // (their own redirect, the one of a group or loop around them, or an earlier `exec > FILE`),
         // here-strings, and heredoc bodies written by cat/tee or into a file. A file's contents are
         // never stored; where they went (the redirect's target) is kept.
         var dataMode = false
