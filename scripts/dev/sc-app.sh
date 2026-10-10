@@ -20,6 +20,9 @@
 # Contents/Resources/Data and nowhere else in the bundle (DefaultData.searchDirectories); the
 # extension accepts Resources/Data or Resources/WhoReadData (Extension/main.swift).
 #   .build-sc/debug/whoreadd                 re-signed like the app (below)
+#   .build-sc/debug/entitled/{WhoRead.app,whoreadd}
+#                                            the same, with the restricted entitlements
+#                                            (WHOREAD_ENTITLED=1, below)
 # Settings come from Xcode/Shared.xcconfig plus the optional Xcode/Local.xcconfig it includes
 # (scripts/dev/xcconfig.sh), MARKETING_VERSION / CURRENT_PROJECT_VERSION from project.yml, and
 # DEVELOPMENT_TEAM is always empty (see xc below).
@@ -27,9 +30,11 @@
 # Signing is ad hoc, inside-out, with the hardened runtime. By default nothing carries an
 # entitlement: AMFI refuses to launch an ad-hoc binary that claims a restricted one, so this is the
 # form that starts on a normal Mac with SIP on (the app then talks to the dev daemon and cannot
-# install the extension). WHOREAD_ENTITLED=1 signs the extension, whoreadd and the app with
+# install the extension). WHOREAD_ENTITLED=1 builds the bundle and a copy of whoreadd in
+# .build-sc/debug/entitled instead and signs the extension, whoreadd and the app there with
 # Extension/WhoReadExtension.entitlements, Extension/whoreadd.entitlements and
-# App/WhoRead.entitlements: only for a VM with SIP disabled.
+# App/WhoRead.entitlements: only for a VM with SIP disabled. The products in .build-sc/debug itself
+# never carry an entitlement, whichever mode ran last (sc-build.sh's build checks it too).
 #
 # Re-running updates the bundle in place: every file is written as a new file (replacing a signed
 # Mach-O in place can get its next launch killed through the kernel's cached signature), anything
@@ -40,7 +45,9 @@
 # entitlements each piece carries, and otool -L showing only system libraries. Never launched here.
 
 APPBIN="$OUT/app-bin"
+# Where this run puts the bundle and the signed whoreadd (app_bundle: $OUT/entitled when entitled).
 APPDIR="$OUT/WhoRead.app"
+DAEMON="$OUT/whoreadd"
 XCCONFIG="$ROOT/Xcode/Shared.xcconfig"
 # Swift flags of the Xcode targets: as COMMON, minus the package-only -enable-testing and
 # -DSWIFT_PACKAGE, plus the platform's macro plugins (SwiftUI, Foundation), loaded in process.
@@ -210,6 +217,15 @@ sign() {
   codesign --verify --strict "$1" || app_die "signing $1 failed"
 }
 
+# sign_copy SRC DST IDENTIFIER ENTITLEMENTS|"" : DST becomes a new file, a copy of SRC signed as
+# sign does (SRC may be DST: replacing a signed Mach-O in place can get its next launch killed).
+sign_copy() {
+  rm -f "$2.sc-tmp"
+  cp -X "$1" "$2.sc-tmp"
+  sign "$2.sc-tmp" "$3" "$4"
+  mv -f "$2.sc-tmp" "$2"
+}
+
 # check_signature PATH ENTITLEMENTS|"" : hardened runtime, and exactly these entitlements.
 check_signature() {
   local info got want
@@ -250,6 +266,11 @@ app_bundle() {
     *) app_die "WHOREAD_ENTITLED must be 0 or 1" ;;
   esac
 
+  if [ "$ent" = 1 ]; then
+    APPDIR="$OUT/entitled/WhoRead.app"
+    DAEMON="$OUT/entitled/whoreadd"
+  fi
+
   app_exes
   echo "== WhoRead.app bundle"
   app_settings
@@ -285,7 +306,7 @@ app_bundle() {
   sign "$APPDIR/Contents/Helpers/whoread" "$PREFIX.whoread.cli" ""
   sign "$APPDIR/$ext_dir" "" "$ext_ent"
   sign "$APPDIR" "" "$app_ent"
-  sign "$OUT/whoreadd" "$PREFIX.whoread.daemon" "$daemon_ent"
+  sign_copy "$OUT/whoreadd" "$DAEMON" "$PREFIX.whoread.daemon" "$daemon_ent"
 
   # Verification.
   local app_plist="$APPDIR/Contents/Info.plist" ext_plist="$APPDIR/$ext_dir/Contents/Info.plist"
@@ -330,9 +351,9 @@ app_bundle() {
   check_signature "$APPDIR" "$app_ent"
   check_signature "$APPDIR/$ext_dir" "$ext_ent"
   check_signature "$APPDIR/Contents/Helpers/whoread" ""
-  check_signature "$OUT/whoreadd" "$daemon_ent"
+  check_signature "$DAEMON" "$daemon_ent"
   for f in "$APPDIR/Contents/MacOS/$exe" "$APPDIR/Contents/Helpers/whoread" \
-           "$APPDIR/$ext_dir/Contents/MacOS/$ext_exe" "$OUT/whoreadd"; do
+           "$APPDIR/$ext_dir/Contents/MacOS/$ext_exe" "$DAEMON"; do
     check_links "$f"
   done
 
@@ -340,10 +361,12 @@ app_bundle() {
   echo "   app $PREFIX.whoread, extension $EXT_ID, Mach service $MACH"
   if [ "$ent" = 1 ]; then
     echo "   signed ad hoc WITH the restricted entitlements: runs only where SIP is disabled"
+    echo "   (kept in $OUT/entitled; the products in $OUT carry no entitlement)"
   else
-    echo "   signed ad hoc without entitlements (WHOREAD_ENTITLED=1 adds them, for a SIP-disabled VM)"
+    echo "   signed ad hoc without entitlements (WHOREAD_ENTITLED=1 builds a copy with them in"
+    echo "   $OUT/entitled, for a SIP-disabled VM)"
   fi
   echo "   verified: plists, codesign --verify --deep --strict, entitlements, otool -L (OS libraries only)"
   echo "   asset catalog: $ASSETS"
-  echo "   whoreadd re-signed: $OUT/whoreadd"
+  echo "   whoreadd signed: $DAEMON"
 }
