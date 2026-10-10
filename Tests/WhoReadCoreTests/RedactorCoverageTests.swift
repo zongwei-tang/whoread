@@ -173,9 +173,16 @@ final class RedactorCoverageTests: XCTestCase {
         assertRedacted(["/bin/sh", "-c", "docker exec rabbit rabbitmqctl add_user bob Hunter2pw && rabbitmqctl set_user_tags bob administrator"],
                        ["/bin/sh", "-c", "docker exec rabbit rabbitmqctl add_user bob \(R) && rabbitmqctl set_user_tags bob administrator"])
         assertRedacted(["rabbitmqctl", "--erlang-cookie", "Hunter2pw", "status"], ["rabbitmqctl", "--erlang-cookie", R, "status"])
+        // Options after the command and `--` are not the user: the password is the argument after it.
+        assertRedacted(["rabbitmqctl", "add_user", "--", "bob", "Hunter2pw"], ["rabbitmqctl", "add_user", "--", "bob", R])
+        assertRedacted(["rabbitmqctl", "add_user", "--pre-hashed-password", "bob", "Hunter2pwHash"],
+                       ["rabbitmqctl", "add_user", "--pre-hashed-password", "bob", R], secrets: ["Hunter2pwHash"])
+        assertRedacted(["rabbitmqctl", "change_password", "-n", "rabbit@host", "bob", "Hunter2pw"],
+                       ["rabbitmqctl", "change_password", "-n", "rabbit@host", "bob", R])
         assertKept([
             ["rabbitmqctl", "change_password", "bob"], ["rabbitmqctl", "add_user", "bob"], ["rabbitmqctl", "list_users"],
             ["rabbitmqctl", "set_user_tags", "bob", "administrator"], ["rabbitmqctl", "delete_user", "bob"],
+            ["rabbitmqctl", "add_user", "--", "bob"], ["rabbitmqctl", "add_vhost", "--description", "test", "vh"],
         ])
     }
 
@@ -271,6 +278,19 @@ final class RedactorCoverageTests: XCTestCase {
         // ldappasswd: the bind password, the old (-a) and the new (-s) password. Elsewhere -s is a scope.
         assertRedacted(["ldappasswd", "-x", "-D", "cn=admin", "-w", "Hunter2pw", "-a", "Old2pwxx", "-s", "Hunter2pw", "uid=bob"],
                        ["ldappasswd", "-x", "-D", "cn=admin", "-w", R, "-a", R, "-s", R, "uid=bob"], secrets: [secret, "Old2pwxx"])
+        // getopt takes them attached too.
+        assertRedacted(["ldappasswd", "-x", "-D", "cn=admin", "-wHunter2pw", "-aOld2pwxx", "-sHunter2pw", "uid=bob"],
+                       ["ldappasswd", "-x", "-D", "cn=admin", "-w\(R)", "-a\(R)", "-s\(R)", "uid=bob"], secrets: [secret, "Old2pwxx"])
+        assertRedacted(["ldapsearch", "-x", "-D", "cn=admin", "-wHunter2pw", "-b", "dc=example,dc=com"],
+                       ["ldapsearch", "-x", "-D", "cn=admin", "-w\(R)", "-b", "dc=example,dc=com"])
+        // Samba's USER%PW, lftp's USER,PW, and the password hash useradd and usermod set.
+        assertRedacted(["smbclient", "//nas/share", "-U", "bob%Hunter2pw"], ["smbclient", "//nas/share", "-U", "bob%\(R)"])
+        assertRedacted(["/bin/sh", "-c", "smbclient -L nas -Ubob%Hunter2pw && rpcclient -U 'DOM\\bob%Hunter2pw' nas"],
+                       ["/bin/sh", "-c", "smbclient -L nas -Ubob%\(R) && rpcclient -U 'DOM\\bob%\(R)' nas"])
+        assertRedacted(["smbclient", "//nas/share", "--user=bob%Hunter2pw"], ["smbclient", "//nas/share", "--user=bob%\(R)"])
+        assertRedacted(["lftp", "-u", "bob,Hunter2pw", "sftp://files.example.com"], ["lftp", "-u", "bob,\(R)", "sftp://files.example.com"])
+        assertRedacted(["/bin/sh", "-c", "docker exec web usermod -p '$6$salt$Hunter2pwHash' bob"],
+                       ["/bin/sh", "-c", "docker exec web usermod -p '\(R)' bob"], secrets: ["Hunter2pwHash"])
         // SQL Server tools.
         assertRedacted(["sqlcmd", "-S", "db", "-U", "sa", "-P", "Hunter2pw", "-Q", "SELECT 1"], ["sqlcmd", "-S", "db", "-U", "sa", "-P", R, "-Q", "SELECT 1"])
         assertRedacted(["bcp", "t", "out", "f", "-S", "db", "-U", "sa", "-P", "Hunter2pw"], ["bcp", "t", "out", "f", "-S", "db", "-U", "sa", "-P", R])
@@ -290,6 +310,9 @@ final class RedactorCoverageTests: XCTestCase {
             ["security", "create-keychain", "-P", "build.keychain"], ["security", "export", "-k", "build.keychain", "-t", "certs", "-o", "/tmp/certs.pem"],
             ["security", "find-generic-password", "-s", "svc", "-w"], ["curl", "-a", "-T", "f", "ftp://h/x"], ["http", "-a", "bob", "https://x"],
             ["ldapsearch", "-x", "-s", "base", "-b", "dc=example,dc=com"], ["ldappasswd", "-x", "-D", "cn=admin", "-W", "-S", "uid=bob"],
+            ["ldapsearch", "-x", "-ssub", "-b", "dc=example,dc=com"], ["ldapsearch", "-x", "-W", "-D", "cn=admin"],
+            ["smbclient", "-L", "nas", "-U", "bob"], ["smbclient", "-L", "nas", "-N"], ["lftp", "-u", "bob", "sftp://files.example.com"],
+            ["usermod", "-aG", "staff", "bob"],
             ["osascript", "-e", "display dialog \"Enter your password\" default answer \"\" with hidden answer"],
         ])
     }

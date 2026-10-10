@@ -35,6 +35,10 @@ public enum ArgvRedactor {
         case unlessPath
         /// Only what follows the first colon (`-u alice:hunter2` → `alice:‹redacted›`).
         case afterColon
+        /// Only what follows the first percent sign (Samba's `-U alice%hunter2`).
+        case afterPercent
+        /// Only what follows the first comma (lftp's `-u alice,hunter2`).
+        case afterComma
         /// A header: redacted only if its name is sensitive.
         case header
         /// openssl pass phrase arguments: `pass:x` is redacted, `env:`/`file:`/`fd:` are kept.
@@ -125,10 +129,21 @@ public enum ArgvRedactor {
         case "openssl":
             return (["-pass": .opensslPass, "-passin": .opensslPass, "-passout": .opensslPass, "-k": .secret, "-K": .secret], [:])
         case "ldappasswd":
-            // The bind password, and the user's old (-a) and new (-s) passwords.
-            return (["-w": .secret, "-a": .secret, "-s": .secret], [:])
-        case "ldapsearch", "ldapmodify", "ldapadd", "ldapdelete", "ldapwhoami":
-            return (["-w": .secret], [:])
+            // The bind password, and the user's old (-a) and new (-s) passwords; getopt also takes
+            // them attached (`-wPW`).
+            let passwords: [String: ValueRule] = ["-w": .secret, "-a": .secret, "-s": .secret]
+            return (passwords, passwords)
+        case "ldapsearch", "ldapmodify", "ldapadd", "ldapdelete", "ldapwhoami", "ldapcompare", "ldapmodrdn", "ldapexop":
+            return (["-w": .secret], ["-w": .secret])
+        case "smbclient", "rpcclient", "smbcacls", "smbget", "smbtree", "net":
+            // Samba: `-U USER%PW`, `-UUSER%PW`, `--user=USER%PW`.
+            return (["-U": .afterPercent, "--user": .afterPercent], ["-U": .afterPercent])
+        case "lftp":
+            // `lftp -u USER,PW HOST`.
+            return (["-u": .afterComma, "--user": .afterComma], [:])
+        case "useradd", "usermod":
+            // The password hash a new or changed account gets.
+            return (["-p": .secret], [:])
         case "rabbitmqctl", "rabbitmq-diagnostics", "rabbitmq-plugins", "rabbitmq-queues", "rabbitmq-upgrade":
             return (["--erlang-cookie": .secret], [:])
         case "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport", "mongoimport":
@@ -702,13 +717,26 @@ public enum ArgvRedactor {
             }
             if batch && !fromStdin { for j in positionals.dropFirst(display ? 1 : 2) { out[j] = .secret } }
         case "rabbitmqctl":
-            // `rabbitmqctl [OPTIONS] add_user USER PW`: the word after the user. The command's own name
-            // (`change_password`) is not a setting whose value follows.
+            // `rabbitmqctl [OPTIONS] add_user [OPTIONS] USER PW`: the argument after the user, options
+            // (`--pre-hashed-password`, `-n NODE`) and `--` anywhere. The command's own name
+            // (`change_password`) and the user are not values of a setting that names a password.
+            let valued: Set<String> = ["-n", "--node", "-t", "--timeout", "--erlang-cookie", "-p", "--vhost"]
             guard let c = words.indices.first(where: { j in
-                !text[j].hasPrefix("-") && !(j > 0 && ["-n", "--node", "-t", "--timeout", "--erlang-cookie"].contains(text[j - 1]))
+                !text[j].hasPrefix("-") && !(j > 0 && valued.contains(text[j - 1]))
             }), ["add_user", "change_password", "authenticate_user"].contains(text[c]) else { break }
             out[words[c]] = .keep
-            if c + 2 < words.count && !text[c + 2].hasPrefix("-") { out[words[c + 2]] = .secret }
+            var arguments: [Int] = []
+            var skip = false, optionsEnded = false
+            for j in words.indices.dropFirst(c + 1) {
+                if skip { skip = false; continue }
+                if !optionsEnded && text[j].hasPrefix("-") && text[j].count > 1 {
+                    if text[j] == "--" { optionsEnded = true } else { skip = valued.contains(text[j]) }
+                    continue
+                }
+                arguments.append(words[j])
+            }
+            if let user = arguments.first { out[user] = .keep }
+            if arguments.count > 1 { out[arguments[1]] = .secret }
         case "mysqladmin":
             for j in words.indices.dropLast() where ["password", "old-password"].contains(text[j].lowercased()) && !text[j + 1].hasPrefix("-") {
                 out[words[j + 1]] = .secret
@@ -2017,9 +2045,10 @@ public enum ArgvRedactor {
             return value.isEmpty ? value : placeholder
         case .unlessPath:
             return looksLikePath(value) || value.isEmpty ? value : placeholder
-        case .afterColon:
-            guard let colon = value.firstIndex(of: ":") else { return value }
-            return String(value[...colon]) + placeholder
+        case .afterColon, .afterPercent, .afterComma:
+            let separator: Character = rule == .afterColon ? ":" : rule == .afterPercent ? "%" : ","
+            guard let at = value.firstIndex(of: separator) else { return value }
+            return String(value[...at]) + placeholder
         case .header:
             return redactWholeHeader(value) ?? redactFree(value, depth: depth)
         case .opensslPass:
