@@ -104,13 +104,23 @@ func makeClient() throws -> IPCClient {
     #if os(macOS)
     let name = args.value("service")
         ?? ProcessInfo.processInfo.environment["WHOREAD_MACH_SERVICE"]
-        ?? (try? String(contentsOfFile: WhoReadPaths.dataDirectory + "/mach-service", encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        ?? announcedServiceName()
         ?? WhoReadPaths.machServiceName
     return TransportClient(transport: XPCClient(machServiceName: name))
     #else
     throw CLIError("no XPC on this platform: pass --socket PATH (whoreadd --dev-socket PATH)")
     #endif
+}
+
+/// The service name the running daemon wrote to its data directory, unless someone other than root
+/// could have written it there: such a name could lead the CLI to another service (macos-4).
+func announcedServiceName() -> String? {
+    do {
+        return try TrustedFile.machServiceName(inDataDirectory: WhoReadPaths.dataDirectory)
+    } catch {
+        note("not using the daemon's service name: \(error); using \(WhoReadPaths.machServiceName)")
+        return nil
+    }
 }
 
 /// `s` as one shell word, so a suggested command can be pasted as is. `~` is quoted too: the shell
@@ -946,7 +956,17 @@ func cmdCatalog(_ c: IPCClient) throws {
     case "export":
         let data = try c.catalog().catalog.encoded() + Data("\n".utf8)
         if let path = args.value("output") ?? args.value("o") {
-            try SafeFile.replace(path, with: data, mode: 0o644)
+            // Like the history export: owner-only (it names the paths the user protects), never through
+            // or over a link or another non-regular file, and given to the user who ran sudo in their
+            // own folder (privacy-4).
+            let writer = try ExportWriter(path: path)
+            do {
+                try writer.write(data)
+                try writer.finish()
+            } catch {
+                writer.abandon()
+                throw error
+            }
             FileHandle.standardError.write(Data("catalog written to \(path)\n".utf8))
         } else {
             FileHandle.standardOutput.write(data)

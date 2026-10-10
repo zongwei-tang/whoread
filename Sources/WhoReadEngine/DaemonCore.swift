@@ -11,6 +11,10 @@ public struct DaemonConfiguration: Sendable {
     public var dataDirectoryOwner: uid_t = geteuid()
     /// Directory with catalog.json / agents.json / benign.json defaults. nil = search.
     public var defaultsDirectory: String?
+    /// When set, the defaults are read only where no one but this user and root can change them, nor
+    /// a directory above them (`DefaultData.locate`, macos-4): root for a daemon running as root. A
+    /// daemon (or `whoread replay`) running as a user reads them as they are.
+    public var defaultsOwner: uid_t? = geteuid() == 0 ? 0 : nil
     public var source: SourceKind = .eslogger
     public var esloggerPath = "/usr/bin/eslogger"
     public var replayPath: String?
@@ -377,10 +381,12 @@ public final class DaemonCore: @unchecked Sendable {
         let now = Date()
 
         try DaemonCore.prepareDataDirectory(config)
-        store = config.inMemoryStore ? InMemoryEventStore() : try SQLiteEventStore(path: config.databasePath)
+        store = config.inMemoryStore ? InMemoryEventStore()
+            : try SQLiteEventStore(path: config.databasePath, directoryOwner: config.dataDirectoryOwner)
 
         let (defaults, dir) = try DefaultData.locate(explicit: config.defaultsDirectory,
-                                                     executablePath: CommandLine.arguments.first.map(Self.absolutePath))
+                                                     executablePath: CommandLine.arguments.first.map(Self.absolutePath),
+                                                     trustedOwner: config.defaultsOwner)
         Log.debug("default data from \(dir.path)")
         defaultCatalog = defaults.catalog
         var data = defaults
