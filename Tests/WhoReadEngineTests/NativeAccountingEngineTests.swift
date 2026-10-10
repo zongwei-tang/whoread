@@ -194,6 +194,19 @@ final class SourceAuthCountsStatusTests: XCTestCase {
         XCTAssertTrue(c.warningLines[2].contains("allowed (kill mode)"), c.warningLines[2])
         XCTAssertTrue(c.mutedLine?.contains("3 system program paths") ?? false)
     }
+
+    func testTheKernelDropLineSaysWhichOfThemAreTheAUTHDropsCountedBelow() {
+        // A dropped AUTH message is a gap in its own type's numbers and in the client's global ones.
+        XCTAssertNil(SourceAuthCounts.kernelDropLine(total: 0, auth: SourceAuthCounts(droppedDenied: 2)))
+        XCTAssertEqual(SourceAuthCounts.kernelDropLine(total: 9, auth: nil),
+                       "  WARNING: 9 events dropped by the kernel before the source saw them")
+        XCTAssertEqual(SourceAuthCounts.kernelDropLine(total: 9, auth: SourceAuthCounts()),
+                       "  WARNING: 9 events dropped by the kernel before the source saw them")
+        let line = SourceAuthCounts.kernelDropLine(total: 9, auth: SourceAuthCounts(droppedDenied: 3, droppedAllowed: 1))
+        XCTAssertEqual(line, "  WARNING: 9 events dropped by the kernel before the source saw them (4 of them AUTH accesses, counted below)")
+        XCTAssertTrue(SourceAuthCounts.kernelDropLine(total: 2, auth: SourceAuthCounts(droppedDenied: 3))?.contains("(2 of them") ?? false,
+                      "never more than the total")
+    }
 }
 
 // MARK: - Event notes

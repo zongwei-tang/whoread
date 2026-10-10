@@ -245,6 +245,15 @@ public struct SourceAuthCounts: Codable, Sendable, Equatable {
             + "(its default mute set): seen, but never asked about or blocked"
     }
 
+    /// The `whoread status` warning for messages the kernel dropped for the source (sequence gaps over
+    /// every event type). The AUTH messages among them are counted again, by outcome, in `warningLines`.
+    public static func kernelDropLine(total: UInt64, auth: SourceAuthCounts?) -> String? {
+        guard total > 0 else { return nil }
+        let ofAuth = min((auth?.droppedDenied ?? 0) &+ (auth?.droppedAllowed ?? 0), total)
+        return "  WARNING: \(total) events dropped by the kernel before the source saw them"
+            + (ofAuth > 0 ? " (\(ofAuth) of them AUTH accesses, counted below)" : "")
+    }
+
     /// The `whoread status` warnings for these counts (none when there is nothing to warn about).
     public var warningLines: [String] {
         var out: [String] = []

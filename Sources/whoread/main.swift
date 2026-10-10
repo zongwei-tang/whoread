@@ -282,7 +282,7 @@ func cmdStatus(_ c: IPCClient) throws {
     if let d = s.sourceDroppedEvents, d > 0 {
         out("  WARNING: \(d) events dropped or merged by the source (analysis backlog full; denials were still enforced)")
     }
-    if s.parser == nil, let k = s.sourceKernelDrops, k > 0 { out("  WARNING: \(k) events dropped by the kernel before the source saw them") }
+    if s.parser == nil, let line = SourceAuthCounts.kernelDropLine(total: s.sourceKernelDrops ?? 0, auth: s.sourceAuth) { out(line) }
     s.sourceAuth?.warningLines.forEach(out)
     if let e = s.rulesLoadError { out("  WARNING: stored rules failed to load (\(DisplayText.escaped(e))); enforcement stays off") }
 }
