@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Copy to ExportOptions.plist and fill in. Distribution outside the App Store (Developer ID).
+     The system extension needs a Developer ID provisioning profile that includes the Endpoint
+     Security entitlement Apple granted you (see docs/DISTRIBUTION.md). The whoread CLI embedded
+     in the app (__BUNDLE_ID_PREFIX__.whoread.cli) has no restricted entitlements: no profile. -->
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>developer-id</string>
+	<key>teamID</key>
+	<string>__TEAM_ID__</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>signingCertificate</key>
+	<string>Developer ID Application</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>__BUNDLE_ID_PREFIX__.whoread</key>
+		<string>__APP_PROFILE_NAME__</string>
+		<key>__BUNDLE_ID_PREFIX__.whoread.extension</key>
+		<string>__EXTENSION_PROFILE_NAME__</string>
+	</dict>
+</dict>
+</plist>

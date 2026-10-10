@@ -1,0 +1,432 @@
+import Foundation
+
+public struct AnalysisOutput: Sendable {
+    public var events: [AnalyzedEvent] = []
+    public var alerts: [AlertUpdate] = []
+    public init(events: [AnalyzedEvent] = [], alerts: [AlertUpdate] = []) {
+        self.events = events
+        self.alerts = alerts
+    }
+}
+
+/// How the rule engine is consulted for an event that already happened.
+public enum RuleContext: Sendable {
+    /// Monitor-only source (eslogger, native NOTIFY without AUTH): deny rules become "would block".
+    case monitorOnly
+    /// NOTIFY event while the native AUTH path is active: the access was allowed at AUTH time, so
+    /// do not re-run enforcement or consume "allow once" exceptions.
+    case afterAuth
+    /// The AUTH callback already decided (e.g. a denial, which produces no NOTIFY).
+    case decided(RuleDecision)
+}
+
+/// Turns source events into classified, attributed events and alerts. Pure logic: no IO.
+///
+/// Pipeline for a file activity:
+///   normalize → classify (prefix trie) → chain (process tree) → attribute → benign? → owner? →
+///   rules (per category) → baseline/anomaly → coalesce alerts
+public final class Analyzer: @unchecked Sendable {
+    public let tree: ProcessTree
+    public let baseline: Baseline
+    public let coalescer: AlertCoalescer
+    public let rules: RuleEngine
+    public let attributor: Attributor
+
+    private let lock = NSLock()
+    /// Serializes classifier swaps (never taken by event analysis).
+    private let replacing = NSLock()
+    private var _classifier: PathClassifier
+    private var _benign: BenignClassifier
+    private var _readdirEnabled = false
+    private var _ignoredPIDs: Set<Int32> = []
+    private var _trustApplePrograms = false
+    private var nextEventID: Int64
+
+    /// Record directory listings (and opens of directories). Off by default.
+    public var readdirEnabled: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _readdirEnabled }
+        set { lock.lock(); _readdirEnabled = newValue; lock.unlock() }
+    }
+
+    /// `Settings.trustApplePrograms`: Apple programs in system locations with no AI agent in their
+    /// chain raise no first-access or unexpected-access alert (ask mode allows them without asking;
+    /// monitor-only mode stays as quiet). Rule alerts, would-block and blocks are unaffected.
+    public var trustApplePrograms: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return _trustApplePrograms }
+        set { lock.lock(); _trustApplePrograms = newValue; lock.unlock() }
+    }
+
+    /// Our own processes (the daemon). Their events are dropped.
+    public var ignoredPIDs: Set<Int32> {
+        get { lock.lock(); defer { lock.unlock() }; return _ignoredPIDs }
+        set { lock.lock(); _ignoredPIDs = newValue; lock.unlock() }
+    }
+
+    public init(
+        classifier: PathClassifier,
+        tree: ProcessTree,
+        attributor: Attributor,
+        benign: BenignClassifier,
+        rules: RuleEngine,
+        baseline: Baseline,
+        coalescer: AlertCoalescer,
+        nextEventID: Int64 = 1
+    ) {
+        self._classifier = classifier
+        self.tree = tree
+        self.attributor = attributor
+        self._benign = benign
+        self.rules = rules
+        self.baseline = baseline
+        self.coalescer = coalescer
+        self.nextEventID = nextEventID
+    }
+
+    public var classifier: PathClassifier {
+        lock.lock(); defer { lock.unlock() }
+        return _classifier
+    }
+
+    /// Swaps the classifier. The rules are recompiled first, without holding any lock event analysis
+    /// or the AUTH path takes, then both swap back to back; concurrent swaps cannot leave the rules
+    /// and the analyzer on different classifiers.
+    public func replace(classifier: PathClassifier, benign: BenignClassifier? = nil) {
+        replacing.lock(); defer { replacing.unlock() }
+        rules.replace(classifier: classifier)
+        lock.lock()
+        _classifier = classifier
+        if let benign { _benign = benign }
+        lock.unlock()
+    }
+
+    private func takeEventID() -> Int64 {
+        lock.lock(); defer { lock.unlock() }
+        let id = nextEventID
+        nextEventID += 1
+        return id
+    }
+
+    // MARK: - Entry point
+
+    public func handle(_ event: SourceEvent, context: RuleContext = .monitorOnly) -> AnalysisOutput {
+        switch event {
+        case .fork(let parent, let child, let time):
+            tree.fork(parent: parent, child: child, at: time)
+            return AnalysisOutput()
+        case .exec(let old, let new, let time):
+            tree.exec(old: old, new: new, at: time)
+            return AnalysisOutput()
+        case .exit(let p, let time):
+            tree.exit(p, at: time)
+            return AnalysisOutput()
+        case .file(let activity):
+            return handleFile(activity, context: context)
+        }
+    }
+
+    /// Ask mode: a benign system service chain (Spotlight, Time Machine…) is never asked.
+    public func isBenignChain(_ chain: [ProcessNode]) -> Bool {
+        lock.lock()
+        let benign = _benign
+        lock.unlock()
+        return benign.classify(chain: chain) != nil
+    }
+
+    /// Operations that carry a source's content (and, for directories, everything below it).
+    static let carryingOperations = OperationSemantics.carryingOperations
+
+    /// Classifies the targets of an activity for the AUTH path (no side effects). Directory listings
+    /// are never blocked, so a `readdir` has no sensitive target here (it is still recorded, when
+    /// listings are enabled, by `handleFile`).
+    public func classify(_ activity: FileActivity) -> [ClassifiedTarget] {
+        if activity.operation == .readdir { return [] }
+        return classifyTargets(activity)
+    }
+
+    /// Operations whose destination receives a whole object from elsewhere: planting a directory (or,
+    /// for `create`, a symlink) at a parent of monitored prefixes changes what is found below it.
+    static let carryingInOperations: Set<FileOperation> = [.rename, .clone, .copyfile]
+
+    /// Classifies the targets of an activity. A path that carries files in or out (the source of a
+    /// move or clone, its destination, a symlink created in place of a directory) is also judged by
+    /// what it can hold; those categories come as a second entry for the same target, `viaAncestor`.
+    func classifyTargets(_ activity: FileActivity) -> [ClassifiedTarget] {
+        let classifier = self.classifier
+        let targets = activity.targets
+        let paths = targets.map { classifier.normalizer.normalize($0.path) }
+        var out: [ClassifiedTarget] = []
+        for (i, t) in targets.enumerated() {
+            let path = paths[i]
+            let direct = classifier.classify(normalized: path, truncated: t.truncated)
+            // The source of a move or clone, a directory a rename lands on (a swap carries its content out),
+            // and a directory a file system is mounted on: that replaces everything below it for whoever
+            // looks there, so it is judged like a directory carried away, though only as a write. Not on a
+            // home or above one: network, auto_home and FileVault homes are mounted there at every login.
+            let carriesOut = t.carriesContent(in: activity.operation)
+                || (activity.operation == .mount && !Analyzer.isHomeOrAbove(path, homes: classifier.normalizer.homeDirectories))
+            // A new directory carries nothing (tools create ~/.config all the time); a new symlink at a
+            // parent of monitored prefixes redirects them (`ln -s /tmp/evil ~/.config`). The type of a
+            // create is known from its stat once it exists; an AUTH_CREATE may not say (nil).
+            let carriesIn = t.role == .destination
+                && (Analyzer.carryingInOperations.contains(activity.operation) || (activity.operation == .create && t.isDirectory == false))
+            guard carriesOut || carriesIn else {
+                out.append(ClassifiedTarget(target: t, path: path,
+                                            categories: direct.map { [TargetCategory(id: $0.categoryID, severity: $0.severity)] } ?? [],
+                                            viaAncestor: false))
+                continue
+            }
+            // The other end of the move. A move or clone puts the source's object at the destination,
+            // so the destination has the source's type.
+            let otherRole: TargetRole = carriesOut ? .destination : .source
+            let other = targets.indices.first { $0 != i && targets[$0].role == otherRole }
+            var isDirectory = t.isDirectory
+            if isDirectory == nil, carriesIn, activity.operation != .create, let other { isDirectory = targets[other].isDirectory }
+            // A directory of the category may hold its most sensitive files (moving a browser profile
+            // carries Cookies): judge it by the worst file it can contain. When the source does not say,
+            // a path a specific file pattern named (`.env.tmp`, `History`) is taken as a file; anything
+            // else may be a directory.
+            let mayBeDirectory = activity.operation != .create && (isDirectory ?? direct.map(classifier.mayContainFiles) ?? true)
+            /// A pattern-only category (a project) leaves its prefixes only when the directory does: a
+            /// refactor inside the project keeps base severity, `mv ~/code/app/certs /tmp/c` (or into an
+            /// excluded `node_modules`) is judged by the keys it can carry.
+            /// The files land below the other end, so a path there is judged, not the folder itself:
+            /// exclusions name folders (`**/node_modules/**`) and match only below them, so a folder
+            /// renamed to `app/node_modules` is covered while every key it brings is not.
+            func leavesCategory(_ id: String) -> Bool {
+                guard classifier.spec(id)?.matchOnlyPatterns == true else { return true }
+                guard let other else { return true }
+                return !classifier.containingCategories(normalized: paths[other] + "/x").contains { $0.id == id }
+            }
+
+            var categories: [TargetCategory] = []
+            if let c = direct {
+                var severity = c.severity
+                if carriesOut && mayBeDirectory, let m = classifier.maxSeverity(c.categoryID), m > severity, leavesCategory(c.categoryID) {
+                    severity = m
+                }
+                categories.append(TargetCategory(id: c.categoryID, severity: severity))
+            }
+            var carried: [TargetCategory] = []
+            func carry(_ c: TargetCategory) {
+                guard c.id != direct?.categoryID else { return }
+                if let k = carried.firstIndex(where: { $0.id == c.id }) {
+                    if c.severity > carried[k].severity { carried[k].severity = c.severity }
+                } else {
+                    carried.append(c)
+                }
+            }
+            // Every prefix inside it moves with it, wherever it is (a parent of ~/.config, a home on an
+            // external volume, a cloud folder holding a project root or a link target).
+            for id in classifier.categoriesInside(normalized: path) {
+                guard let spec = classifier.spec(id) else { continue }
+                carry(TargetCategory(id: id, severity: classifier.maxSeverity(id) ?? spec.severity))
+            }
+            // A folder inside a pattern-only category (a project): it carries the .env/.pem inside.
+            if mayBeDirectory {
+                for c in classifier.containingCategories(normalized: path) {
+                    var c = c
+                    if carriesOut, let m = classifier.maxSeverity(c.id), m > c.severity, leavesCategory(c.id) { c.severity = m }
+                    carry(c)
+                }
+            }
+            if !categories.isEmpty || carried.isEmpty {
+                out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false))
+            }
+            if !carried.isEmpty {
+                // Most severe first (a question names the first of the most severe), else as found.
+                let sorted = carried.enumerated().sorted { a, b in
+                    a.element.severity != b.element.severity ? a.element.severity > b.element.severity : a.offset < b.offset
+                }.map(\.element)
+                out.append(ClassifiedTarget(target: t, path: path, categories: sorted, viaAncestor: true))
+            }
+        }
+        return out
+    }
+
+    /// A normalized path that is a home, or a directory containing one (the root included).
+    static func isHomeOrAbove(_ path: String, homes: [String]) -> Bool {
+        let key = PathNormalizer.fold(PathClassifier.stripTrailingSlash(path))
+        if key == "/" { return true }
+        return homes.contains { h in
+            let home = PathNormalizer.fold(PathClassifier.stripTrailingSlash(h))
+            return home == key || home.hasPrefix(key + "/")
+        }
+    }
+
+    public struct ClassifiedTarget: Sendable {
+        public var target: FileTarget
+        public var path: String
+        public var categories: [TargetCategory]
+        public var viaAncestor: Bool
+        public var isSensitive: Bool { !categories.isEmpty }
+        public var evaluationTarget: EvaluationTarget { EvaluationTarget(path: path, access: target.access, categories: categories) }
+    }
+
+    func handleFile(_ activity: FileActivity, context: RuleContext) -> AnalysisOutput {
+        lock.lock()
+        let readdirOn = _readdirEnabled
+        let ignored = _ignoredPIDs.contains(activity.process.pid)
+        let benign = _benign
+        let trustApple = _trustApplePrograms
+        lock.unlock()
+        if activity.operation == .readdir && !readdirOn { return AnalysisOutput() }
+        if ignored { return AnalysisOutput() }
+        let classified = classifyTargets(activity)
+        guard classified.contains(where: \.isSensitive) else { return AnalysisOutput() }
+
+        let time = activity.time
+        let chain = tree.chain(for: activity.process, at: time)
+        let process = chain.first?.image ?? activity.process
+        let responsible = attributor.attribute(chain: chain)
+        let agentID = chain.nearestAgent
+        let benignID = benign.classify(chain: chain)
+        // Offers "allow all Apple programs" on the alert (and is what that setting covers).
+        let appleProgram = AskPolicy.isTrustableAppleProgram(process, chain: chain)
+        let classifier = self.classifier
+        // Stored chains are capped (nearest 64 links); rules, attribution and agentID use the full chain.
+        let chainLinks = Array(chain.prefix(64).reversed()).map { ChainLink(node: $0) }
+
+        // One event per category; two paths of the same operation in one category merge.
+        var groups: [(category: TargetCategory, targets: [ClassifiedTarget])] = []
+        for t in classified where t.isSensitive {
+            for c in t.categories {
+                if let i = groups.firstIndex(where: { $0.category.id == c.id }) {
+                    groups[i].targets.append(t)
+                    if c.severity > groups[i].category.severity { groups[i].category.severity = c.severity }
+                } else {
+                    groups.append((c, [t]))
+                }
+            }
+        }
+
+        var output = AnalysisOutput()
+        let learning = baseline.isLearning(at: time)
+        // Rules are evaluated per category: an allow for one category must not silence another
+        // category touched by the same operation (copying a key to a USB stick).
+        func evaluationTargets(_ group: (category: TargetCategory, targets: [ClassifiedTarget])) -> [EvaluationTarget] {
+            group.targets.map { EvaluationTarget(path: $0.path, access: $0.target.access, categories: [group.category]) }
+        }
+        // A denied syscall is a denial for every category it touches, but only a category a rule
+        // denies gets the rule and the blocked alert: "allow once" on the other one (the USB stick
+        // the key was copied to) would add an exception for the wrong category. If no category is
+        // denied any more (rules changed since the AUTH decision), all keep the AUTH decision.
+        var ownDenials: [RuleDecision]?
+        if case .decided(let d) = context, d.verdict == .deny, groups.count > 1 {
+            if d.reason == .askUser {
+                // Ask mode: no rule denied it. The asked category gets the ask alert ("allow" on it
+                // answers that question); the others were only denied along with it.
+                if let asked = d.askKey?.categoryID, groups.contains(where: { $0.category.id == asked }) {
+                    ownDenials = groups.map {
+                        $0.category.id == asked ? d : RuleDecision(verdict: .deny, reason: .askUser, suppressAlert: true)
+                    }
+                }
+            } else {
+                let own = groups.map {
+                    rules.evaluate(process: process, chain: chain, targets: evaluationTargets($0), enforcementActive: true,
+                                   now: time, consumeExceptions: false)
+                }
+                if own.contains(where: { $0.verdict == .deny }) { ownDenials = own }
+            }
+        }
+        for (gi, group) in groups.enumerated() {
+            let targets = evaluationTargets(group)
+            var decision: RuleDecision
+            var eventDecision: EventDecision
+            switch context {
+            case .decided(let d):
+                if let own = ownDenials?[gi] {
+                    decision = own.verdict == .deny ? own : RuleDecision(verdict: .deny, reason: d.reason, suppressAlert: true)
+                } else {
+                    decision = d
+                }
+                // Asked and not answered in time (or answered "deny"): denied, but by no rule.
+                if decision.reason == .askUser { decision.ruleID = nil }
+                eventDecision = d.verdict == .deny ? .denied : .allowed
+            case .monitorOnly:
+                // A modified close reports a write that an earlier open already decided: it must not use up
+                // an "allow once" meant for the next open.
+                decision = rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: false, now: time,
+                                          consumeExceptions: activity.operation != .close)
+                eventDecision = decision.wouldDeny ? .wouldDeny : .observed
+            case .afterAuth:
+                var d = rules.evaluate(process: process, chain: chain, targets: targets, enforcementActive: true,
+                                       now: time, consumeExceptions: false)
+                if d.verdict == .deny {
+                    // It happened, so AUTH allowed it (allow once, a kill switch, cache lag, or a close
+                    // on an earlier fd). Not a block, but the matching rule still deserves an alert.
+                    d = RuleDecision(verdict: .allow, reason: d.reason, ruleID: d.ruleID, forceAlert: true)
+                }
+                decision = d
+                eventDecision = d.wouldDeny ? .wouldDeny : .allowed
+            }
+            if activity.operation == .readdir && (decision.reason == .explicitDeny || decision.reason == .wouldDeny) {
+                // Listings are never blocked (Analyzer.classify keeps them away from AUTH), so a deny rule
+                // neither "would block" one nor turns it into a rule alert.
+                decision = RuleDecision(verdict: .allow, reason: .defaultAllow)
+                if case .monitorOnly = context { eventDecision = .observed } else { eventDecision = .allowed }
+            }
+
+            let primary = group.targets[0]
+            let access = group.targets.reduce(AccessSet()) { $0.union($1.target.access) }
+            let other = classified.first { $0.path != primary.path }?.path
+            let isOwner = classifier.isOwner(process, of: group.category.id)
+            var event = AnalyzedEvent(
+                id: takeEventID(), time: time, operation: activity.operation, access: access,
+                path: primary.path, secondaryPath: other, viaAncestor: primary.viaAncestor,
+                categoryID: group.category.id, severity: group.category.severity, process: ArgvRedactor.redact(process),
+                chain: chainLinks, responsible: responsible, agentID: agentID, isOwner: isOwner,
+                benignServiceID: benignID, decision: eventDecision, ruleID: decision.ruleID)
+
+            let keys = access.kinds.map { BaselineKey(responsibleKey: responsible.key, categoryID: group.category.id, access: $0) }
+            let firstTime = !learning && benignID == nil && keys.contains { !baseline.contains($0) }
+            let kind = alertKind(for: event, decision: decision, learning: learning, trustedApple: trustApple && appleProgram)
+            if benignID == nil && eventDecision != .denied {
+                for k in keys { baseline.record(k, at: time, learning: learning) }
+            }
+            // "Allow all Apple programs" is offered where it would have decided: questions and
+            // first/unexpected accesses (it never overrides a rule).
+            let offersTrust = appleProgram && (kind == .ask || kind == .firstAccess || kind == .criticalNonOwner)
+            if benignID == nil, let update = coalescer.ingest(event, kind: kind, firstTime: firstTime, appleProgram: offersTrust) {
+                event.alertID = update.alert.id
+                output.alerts.append(update)
+            }
+            output.events.append(event)
+        }
+        return output
+    }
+
+    /// The anomaly policy. Evaluated before the event is recorded in the baseline. There is no
+    /// learning period by default (`learning` is false unless `learningDays` was set): a new
+    /// (app, category, access) alerts at once. `trustedApple`: "trust Apple programs" covers it.
+    func alertKind(for event: AnalyzedEvent, decision: RuleDecision, learning: Bool, trustedApple: Bool = false) -> AlertKind? {
+        if event.isBenign { return nil }
+        switch event.decision {
+        // A category that was only denied along with another one: that one's alert covers it.
+        case .denied:
+            if decision.suppressAlert { return nil }
+            return decision.reason == .askUser ? .ask : .blocked
+        case .wouldDeny: return .wouldBlock
+        default: break
+        }
+        if decision.suppressAlert { return nil }
+        if decision.forceAlert { return .ruleAlert }
+        // As in ask mode, an owner is only expected with no AI agent in its chain (an agent can drive
+        // ssh or git to read a key).
+        if event.isOwner && event.agentID == nil { return nil }
+        if trustedApple { return nil }
+        let keys = event.access.kinds.map {
+            BaselineKey(responsibleKey: event.responsible.key, categoryID: event.categoryID, access: $0)
+        }
+        if keys.isEmpty { return nil }
+        // Approvals are keyed by the responsible app only. An AI agent running a program charged to an
+        // app (a tool inside its bundle, such as Xcode's git) is not what the user approved for that app.
+        let agentDriven = event.agentID != nil && event.responsible.kind != .agent
+        if event.severity == .critical && (agentDriven || !keys.allSatisfy(baseline.isApproved)) {
+            return .criticalNonOwner
+        }
+        if !learning && keys.contains(where: { !baseline.contains($0) }) {
+            return .firstAccess
+        }
+        return nil
+    }
+}

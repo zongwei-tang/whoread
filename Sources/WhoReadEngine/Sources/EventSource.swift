@@ -1,0 +1,93 @@
+import Foundation
+import WhoReadCore
+import WhoReadIPC
+
+/// Where events come from: eslogger (monitor only), native Endpoint Security (monitor + AUTH),
+/// or a JSONL replay file (tests, demos).
+public protocol EventSource: AnyObject, Sendable {
+    var kind: SourceKind { get }
+    var canEnforce: Bool { get }
+    var state: SourceState { get }
+    /// Parser statistics, when the source parses eslogger JSON.
+    var parserStats: EsloggerParser.Stats? { get }
+    /// Events discarded before analysis because the source's backlog was full (native NOTIFY
+    /// backpressure), plus denials not recorded on their own (merged into an identical queued one, or
+    /// past the denial backlog's limit). A denial is still denied.
+    var droppedEvents: UInt64 { get }
+    /// Messages the kernel dropped for the source's ES clients (global_seq_num gaps), when known.
+    var kernelDroppedEvents: UInt64? { get }
+    func start(sink: EventSink) throws
+    func stop()
+    /// Monitored prefixes (+ literal ancestors) changed. eslogger: rebuild the prefilter.
+    /// Native: re-mute target paths.
+    func updateMonitoring(prefixes: [String], ancestors: [String], readdir: Bool)
+    /// Enforcement turned on/off: native source subscribes / unsubscribes AUTH events.
+    func enforcementChanged(active: Bool)
+    /// Rules, catalog or enforcement changed: the native source clears the ES result cache.
+    func policyChanged()
+}
+
+extension EventSource {
+    public var parserStats: EsloggerParser.Stats? { nil }
+    public var droppedEvents: UInt64 { 0 }
+    public var kernelDroppedEvents: UInt64? { parserStats?.droppedByKernel }
+    public func enforcementChanged(active: Bool) {}
+    public func policyChanged() {}
+}
+
+public struct SourceState: Sendable, Codable, Equatable {
+    public var running: Bool
+    public var error: String?
+    public var hint: String?
+    public var finished: Bool
+    /// Native source: what the kernel does with an AUTH message the file client does not answer in
+    /// time ("fail-closed": denied; "kill": the client is killed and the access allowed, the only mode
+    /// before macOS 27; "fail-open"; "unknown"). nil while no file client exists, and for other sources.
+    public var deadlineMissMode: String?
+
+    public init(running: Bool = false, error: String? = nil, hint: String? = nil, finished: Bool = false,
+                deadlineMissMode: String? = nil) {
+        self.running = running
+        self.error = error
+        self.hint = hint
+        self.finished = finished
+        self.deadlineMissMode = deadlineMissMode
+    }
+}
+
+/// Receives events from a source, in order.
+public protocol EventSink: AnyObject, Sendable {
+    func receive(_ event: SourceEvent, context: RuleContext)
+    func sourceStateChanged(_ state: SourceState)
+}
+
+/// Synchronous, in-memory decision for AUTH events (native source only). `decide`, `recordResponse`
+/// and `askRequest` run on the ES callback thread: no IO, logging, XPC or waiting.
+public protocol AuthDecider: AnyObject, Sendable {
+    func decide(_ activity: FileActivity) -> RuleDecision
+    /// Latency accounting for every AUTH response that was answered at once (held asks excluded).
+    /// Statistics only, misses included: it never switches enforcement off.
+    func recordResponse(micros: UInt64, missedDeadline: Bool)
+    /// Ask mode: the question for a `.ask` decision (display data, key). nil = deny at once.
+    func askRequest(for activity: FileActivity, decision: RuleDecision) -> AskRequest?
+    /// Ask mode: where held accesses wait for the answer.
+    var askBroker: AskBroker? { get }
+}
+
+extension AuthDecider {
+    public func askRequest(for activity: FileActivity, decision: RuleDecision) -> AskRequest? { nil }
+    public var askBroker: AskBroker? { nil }
+}
+
+/// Thread-safe box for source state.
+final class StateBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = SourceState()
+    func get() -> SourceState { lock.lock(); defer { lock.unlock() }; return value }
+    func set(_ v: SourceState) { lock.lock(); value = v; lock.unlock() }
+    func update(_ f: (inout SourceState) -> Void) -> SourceState {
+        lock.lock(); defer { lock.unlock() }
+        f(&value)
+        return value
+    }
+}

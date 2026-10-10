@@ -1,0 +1,2703 @@
+{
+  "version": 1,
+  "categories": [
+    {
+      "id": "ssh",
+      "name": {
+        "en": "SSH keys",
+        "zh-Hans": "SSH 密钥"
+      },
+      "group": "ssh",
+      "severity": "critical",
+      "description": {
+        "en": "Private keys are critical; config, known_hosts and public keys are medium.",
+        "zh-Hans": "私钥为 critical；config、known_hosts 和公钥为 medium。"
+      },
+      "paths": [
+        "~/.ssh/"
+      ],
+      "patterns": [
+        {
+          "glob": "*.pub",
+          "severity": "medium"
+        },
+        {
+          "glob": "config",
+          "severity": "medium"
+        },
+        {
+          "glob": "config.d/**",
+          "severity": "medium"
+        },
+        {
+          "glob": "known_hosts*",
+          "severity": "medium"
+        },
+        {
+          "glob": "authorized_keys*",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "OpenSSH (Apple)",
+          "executables": [
+            "/System/**/ssh",
+            "/System/**/ssh-agent",
+            "/System/**/ssh-add",
+            "/System/**/ssh-keygen",
+            "/System/**/ssh-keyscan",
+            "/System/**/scp",
+            "/System/**/sftp",
+            "/System/**/sshd",
+            "/System/**/sshd-session",
+            "/System/**/ssh-keysign",
+            "/System/**/ssh-sk-helper",
+            "/System/**/ssh-pkcs11-helper",
+            "/usr/bin/ssh",
+            "/usr/bin/ssh-agent",
+            "/usr/bin/ssh-add",
+            "/usr/bin/ssh-keygen",
+            "/usr/bin/ssh-keyscan",
+            "/usr/bin/scp",
+            "/usr/bin/sftp",
+            "/usr/bin/sshd",
+            "/usr/bin/sshd-session",
+            "/usr/bin/ssh-keysign",
+            "/usr/bin/ssh-sk-helper",
+            "/usr/bin/ssh-pkcs11-helper",
+            "/usr/sbin/ssh",
+            "/usr/sbin/ssh-agent",
+            "/usr/sbin/ssh-add",
+            "/usr/sbin/ssh-keygen",
+            "/usr/sbin/ssh-keyscan",
+            "/usr/sbin/scp",
+            "/usr/sbin/sftp",
+            "/usr/sbin/sshd",
+            "/usr/sbin/sshd-session",
+            "/usr/sbin/ssh-keysign",
+            "/usr/sbin/ssh-sk-helper",
+            "/usr/sbin/ssh-pkcs11-helper",
+            "/usr/libexec/**/ssh",
+            "/usr/libexec/**/ssh-agent",
+            "/usr/libexec/**/ssh-add",
+            "/usr/libexec/**/ssh-keygen",
+            "/usr/libexec/**/ssh-keyscan",
+            "/usr/libexec/**/scp",
+            "/usr/libexec/**/sftp",
+            "/usr/libexec/**/sshd",
+            "/usr/libexec/**/sshd-session",
+            "/usr/libexec/**/ssh-keysign",
+            "/usr/libexec/**/ssh-sk-helper",
+            "/usr/libexec/**/ssh-pkcs11-helper",
+            "/bin/ssh",
+            "/bin/ssh-agent",
+            "/bin/ssh-add",
+            "/bin/ssh-keygen",
+            "/bin/ssh-keyscan",
+            "/bin/scp",
+            "/bin/sftp",
+            "/bin/sshd",
+            "/bin/sshd-session",
+            "/bin/ssh-keysign",
+            "/bin/ssh-sk-helper",
+            "/bin/ssh-pkcs11-helper",
+            "/sbin/ssh",
+            "/sbin/ssh-agent",
+            "/sbin/ssh-add",
+            "/sbin/ssh-keygen",
+            "/sbin/ssh-keyscan",
+            "/sbin/scp",
+            "/sbin/sftp",
+            "/sbin/sshd",
+            "/sbin/sshd-session",
+            "/sbin/ssh-keysign",
+            "/sbin/ssh-sk-helper",
+            "/sbin/ssh-pkcs11-helper",
+            "/Library/Apple/**/ssh",
+            "/Library/Apple/**/ssh-agent",
+            "/Library/Apple/**/ssh-add",
+            "/Library/Apple/**/ssh-keygen",
+            "/Library/Apple/**/ssh-keyscan",
+            "/Library/Apple/**/scp",
+            "/Library/Apple/**/sftp",
+            "/Library/Apple/**/sshd",
+            "/Library/Apple/**/sshd-session",
+            "/Library/Apple/**/ssh-keysign",
+            "/Library/Apple/**/ssh-sk-helper",
+            "/Library/Apple/**/ssh-pkcs11-helper"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "OpenSSH (Homebrew)",
+          "executables": [
+            "/opt/homebrew/Cellar/openssh/*/bin/ssh",
+            "/opt/homebrew/Cellar/openssh/*/bin/ssh-agent",
+            "/opt/homebrew/Cellar/openssh/*/bin/ssh-add",
+            "/opt/homebrew/Cellar/openssh/*/bin/ssh-keygen",
+            "/opt/homebrew/Cellar/openssh/*/bin/scp",
+            "/opt/homebrew/Cellar/openssh/*/bin/sftp",
+            "/usr/local/Cellar/openssh/*/bin/ssh",
+            "/usr/local/Cellar/openssh/*/bin/ssh-agent",
+            "/usr/local/Cellar/openssh/*/bin/ssh-add",
+            "/usr/local/Cellar/openssh/*/bin/ssh-keygen",
+            "/usr/local/Cellar/openssh/*/bin/scp",
+            "/usr/local/Cellar/openssh/*/bin/sftp",
+            "/opt/homebrew/Cellar/openssh/*/libexec/ssh-sk-helper",
+            "/opt/homebrew/Cellar/openssh/*/libexec/ssh-pkcs11-helper",
+            "/opt/homebrew/Cellar/openssh/*/libexec/ssh-keysign",
+            "/usr/local/Cellar/openssh/*/libexec/ssh-sk-helper",
+            "/usr/local/Cellar/openssh/*/libexec/ssh-pkcs11-helper",
+            "/usr/local/Cellar/openssh/*/libexec/ssh-keysign"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "aws",
+      "name": {
+        "en": "AWS credentials",
+        "zh-Hans": "AWS 凭证"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.aws/"
+      ],
+      "owners": [
+        {
+          "label": "AWS CLI v2 (installer)",
+          "executables": [
+            "/usr/local/aws-cli/aws",
+            "/usr/local/aws-cli/aws_completer"
+          ]
+        },
+        {
+          "label": "AWS CLI (Homebrew / pip / pipx)",
+          "executables": [
+            "/opt/homebrew/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/usr/local/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/opt/homebrew/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/usr/local/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/opt/homebrew/Cellar/python@*/*/bin/python3*",
+            "/usr/local/Cellar/python@*/*/bin/python3*",
+            "/Library/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/Library/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/*/bin/python3*",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/*/bin/python3*",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Users/*/.pyenv/versions/*/bin/python3*",
+            "/Users/*/.local/share/uv/python/*/bin/python3*"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/bin/aws",
+            "/usr/local/bin/aws",
+            "/Users/*/.local/bin/aws",
+            "/opt/homebrew/Cellar/awscli/*/libexec/bin/aws",
+            "/usr/local/Cellar/awscli/*/libexec/bin/aws",
+            "/Users/*/Library/Python/*/bin/aws",
+            "/Users/*/.local/pipx/venvs/awscli/bin/aws"
+          ]
+        },
+        {
+          "label": "Terraform / OpenTofu",
+          "executables": [
+            "/opt/homebrew/Cellar/terraform/*/bin/terraform",
+            "/usr/local/Cellar/terraform/*/bin/terraform",
+            "/opt/homebrew/Cellar/opentofu/*/bin/tofu",
+            "/usr/local/Cellar/opentofu/*/bin/tofu",
+            "/usr/local/bin/terraform"
+          ]
+        },
+        {
+          "label": "aws-vault / granted",
+          "executables": [
+            "/opt/homebrew/Caskroom/aws-vault/*/aws-vault",
+            "/usr/local/Caskroom/aws-vault/*/aws-vault",
+            "/opt/homebrew/Cellar/aws-vault/*/bin/aws-vault",
+            "/usr/local/Cellar/aws-vault/*/bin/aws-vault",
+            "/opt/homebrew/Cellar/granted/*/bin/granted",
+            "/opt/homebrew/Cellar/granted/*/bin/assumego",
+            "/usr/local/Cellar/granted/*/bin/granted",
+            "/usr/local/Cellar/granted/*/bin/assumego"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gcloud",
+      "name": {
+        "en": "Google Cloud credentials",
+        "zh-Hans": "Google Cloud 凭证"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.config/gcloud/"
+      ],
+      "owners": [
+        {
+          "label": "Google Cloud SDK",
+          "executables": [
+            "/opt/homebrew/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/usr/local/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/opt/homebrew/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/usr/local/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/opt/homebrew/Cellar/python@*/*/bin/python3*",
+            "/usr/local/Cellar/python@*/*/bin/python3*",
+            "/Library/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/Library/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/*/bin/python3*",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/*/bin/python3*",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Users/*/.pyenv/versions/*/bin/python3*",
+            "/Users/*/.local/share/uv/python/*/bin/python3*",
+            "/opt/homebrew/Caskroom/*/*/google-cloud-sdk/platform/bundledpythonunix/bin/python3*",
+            "/usr/local/Caskroom/*/*/google-cloud-sdk/platform/bundledpythonunix/bin/python3*",
+            "/Users/*/google-cloud-sdk/platform/bundledpythonunix/bin/python3*"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/Caskroom/*/*/google-cloud-sdk/lib/gcloud.py",
+            "/opt/homebrew/Caskroom/*/*/google-cloud-sdk/bin/bootstrapping/*.py",
+            "/opt/homebrew/Caskroom/*/*/google-cloud-sdk/platform/gsutil/gsutil",
+            "/usr/local/Caskroom/*/*/google-cloud-sdk/lib/gcloud.py",
+            "/usr/local/Caskroom/*/*/google-cloud-sdk/bin/bootstrapping/*.py",
+            "/usr/local/Caskroom/*/*/google-cloud-sdk/platform/gsutil/gsutil",
+            "/opt/homebrew/share/google-cloud-sdk/lib/gcloud.py",
+            "/opt/homebrew/share/google-cloud-sdk/bin/bootstrapping/*.py",
+            "/opt/homebrew/share/google-cloud-sdk/platform/gsutil/gsutil",
+            "/usr/local/share/google-cloud-sdk/lib/gcloud.py",
+            "/usr/local/share/google-cloud-sdk/bin/bootstrapping/*.py",
+            "/usr/local/share/google-cloud-sdk/platform/gsutil/gsutil",
+            "/Users/*/google-cloud-sdk/lib/gcloud.py",
+            "/Users/*/google-cloud-sdk/bin/bootstrapping/*.py",
+            "/Users/*/google-cloud-sdk/platform/gsutil/gsutil"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "azure",
+      "name": {
+        "en": "Azure credentials",
+        "zh-Hans": "Azure 凭证"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.azure/"
+      ],
+      "owners": [
+        {
+          "label": "Azure CLI",
+          "executables": [
+            "/opt/homebrew/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/usr/local/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/opt/homebrew/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/usr/local/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/opt/homebrew/Cellar/python@*/*/bin/python3*",
+            "/usr/local/Cellar/python@*/*/bin/python3*",
+            "/Library/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/Library/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/*/bin/python3*",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/*/bin/python3*",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Users/*/.pyenv/versions/*/bin/python3*",
+            "/Users/*/.local/share/uv/python/*/bin/python3*"
+          ],
+          "argvGlobs": [
+            "azure.cli",
+            "/opt/homebrew/Cellar/azure-cli/*/libexec/lib/python*/site-packages/azure/cli/__main__.py",
+            "/usr/local/Cellar/azure-cli/*/libexec/lib/python*/site-packages/azure/cli/__main__.py"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "kube",
+      "name": {
+        "en": "Kubernetes config",
+        "zh-Hans": "Kubernetes 配置"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.kube/"
+      ],
+      "owners": [
+        {
+          "label": "kubectl & friends",
+          "executables": [
+            "/opt/homebrew/Cellar/kubernetes-cli/*/bin/kubectl",
+            "/usr/local/Cellar/kubernetes-cli/*/bin/kubectl",
+            "/opt/homebrew/Cellar/k9s/*/bin/k9s",
+            "/usr/local/Cellar/k9s/*/bin/k9s",
+            "/opt/homebrew/Cellar/helm/*/bin/helm",
+            "/usr/local/Cellar/helm/*/bin/helm",
+            "/opt/homebrew/Cellar/kubectx/*/bin/kubectx",
+            "/opt/homebrew/Cellar/kubectx/*/bin/kubens",
+            "/usr/local/Cellar/kubectx/*/bin/kubectx",
+            "/usr/local/Cellar/kubectx/*/bin/kubens",
+            "/opt/homebrew/Cellar/kind/*/bin/kind",
+            "/usr/local/Cellar/kind/*/bin/kind",
+            "/opt/homebrew/Cellar/minikube/*/bin/minikube",
+            "/usr/local/Cellar/minikube/*/bin/minikube",
+            "/opt/homebrew/Cellar/kustomize/*/bin/kustomize",
+            "/usr/local/Cellar/kustomize/*/bin/kustomize",
+            "/usr/local/bin/kubectl"
+          ]
+        },
+        {
+          "label": "Docker Desktop",
+          "bundles": [
+            "/Applications/Docker.app"
+          ]
+        },
+        {
+          "label": "OrbStack",
+          "bundles": [
+            "/Applications/OrbStack.app"
+          ]
+        },
+        {
+          "label": "Lens",
+          "bundles": [
+            "/Applications/Lens.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "docker",
+      "name": {
+        "en": "Docker credentials",
+        "zh-Hans": "Docker 凭证"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.docker/config.json"
+      ],
+      "owners": [
+        {
+          "label": "docker CLI (Homebrew)",
+          "executables": [
+            "/opt/homebrew/Cellar/docker/*/bin/docker",
+            "/usr/local/Cellar/docker/*/bin/docker",
+            "/opt/homebrew/Cellar/docker-compose/*/bin/docker-compose",
+            "/usr/local/Cellar/docker-compose/*/bin/docker-compose",
+            "/opt/homebrew/Cellar/docker-credential-helper/*/bin/docker-credential-osxkeychain",
+            "/usr/local/Cellar/docker-credential-helper/*/bin/docker-credential-osxkeychain",
+            "/opt/homebrew/Cellar/colima/*/bin/colima",
+            "/usr/local/Cellar/colima/*/bin/colima",
+            "/opt/homebrew/Cellar/lima/*/bin/limactl",
+            "/usr/local/Cellar/lima/*/bin/limactl"
+          ]
+        },
+        {
+          "label": "Docker Desktop",
+          "bundles": [
+            "/Applications/Docker.app"
+          ]
+        },
+        {
+          "label": "OrbStack",
+          "bundles": [
+            "/Applications/OrbStack.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "npm",
+      "name": {
+        "en": "npm token",
+        "zh-Hans": "npm 令牌"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.npmrc"
+      ],
+      "owners": [
+        {
+          "label": "npm / npx",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js",
+            "/opt/homebrew/lib/node_modules/npm/bin/npx-cli.js",
+            "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+            "/usr/local/lib/node_modules/npm/bin/npx-cli.js",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/npm/bin/npm-cli.js",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/npm/bin/npx-cli.js",
+            "/Users/*/.npm-global/lib/node_modules/npm/bin/npm-cli.js",
+            "/Users/*/.npm-global/lib/node_modules/npm/bin/npx-cli.js",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/npm/bin/npm-cli.js",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/npm/bin/npx-cli.js",
+            "/opt/homebrew/bin/npm",
+            "/opt/homebrew/bin/npx",
+            "/usr/local/bin/npm",
+            "/usr/local/bin/npx",
+            "/Users/*/.nvm/versions/node/*/bin/npm",
+            "/Users/*/.nvm/versions/node/*/bin/npx",
+            "/Users/*/.npm-global/bin/npm",
+            "/Users/*/.npm-global/bin/npx",
+            "/Users/*/.volta/bin/npm",
+            "/Users/*/.volta/bin/npx",
+            "/Users/*/.bun/bin/npm",
+            "/Users/*/.bun/bin/npx"
+          ]
+        },
+        {
+          "label": "npm (bundled with Homebrew node)",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/Cellar/node*/*/lib/node_modules/npm/bin/npm-cli.js",
+            "/opt/homebrew/Cellar/node*/*/lib/node_modules/npm/bin/npx-cli.js",
+            "/usr/local/Cellar/node*/*/lib/node_modules/npm/bin/npm-cli.js",
+            "/usr/local/Cellar/node*/*/lib/node_modules/npm/bin/npx-cli.js"
+          ]
+        },
+        {
+          "label": "yarn",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/lib/node_modules/yarn/bin/yarn.js",
+            "/usr/local/lib/node_modules/yarn/bin/yarn.js",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/yarn/bin/yarn.js",
+            "/Users/*/.npm-global/lib/node_modules/yarn/bin/yarn.js",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/yarn/bin/yarn.js",
+            "/opt/homebrew/bin/yarn",
+            "/usr/local/bin/yarn",
+            "/Users/*/.nvm/versions/node/*/bin/yarn",
+            "/Users/*/.npm-global/bin/yarn",
+            "/Users/*/.volta/bin/yarn",
+            "/Users/*/.bun/bin/yarn"
+          ]
+        },
+        {
+          "label": "yarn (Homebrew)",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/Cellar/yarn/*/libexec/bin/yarn.js",
+            "/usr/local/Cellar/yarn/*/libexec/bin/yarn.js"
+          ]
+        },
+        {
+          "label": "pnpm",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/lib/node_modules/pnpm/bin/pnpm.cjs",
+            "/usr/local/lib/node_modules/pnpm/bin/pnpm.cjs",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/pnpm/bin/pnpm.cjs",
+            "/Users/*/.npm-global/lib/node_modules/pnpm/bin/pnpm.cjs",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/pnpm/bin/pnpm.cjs",
+            "/opt/homebrew/bin/pnpm",
+            "/usr/local/bin/pnpm",
+            "/Users/*/.nvm/versions/node/*/bin/pnpm",
+            "/Users/*/.npm-global/bin/pnpm",
+            "/Users/*/.volta/bin/pnpm",
+            "/Users/*/.bun/bin/pnpm"
+          ]
+        },
+        {
+          "label": "pnpm (Homebrew / standalone)",
+          "executables": [
+            "/opt/homebrew/Cellar/pnpm/*/bin/pnpm",
+            "/usr/local/Cellar/pnpm/*/bin/pnpm",
+            "/Users/*/Library/pnpm/pnpm"
+          ]
+        },
+        {
+          "label": "bun",
+          "executables": [
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pypi",
+      "name": {
+        "en": "PyPI token",
+        "zh-Hans": "PyPI 令牌"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.pypirc"
+      ],
+      "owners": [
+        {
+          "label": "twine / poetry / hatch / flit",
+          "executables": [
+            "/opt/homebrew/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/usr/local/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/opt/homebrew/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/usr/local/Cellar/python@*/*/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/opt/homebrew/Cellar/python@*/*/bin/python3*",
+            "/usr/local/Cellar/python@*/*/bin/python3*",
+            "/Library/Frameworks/Python.framework/Versions/*/bin/python3*",
+            "/Library/Frameworks/Python.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/*/bin/python3*",
+            "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/*/bin/python3*",
+            "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/*/Resources/Python.app/Contents/MacOS/Python",
+            "/Users/*/.pyenv/versions/*/bin/python3*",
+            "/Users/*/.local/share/uv/python/*/bin/python3*"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/bin/twine",
+            "/opt/homebrew/bin/poetry",
+            "/opt/homebrew/bin/hatch",
+            "/opt/homebrew/bin/flit",
+            "/usr/local/bin/twine",
+            "/usr/local/bin/poetry",
+            "/usr/local/bin/hatch",
+            "/usr/local/bin/flit",
+            "/Users/*/.local/bin/twine",
+            "/Users/*/.local/bin/poetry",
+            "/Users/*/.local/bin/hatch",
+            "/Users/*/.local/bin/flit",
+            "/opt/homebrew/Cellar/poetry/*/libexec/bin/poetry",
+            "/opt/homebrew/Cellar/hatch/*/libexec/bin/hatch",
+            "/opt/homebrew/Cellar/twine/*/libexec/bin/twine",
+            "/usr/local/Cellar/poetry/*/libexec/bin/poetry",
+            "/usr/local/Cellar/hatch/*/libexec/bin/hatch",
+            "/usr/local/Cellar/twine/*/libexec/bin/twine",
+            "/Users/*/Library/Python/*/bin/twine",
+            "/Users/*/Library/Python/*/bin/poetry",
+            "/Users/*/Library/Python/*/bin/hatch",
+            "/Users/*/Library/Python/*/bin/flit"
+          ]
+        },
+        {
+          "label": "uv",
+          "executables": [
+            "/opt/homebrew/Cellar/uv/*/bin/uv",
+            "/usr/local/Cellar/uv/*/bin/uv",
+            "/Users/*/.local/bin/uv",
+            "/Users/*/.cargo/bin/uv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "netrc",
+      "name": {
+        "en": ".netrc",
+        "zh-Hans": ".netrc 凭证"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.netrc"
+      ],
+      "owners": [
+        {
+          "label": "git HTTP transport (Apple)",
+          "executables": [
+            "/System/**/git-remote-http",
+            "/System/**/git-remote-https",
+            "/usr/bin/git-remote-http",
+            "/usr/bin/git-remote-https",
+            "/usr/sbin/git-remote-http",
+            "/usr/sbin/git-remote-https",
+            "/usr/libexec/**/git-remote-http",
+            "/usr/libexec/**/git-remote-https",
+            "/bin/git-remote-http",
+            "/bin/git-remote-https",
+            "/sbin/git-remote-http",
+            "/sbin/git-remote-https",
+            "/Library/Apple/**/git-remote-http",
+            "/Library/Apple/**/git-remote-https"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "git HTTP transport (Command Line Tools)",
+          "executables": [
+            "/Library/Developer/CommandLineTools/usr/libexec/git-core/git-remote-http*"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "git HTTP transport (Xcode)",
+          "executables": [
+            "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-remote-http",
+            "/Applications/Xcode.app/Contents/Developer/usr/libexec/git-core/git-remote-https"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "git HTTP transport (Homebrew)",
+          "executables": [
+            "/opt/homebrew/Cellar/git/*/libexec/git-core/git-remote-http*",
+            "/usr/local/Cellar/git/*/libexec/git-core/git-remote-http*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "git-credentials",
+      "name": {
+        "en": "Git credential store",
+        "zh-Hans": "Git 凭证存储"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.git-credentials",
+        "~/.config/git/credentials"
+      ],
+      "owners": [
+        {
+          "label": "git (Apple)",
+          "executables": [
+            "/System/**/git",
+            "/System/**/git-remote-http",
+            "/System/**/git-remote-https",
+            "/System/**/git-credential-osxkeychain",
+            "/usr/bin/git",
+            "/usr/bin/git-remote-http",
+            "/usr/bin/git-remote-https",
+            "/usr/bin/git-credential-osxkeychain",
+            "/usr/sbin/git",
+            "/usr/sbin/git-remote-http",
+            "/usr/sbin/git-remote-https",
+            "/usr/sbin/git-credential-osxkeychain",
+            "/usr/libexec/**/git",
+            "/usr/libexec/**/git-remote-http",
+            "/usr/libexec/**/git-remote-https",
+            "/usr/libexec/**/git-credential-osxkeychain",
+            "/bin/git",
+            "/bin/git-remote-http",
+            "/bin/git-remote-https",
+            "/bin/git-credential-osxkeychain",
+            "/sbin/git",
+            "/sbin/git-remote-http",
+            "/sbin/git-remote-https",
+            "/sbin/git-credential-osxkeychain",
+            "/Library/Apple/**/git",
+            "/Library/Apple/**/git-remote-http",
+            "/Library/Apple/**/git-remote-https",
+            "/Library/Apple/**/git-credential-osxkeychain"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "git (Command Line Tools)",
+          "executables": [
+            "/Library/Developer/CommandLineTools/usr/bin/git",
+            "/Library/Developer/CommandLineTools/usr/libexec/git-core/*"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "git (Xcode)",
+          "executables": [
+            "/Applications/Xcode.app/Contents/Developer/usr/bin/git"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "git (Homebrew)",
+          "executables": [
+            "/opt/homebrew/Cellar/git/*/bin/git",
+            "/opt/homebrew/Cellar/git/*/bin/git-credential-osxkeychain",
+            "/usr/local/Cellar/git/*/bin/git",
+            "/usr/local/Cellar/git/*/bin/git-credential-osxkeychain",
+            "/opt/homebrew/Cellar/git/*/libexec/git-core/*",
+            "/usr/local/Cellar/git/*/libexec/git-core/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gh",
+      "name": {
+        "en": "GitHub CLI token",
+        "zh-Hans": "GitHub CLI 令牌"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.config/gh/"
+      ],
+      "patterns": [
+        {
+          "glob": "config.yml",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "GitHub CLI",
+          "executables": [
+            "/opt/homebrew/Cellar/gh/*/bin/gh",
+            "/usr/local/Cellar/gh/*/bin/gh",
+            "/usr/local/bin/gh"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gnupg",
+      "name": {
+        "en": "GnuPG keyring",
+        "zh-Hans": "GnuPG 密钥环"
+      },
+      "group": "dev-credentials",
+      "severity": "critical",
+      "paths": [
+        "~/.gnupg/"
+      ],
+      "patterns": [
+        {
+          "glob": "S.*",
+          "exclude": true
+        },
+        {
+          "glob": "*.conf",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "GnuPG (Homebrew)",
+          "executables": [
+            "/opt/homebrew/Cellar/gnupg/*/bin/gpg",
+            "/opt/homebrew/Cellar/gnupg/*/bin/gpg2",
+            "/opt/homebrew/Cellar/gnupg/*/bin/gpg-agent",
+            "/opt/homebrew/Cellar/gnupg/*/bin/gpgsm",
+            "/opt/homebrew/Cellar/gnupg/*/bin/gpgconf",
+            "/opt/homebrew/Cellar/gnupg/*/bin/dirmngr",
+            "/opt/homebrew/Cellar/gnupg/*/bin/gpg-connect-agent",
+            "/usr/local/Cellar/gnupg/*/bin/gpg",
+            "/usr/local/Cellar/gnupg/*/bin/gpg2",
+            "/usr/local/Cellar/gnupg/*/bin/gpg-agent",
+            "/usr/local/Cellar/gnupg/*/bin/gpgsm",
+            "/usr/local/Cellar/gnupg/*/bin/gpgconf",
+            "/usr/local/Cellar/gnupg/*/bin/dirmngr",
+            "/usr/local/Cellar/gnupg/*/bin/gpg-connect-agent",
+            "/opt/homebrew/Cellar/gnupg/*/libexec/scdaemon",
+            "/opt/homebrew/Cellar/gnupg/*/libexec/keyboxd",
+            "/opt/homebrew/Cellar/gnupg/*/libexec/gpg-check-pattern",
+            "/opt/homebrew/Cellar/gnupg/*/libexec/gpg-preset-passphrase",
+            "/usr/local/Cellar/gnupg/*/libexec/scdaemon",
+            "/usr/local/Cellar/gnupg/*/libexec/keyboxd",
+            "/usr/local/Cellar/gnupg/*/libexec/gpg-check-pattern",
+            "/usr/local/Cellar/gnupg/*/libexec/gpg-preset-passphrase",
+            "/opt/homebrew/Cellar/pinentry/*/bin/pinentry",
+            "/opt/homebrew/Cellar/pinentry/*/bin/pinentry-curses",
+            "/opt/homebrew/Cellar/pinentry/*/bin/pinentry-tty",
+            "/usr/local/Cellar/pinentry/*/bin/pinentry",
+            "/usr/local/Cellar/pinentry/*/bin/pinentry-curses",
+            "/usr/local/Cellar/pinentry/*/bin/pinentry-tty",
+            "/opt/homebrew/Cellar/pinentry-mac/*/pinentry-mac.app/Contents/MacOS/pinentry-mac",
+            "/usr/local/Cellar/pinentry-mac/*/pinentry-mac.app/Contents/MacOS/pinentry-mac"
+          ]
+        },
+        {
+          "label": "GPG Suite (MacGPG2)",
+          "executables": [
+            "/usr/local/MacGPG2/bin/*",
+            "/usr/local/MacGPG2/libexec/*",
+            "/usr/local/MacGPG2/libexec/pinentry-mac.app/Contents/MacOS/pinentry-mac"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "keychain",
+      "name": {
+        "en": "Keychains",
+        "zh-Hans": "钥匙串"
+      },
+      "group": "keychain",
+      "severity": "critical",
+      "paths": [
+        "~/Library/Keychains/"
+      ],
+      "owners": [
+        {
+          "label": "Security daemons",
+          "executables": [
+            "/System/**/securityd",
+            "/System/**/secd",
+            "/System/**/trustd",
+            "/System/**/security",
+            "/System/**/SecurityAgent",
+            "/System/**/authd",
+            "/System/**/ctkd",
+            "/System/**/keychainsharingmessagingd",
+            "/System/**/accountsd",
+            "/System/**/cloudd",
+            "/System/**/akd",
+            "/System/**/keychain-circle-notification",
+            "/usr/bin/securityd",
+            "/usr/bin/secd",
+            "/usr/bin/trustd",
+            "/usr/bin/security",
+            "/usr/bin/SecurityAgent",
+            "/usr/bin/authd",
+            "/usr/bin/ctkd",
+            "/usr/bin/keychainsharingmessagingd",
+            "/usr/bin/accountsd",
+            "/usr/bin/cloudd",
+            "/usr/bin/akd",
+            "/usr/bin/keychain-circle-notification",
+            "/usr/sbin/securityd",
+            "/usr/sbin/secd",
+            "/usr/sbin/trustd",
+            "/usr/sbin/security",
+            "/usr/sbin/SecurityAgent",
+            "/usr/sbin/authd",
+            "/usr/sbin/ctkd",
+            "/usr/sbin/keychainsharingmessagingd",
+            "/usr/sbin/accountsd",
+            "/usr/sbin/cloudd",
+            "/usr/sbin/akd",
+            "/usr/sbin/keychain-circle-notification",
+            "/usr/libexec/**/securityd",
+            "/usr/libexec/**/secd",
+            "/usr/libexec/**/trustd",
+            "/usr/libexec/**/security",
+            "/usr/libexec/**/SecurityAgent",
+            "/usr/libexec/**/authd",
+            "/usr/libexec/**/ctkd",
+            "/usr/libexec/**/keychainsharingmessagingd",
+            "/usr/libexec/**/accountsd",
+            "/usr/libexec/**/cloudd",
+            "/usr/libexec/**/akd",
+            "/usr/libexec/**/keychain-circle-notification",
+            "/bin/securityd",
+            "/bin/secd",
+            "/bin/trustd",
+            "/bin/security",
+            "/bin/SecurityAgent",
+            "/bin/authd",
+            "/bin/ctkd",
+            "/bin/keychainsharingmessagingd",
+            "/bin/accountsd",
+            "/bin/cloudd",
+            "/bin/akd",
+            "/bin/keychain-circle-notification",
+            "/sbin/securityd",
+            "/sbin/secd",
+            "/sbin/trustd",
+            "/sbin/security",
+            "/sbin/SecurityAgent",
+            "/sbin/authd",
+            "/sbin/ctkd",
+            "/sbin/keychainsharingmessagingd",
+            "/sbin/accountsd",
+            "/sbin/cloudd",
+            "/sbin/akd",
+            "/sbin/keychain-circle-notification",
+            "/Library/Apple/**/securityd",
+            "/Library/Apple/**/secd",
+            "/Library/Apple/**/trustd",
+            "/Library/Apple/**/security",
+            "/Library/Apple/**/SecurityAgent",
+            "/Library/Apple/**/authd",
+            "/Library/Apple/**/ctkd",
+            "/Library/Apple/**/keychainsharingmessagingd",
+            "/Library/Apple/**/accountsd",
+            "/Library/Apple/**/cloudd",
+            "/Library/Apple/**/akd",
+            "/Library/Apple/**/keychain-circle-notification"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "Keychain Access",
+          "bundles": [
+            "/System/**/Keychain Access.app"
+          ],
+          "platformBinary": true
+        }
+      ]
+    },
+    {
+      "id": "chrome",
+      "name": {
+        "en": "Google Chrome profile",
+        "zh-Hans": "Google Chrome 资料"
+      },
+      "group": "browser",
+      "severity": "high",
+      "paths": [
+        "~/Library/Application Support/Google/Chrome/",
+        "~/Library/Application Support/Google/Chrome Beta/",
+        "~/Library/Application Support/Google/Chrome Canary/"
+      ],
+      "patterns": [
+        {
+          "glob": "Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Code Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/GPUCache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Service Worker/CacheStorage/**",
+          "exclude": true
+        },
+        {
+          "glob": "Cookies",
+          "severity": "critical"
+        },
+        {
+          "glob": "Cookies-journal",
+          "severity": "critical"
+        },
+        {
+          "glob": "Login Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Web Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Account Web Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Local State",
+          "severity": "high"
+        },
+        {
+          "glob": "History*",
+          "severity": "high"
+        },
+        {
+          "glob": "*",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "Google Chrome profile",
+          "bundles": [
+            "/Applications/Google Chrome.app",
+            "/Applications/Google Chrome Beta.app",
+            "/Applications/Google Chrome Canary.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "brave",
+      "name": {
+        "en": "Brave profile",
+        "zh-Hans": "Brave 资料"
+      },
+      "group": "browser",
+      "severity": "high",
+      "paths": [
+        "~/Library/Application Support/BraveSoftware/Brave-Browser/"
+      ],
+      "patterns": [
+        {
+          "glob": "Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Code Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/GPUCache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Service Worker/CacheStorage/**",
+          "exclude": true
+        },
+        {
+          "glob": "Cookies",
+          "severity": "critical"
+        },
+        {
+          "glob": "Cookies-journal",
+          "severity": "critical"
+        },
+        {
+          "glob": "Login Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Web Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Account Web Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Local State",
+          "severity": "high"
+        },
+        {
+          "glob": "History*",
+          "severity": "high"
+        },
+        {
+          "glob": "*",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "Brave profile",
+          "bundles": [
+            "/Applications/Brave Browser.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "edge",
+      "name": {
+        "en": "Microsoft Edge profile",
+        "zh-Hans": "Microsoft Edge 资料"
+      },
+      "group": "browser",
+      "severity": "high",
+      "paths": [
+        "~/Library/Application Support/Microsoft Edge/"
+      ],
+      "patterns": [
+        {
+          "glob": "Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Code Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/GPUCache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Service Worker/CacheStorage/**",
+          "exclude": true
+        },
+        {
+          "glob": "Cookies",
+          "severity": "critical"
+        },
+        {
+          "glob": "Cookies-journal",
+          "severity": "critical"
+        },
+        {
+          "glob": "Login Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Web Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Account Web Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Local State",
+          "severity": "high"
+        },
+        {
+          "glob": "History*",
+          "severity": "high"
+        },
+        {
+          "glob": "*",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "Microsoft Edge profile",
+          "bundles": [
+            "/Applications/Microsoft Edge.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "arc",
+      "name": {
+        "en": "Arc profile",
+        "zh-Hans": "Arc 资料"
+      },
+      "group": "browser",
+      "severity": "high",
+      "paths": [
+        "~/Library/Application Support/Arc/User Data/"
+      ],
+      "patterns": [
+        {
+          "glob": "Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Code Cache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/GPUCache/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/Service Worker/CacheStorage/**",
+          "exclude": true
+        },
+        {
+          "glob": "Cookies",
+          "severity": "critical"
+        },
+        {
+          "glob": "Cookies-journal",
+          "severity": "critical"
+        },
+        {
+          "glob": "Login Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Web Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Account Web Data*",
+          "severity": "critical"
+        },
+        {
+          "glob": "Local State",
+          "severity": "high"
+        },
+        {
+          "glob": "History*",
+          "severity": "high"
+        },
+        {
+          "glob": "*",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "Arc profile",
+          "bundles": [
+            "/Applications/Arc.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "firefox",
+      "name": {
+        "en": "Firefox profile",
+        "zh-Hans": "Firefox 资料"
+      },
+      "group": "browser",
+      "severity": "high",
+      "paths": [
+        "~/Library/Application Support/Firefox/Profiles/"
+      ],
+      "patterns": [
+        {
+          "glob": "*/cache2/**",
+          "exclude": true
+        },
+        {
+          "glob": "cookies.sqlite*",
+          "severity": "critical"
+        },
+        {
+          "glob": "logins.json",
+          "severity": "critical"
+        },
+        {
+          "glob": "logins-backup.json",
+          "severity": "critical"
+        },
+        {
+          "glob": "key4.db",
+          "severity": "critical"
+        },
+        {
+          "glob": "formhistory.sqlite*",
+          "severity": "critical"
+        },
+        {
+          "glob": "places.sqlite*",
+          "severity": "high"
+        },
+        {
+          "glob": "*",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "Firefox",
+          "bundles": [
+            "/Applications/Firefox.app",
+            "/Applications/Firefox Developer Edition.app",
+            "/Applications/Firefox Nightly.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "safari",
+      "name": {
+        "en": "Safari data",
+        "zh-Hans": "Safari 数据"
+      },
+      "group": "browser",
+      "severity": "high",
+      "paths": [
+        "~/Library/Safari/",
+        "~/Library/Containers/com.apple.Safari/Data/Library/Cookies/",
+        "~/Library/Cookies/"
+      ],
+      "patterns": [
+        {
+          "glob": "*.binarycookies",
+          "severity": "critical"
+        },
+        {
+          "glob": "History.db*",
+          "severity": "high"
+        },
+        {
+          "glob": "*",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "Safari",
+          "bundles": [
+            "/System/**/Safari.app"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "Safari Technology Preview",
+          "bundles": [
+            "/Applications/Safari Technology Preview.app"
+          ]
+        },
+        {
+          "label": "WebKit / Safari services",
+          "executables": [
+            "/System/**/com.apple.WebKit.Networking",
+            "/System/**/com.apple.WebKit.WebContent",
+            "/System/**/com.apple.Safari.History",
+            "/System/**/SafariBookmarksSyncAgent",
+            "/System/**/com.apple.Safari.SafeBrowsing.Service",
+            "/System/**/SafariLaunchAgent",
+            "/System/**/SafariNotificationAgent",
+            "/System/**/nsurlsessiond",
+            "/System/**/cookied",
+            "/usr/bin/com.apple.WebKit.Networking",
+            "/usr/bin/com.apple.WebKit.WebContent",
+            "/usr/bin/com.apple.Safari.History",
+            "/usr/bin/SafariBookmarksSyncAgent",
+            "/usr/bin/com.apple.Safari.SafeBrowsing.Service",
+            "/usr/bin/SafariLaunchAgent",
+            "/usr/bin/SafariNotificationAgent",
+            "/usr/bin/nsurlsessiond",
+            "/usr/bin/cookied",
+            "/usr/sbin/com.apple.WebKit.Networking",
+            "/usr/sbin/com.apple.WebKit.WebContent",
+            "/usr/sbin/com.apple.Safari.History",
+            "/usr/sbin/SafariBookmarksSyncAgent",
+            "/usr/sbin/com.apple.Safari.SafeBrowsing.Service",
+            "/usr/sbin/SafariLaunchAgent",
+            "/usr/sbin/SafariNotificationAgent",
+            "/usr/sbin/nsurlsessiond",
+            "/usr/sbin/cookied",
+            "/usr/libexec/**/com.apple.WebKit.Networking",
+            "/usr/libexec/**/com.apple.WebKit.WebContent",
+            "/usr/libexec/**/com.apple.Safari.History",
+            "/usr/libexec/**/SafariBookmarksSyncAgent",
+            "/usr/libexec/**/com.apple.Safari.SafeBrowsing.Service",
+            "/usr/libexec/**/SafariLaunchAgent",
+            "/usr/libexec/**/SafariNotificationAgent",
+            "/usr/libexec/**/nsurlsessiond",
+            "/usr/libexec/**/cookied",
+            "/bin/com.apple.WebKit.Networking",
+            "/bin/com.apple.WebKit.WebContent",
+            "/bin/com.apple.Safari.History",
+            "/bin/SafariBookmarksSyncAgent",
+            "/bin/com.apple.Safari.SafeBrowsing.Service",
+            "/bin/SafariLaunchAgent",
+            "/bin/SafariNotificationAgent",
+            "/bin/nsurlsessiond",
+            "/bin/cookied",
+            "/sbin/com.apple.WebKit.Networking",
+            "/sbin/com.apple.WebKit.WebContent",
+            "/sbin/com.apple.Safari.History",
+            "/sbin/SafariBookmarksSyncAgent",
+            "/sbin/com.apple.Safari.SafeBrowsing.Service",
+            "/sbin/SafariLaunchAgent",
+            "/sbin/SafariNotificationAgent",
+            "/sbin/nsurlsessiond",
+            "/sbin/cookied",
+            "/Library/Apple/**/com.apple.WebKit.Networking",
+            "/Library/Apple/**/com.apple.WebKit.WebContent",
+            "/Library/Apple/**/com.apple.Safari.History",
+            "/Library/Apple/**/SafariBookmarksSyncAgent",
+            "/Library/Apple/**/com.apple.Safari.SafeBrowsing.Service",
+            "/Library/Apple/**/SafariLaunchAgent",
+            "/Library/Apple/**/SafariNotificationAgent",
+            "/Library/Apple/**/nsurlsessiond",
+            "/Library/Apple/**/cookied"
+          ],
+          "platformBinary": true
+        }
+      ]
+    },
+    {
+      "id": "1password",
+      "name": {
+        "en": "1Password data",
+        "zh-Hans": "1Password 数据"
+      },
+      "group": "password-manager",
+      "severity": "critical",
+      "paths": [
+        "~/Library/Group Containers/2BUA8C4S2C.com.1password/",
+        "~/Library/Containers/com.1password.1password/",
+        "~/Library/Group Containers/2BUA8C4S2C.com.agilebits/"
+      ],
+      "owners": [
+        {
+          "label": "1Password data",
+          "bundles": [
+            "/Applications/1Password.app",
+            "/Applications/1Password 7.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bitwarden",
+      "name": {
+        "en": "Bitwarden data",
+        "zh-Hans": "Bitwarden 数据"
+      },
+      "group": "password-manager",
+      "severity": "critical",
+      "paths": [
+        "~/Library/Application Support/Bitwarden/",
+        "~/Library/Containers/com.bitwarden.desktop/"
+      ],
+      "owners": [
+        {
+          "label": "Bitwarden data",
+          "bundles": [
+            "/Applications/Bitwarden.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "proton-pass",
+      "name": {
+        "en": "Proton Pass data",
+        "zh-Hans": "Proton Pass 数据"
+      },
+      "group": "password-manager",
+      "severity": "critical",
+      "paths": [
+        "~/Library/Application Support/Proton Pass/"
+      ],
+      "owners": [
+        {
+          "label": "Proton Pass data",
+          "bundles": [
+            "/Applications/Proton Pass.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "messages",
+      "name": {
+        "en": "Messages",
+        "zh-Hans": "信息（iMessage）"
+      },
+      "group": "chat",
+      "severity": "high",
+      "paths": [
+        "~/Library/Messages/"
+      ],
+      "owners": [
+        {
+          "label": "Messages",
+          "bundles": [
+            "/System/**/Messages.app"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "Messages daemons",
+          "executables": [
+            "/System/**/imagent",
+            "/System/**/IMDPersistenceAgent",
+            "/System/**/IMTransferAgent",
+            "/System/**/imtranscoderagent",
+            "/System/**/identityservicesd",
+            "/System/**/IMAutomaticHistoryDeletionAgent",
+            "/System/**/BlastDoor",
+            "/System/**/MessagesBlastDoorService",
+            "/usr/bin/imagent",
+            "/usr/bin/IMDPersistenceAgent",
+            "/usr/bin/IMTransferAgent",
+            "/usr/bin/imtranscoderagent",
+            "/usr/bin/identityservicesd",
+            "/usr/bin/IMAutomaticHistoryDeletionAgent",
+            "/usr/bin/BlastDoor",
+            "/usr/bin/MessagesBlastDoorService",
+            "/usr/sbin/imagent",
+            "/usr/sbin/IMDPersistenceAgent",
+            "/usr/sbin/IMTransferAgent",
+            "/usr/sbin/imtranscoderagent",
+            "/usr/sbin/identityservicesd",
+            "/usr/sbin/IMAutomaticHistoryDeletionAgent",
+            "/usr/sbin/BlastDoor",
+            "/usr/sbin/MessagesBlastDoorService",
+            "/usr/libexec/**/imagent",
+            "/usr/libexec/**/IMDPersistenceAgent",
+            "/usr/libexec/**/IMTransferAgent",
+            "/usr/libexec/**/imtranscoderagent",
+            "/usr/libexec/**/identityservicesd",
+            "/usr/libexec/**/IMAutomaticHistoryDeletionAgent",
+            "/usr/libexec/**/BlastDoor",
+            "/usr/libexec/**/MessagesBlastDoorService",
+            "/bin/imagent",
+            "/bin/IMDPersistenceAgent",
+            "/bin/IMTransferAgent",
+            "/bin/imtranscoderagent",
+            "/bin/identityservicesd",
+            "/bin/IMAutomaticHistoryDeletionAgent",
+            "/bin/BlastDoor",
+            "/bin/MessagesBlastDoorService",
+            "/sbin/imagent",
+            "/sbin/IMDPersistenceAgent",
+            "/sbin/IMTransferAgent",
+            "/sbin/imtranscoderagent",
+            "/sbin/identityservicesd",
+            "/sbin/IMAutomaticHistoryDeletionAgent",
+            "/sbin/BlastDoor",
+            "/sbin/MessagesBlastDoorService",
+            "/Library/Apple/**/imagent",
+            "/Library/Apple/**/IMDPersistenceAgent",
+            "/Library/Apple/**/IMTransferAgent",
+            "/Library/Apple/**/imtranscoderagent",
+            "/Library/Apple/**/identityservicesd",
+            "/Library/Apple/**/IMAutomaticHistoryDeletionAgent",
+            "/Library/Apple/**/BlastDoor",
+            "/Library/Apple/**/MessagesBlastDoorService"
+          ],
+          "platformBinary": true
+        }
+      ]
+    },
+    {
+      "id": "wechat",
+      "name": {
+        "en": "WeChat",
+        "zh-Hans": "微信"
+      },
+      "group": "chat",
+      "severity": "high",
+      "paths": [
+        "~/Library/Containers/com.tencent.xinWeChat/"
+      ],
+      "owners": [
+        {
+          "label": "WeChat",
+          "bundles": [
+            "/Applications/WeChat.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "telegram",
+      "name": {
+        "en": "Telegram",
+        "zh-Hans": "Telegram"
+      },
+      "group": "chat",
+      "severity": "high",
+      "paths": [
+        "~/Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram/",
+        "~/Library/Application Support/Telegram Desktop/"
+      ],
+      "owners": [
+        {
+          "label": "Telegram",
+          "bundles": [
+            "/Applications/Telegram.app",
+            "/Applications/Telegram Desktop.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "signal",
+      "name": {
+        "en": "Signal",
+        "zh-Hans": "Signal"
+      },
+      "group": "chat",
+      "severity": "high",
+      "paths": [
+        "~/Library/Application Support/Signal/"
+      ],
+      "owners": [
+        {
+          "label": "Signal",
+          "bundles": [
+            "/Applications/Signal.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "simplex",
+      "name": {
+        "en": "SimpleX Chat",
+        "zh-Hans": "SimpleX Chat"
+      },
+      "group": "chat",
+      "severity": "high",
+      "paths": [
+        "~/Library/Application Support/SimpleX/"
+      ],
+      "owners": [
+        {
+          "label": "SimpleX",
+          "bundles": [
+            "/Applications/SimpleX.app",
+            "/Applications/SimpleX Chat.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "whatsapp",
+      "name": {
+        "en": "WhatsApp",
+        "zh-Hans": "WhatsApp"
+      },
+      "group": "chat",
+      "severity": "high",
+      "paths": [
+        "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/",
+        "~/Library/Containers/net.whatsapp.WhatsApp/"
+      ],
+      "owners": [
+        {
+          "label": "WhatsApp",
+          "bundles": [
+            "/Applications/WhatsApp.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "mail",
+      "name": {
+        "en": "Mail",
+        "zh-Hans": "邮件"
+      },
+      "group": "personal",
+      "severity": "high",
+      "paths": [
+        "~/Library/Mail/"
+      ],
+      "owners": [
+        {
+          "label": "Mail",
+          "bundles": [
+            "/System/**/Mail.app"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "Mail services",
+          "executables": [
+            "/System/**/maild",
+            "/System/**/MailCacheDelete",
+            "/System/**/com.apple.MailServiceAgent",
+            "/System/**/mailq",
+            "/usr/bin/maild",
+            "/usr/bin/MailCacheDelete",
+            "/usr/bin/com.apple.MailServiceAgent",
+            "/usr/bin/mailq",
+            "/usr/sbin/maild",
+            "/usr/sbin/MailCacheDelete",
+            "/usr/sbin/com.apple.MailServiceAgent",
+            "/usr/sbin/mailq",
+            "/usr/libexec/**/maild",
+            "/usr/libexec/**/MailCacheDelete",
+            "/usr/libexec/**/com.apple.MailServiceAgent",
+            "/usr/libexec/**/mailq",
+            "/bin/maild",
+            "/bin/MailCacheDelete",
+            "/bin/com.apple.MailServiceAgent",
+            "/bin/mailq",
+            "/sbin/maild",
+            "/sbin/MailCacheDelete",
+            "/sbin/com.apple.MailServiceAgent",
+            "/sbin/mailq",
+            "/Library/Apple/**/maild",
+            "/Library/Apple/**/MailCacheDelete",
+            "/Library/Apple/**/com.apple.MailServiceAgent",
+            "/Library/Apple/**/mailq"
+          ],
+          "platformBinary": true
+        }
+      ]
+    },
+    {
+      "id": "contacts",
+      "name": {
+        "en": "Contacts",
+        "zh-Hans": "通讯录"
+      },
+      "group": "personal",
+      "severity": "high",
+      "paths": [
+        "~/Library/Application Support/AddressBook/"
+      ],
+      "owners": [
+        {
+          "label": "Contacts",
+          "bundles": [
+            "/System/**/Contacts.app"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "Contacts services",
+          "executables": [
+            "/System/**/contactsd",
+            "/System/**/AddressBookSourceSync",
+            "/System/**/AddressBookManager",
+            "/System/**/ContactsAgent",
+            "/System/**/com.apple.AddressBook.ContactsAccountsService",
+            "/System/**/AddressBookSync",
+            "/usr/bin/contactsd",
+            "/usr/bin/AddressBookSourceSync",
+            "/usr/bin/AddressBookManager",
+            "/usr/bin/ContactsAgent",
+            "/usr/bin/com.apple.AddressBook.ContactsAccountsService",
+            "/usr/bin/AddressBookSync",
+            "/usr/sbin/contactsd",
+            "/usr/sbin/AddressBookSourceSync",
+            "/usr/sbin/AddressBookManager",
+            "/usr/sbin/ContactsAgent",
+            "/usr/sbin/com.apple.AddressBook.ContactsAccountsService",
+            "/usr/sbin/AddressBookSync",
+            "/usr/libexec/**/contactsd",
+            "/usr/libexec/**/AddressBookSourceSync",
+            "/usr/libexec/**/AddressBookManager",
+            "/usr/libexec/**/ContactsAgent",
+            "/usr/libexec/**/com.apple.AddressBook.ContactsAccountsService",
+            "/usr/libexec/**/AddressBookSync",
+            "/bin/contactsd",
+            "/bin/AddressBookSourceSync",
+            "/bin/AddressBookManager",
+            "/bin/ContactsAgent",
+            "/bin/com.apple.AddressBook.ContactsAccountsService",
+            "/bin/AddressBookSync",
+            "/sbin/contactsd",
+            "/sbin/AddressBookSourceSync",
+            "/sbin/AddressBookManager",
+            "/sbin/ContactsAgent",
+            "/sbin/com.apple.AddressBook.ContactsAccountsService",
+            "/sbin/AddressBookSync",
+            "/Library/Apple/**/contactsd",
+            "/Library/Apple/**/AddressBookSourceSync",
+            "/Library/Apple/**/AddressBookManager",
+            "/Library/Apple/**/ContactsAgent",
+            "/Library/Apple/**/com.apple.AddressBook.ContactsAccountsService",
+            "/Library/Apple/**/AddressBookSync"
+          ],
+          "platformBinary": true
+        }
+      ]
+    },
+    {
+      "id": "calendar",
+      "name": {
+        "en": "Calendar",
+        "zh-Hans": "日历"
+      },
+      "group": "personal",
+      "severity": "high",
+      "paths": [
+        "~/Library/Calendars/",
+        "~/Library/Group Containers/group.com.apple.calendar/"
+      ],
+      "owners": [
+        {
+          "label": "Calendar",
+          "bundles": [
+            "/System/**/Calendar.app"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "Calendar services",
+          "executables": [
+            "/System/**/CalendarAgent",
+            "/System/**/calaccessd",
+            "/System/**/remindd",
+            "/System/**/CalendarWidgetExtension",
+            "/usr/bin/CalendarAgent",
+            "/usr/bin/calaccessd",
+            "/usr/bin/remindd",
+            "/usr/bin/CalendarWidgetExtension",
+            "/usr/sbin/CalendarAgent",
+            "/usr/sbin/calaccessd",
+            "/usr/sbin/remindd",
+            "/usr/sbin/CalendarWidgetExtension",
+            "/usr/libexec/**/CalendarAgent",
+            "/usr/libexec/**/calaccessd",
+            "/usr/libexec/**/remindd",
+            "/usr/libexec/**/CalendarWidgetExtension",
+            "/bin/CalendarAgent",
+            "/bin/calaccessd",
+            "/bin/remindd",
+            "/bin/CalendarWidgetExtension",
+            "/sbin/CalendarAgent",
+            "/sbin/calaccessd",
+            "/sbin/remindd",
+            "/sbin/CalendarWidgetExtension",
+            "/Library/Apple/**/CalendarAgent",
+            "/Library/Apple/**/calaccessd",
+            "/Library/Apple/**/remindd",
+            "/Library/Apple/**/CalendarWidgetExtension"
+          ],
+          "platformBinary": true
+        }
+      ]
+    },
+    {
+      "id": "photos",
+      "name": {
+        "en": "Photos library",
+        "zh-Hans": "照片图库"
+      },
+      "group": "personal",
+      "severity": "high",
+      "paths": [
+        "~/Pictures/Photos Library.photoslibrary/"
+      ],
+      "owners": [
+        {
+          "label": "Photos",
+          "bundles": [
+            "/System/**/Photos.app"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "Photos services",
+          "executables": [
+            "/System/**/photolibraryd",
+            "/System/**/photoanalysisd",
+            "/System/**/mediaanalysisd",
+            "/System/**/cloudphotod",
+            "/System/**/com.apple.photos.ImageConversionService",
+            "/System/**/PhotosReliveWidget",
+            "/System/**/assetsd",
+            "/usr/bin/photolibraryd",
+            "/usr/bin/photoanalysisd",
+            "/usr/bin/mediaanalysisd",
+            "/usr/bin/cloudphotod",
+            "/usr/bin/com.apple.photos.ImageConversionService",
+            "/usr/bin/PhotosReliveWidget",
+            "/usr/bin/assetsd",
+            "/usr/sbin/photolibraryd",
+            "/usr/sbin/photoanalysisd",
+            "/usr/sbin/mediaanalysisd",
+            "/usr/sbin/cloudphotod",
+            "/usr/sbin/com.apple.photos.ImageConversionService",
+            "/usr/sbin/PhotosReliveWidget",
+            "/usr/sbin/assetsd",
+            "/usr/libexec/**/photolibraryd",
+            "/usr/libexec/**/photoanalysisd",
+            "/usr/libexec/**/mediaanalysisd",
+            "/usr/libexec/**/cloudphotod",
+            "/usr/libexec/**/com.apple.photos.ImageConversionService",
+            "/usr/libexec/**/PhotosReliveWidget",
+            "/usr/libexec/**/assetsd",
+            "/bin/photolibraryd",
+            "/bin/photoanalysisd",
+            "/bin/mediaanalysisd",
+            "/bin/cloudphotod",
+            "/bin/com.apple.photos.ImageConversionService",
+            "/bin/PhotosReliveWidget",
+            "/bin/assetsd",
+            "/sbin/photolibraryd",
+            "/sbin/photoanalysisd",
+            "/sbin/mediaanalysisd",
+            "/sbin/cloudphotod",
+            "/sbin/com.apple.photos.ImageConversionService",
+            "/sbin/PhotosReliveWidget",
+            "/sbin/assetsd",
+            "/Library/Apple/**/photolibraryd",
+            "/Library/Apple/**/photoanalysisd",
+            "/Library/Apple/**/mediaanalysisd",
+            "/Library/Apple/**/cloudphotod",
+            "/Library/Apple/**/com.apple.photos.ImageConversionService",
+            "/Library/Apple/**/PhotosReliveWidget",
+            "/Library/Apple/**/assetsd"
+          ],
+          "platformBinary": true
+        }
+      ]
+    },
+    {
+      "id": "shell-history",
+      "name": {
+        "en": "Shell & REPL history",
+        "zh-Hans": "Shell 与 REPL 历史"
+      },
+      "group": "history",
+      "severity": "high",
+      "description": {
+        "en": "iTerm2 session logs are written to the folder chosen in Profiles → Session → Automatically log; add that folder as a custom path. Shells are not owners: an agent's `zsh -c 'fc -l'` must stay visible.",
+        "zh-Hans": "iTerm2 会话日志写在 Profiles → Session → Automatically log 里选择的文件夹，请把它加为自定义路径。Shell 不算 owner：agent 用 `zsh -c 'fc -l'` 读取历史时必须能被看到。"
+      },
+      "paths": [
+        "~/.zsh_history",
+        "~/.zsh_sessions/",
+        "~/.bash_history",
+        "~/.bash_sessions/",
+        "~/.local/share/fish/fish_history",
+        "~/.python_history",
+        "~/.node_repl_history",
+        "~/.psql_history",
+        "~/.mysql_history",
+        "~/.sqlite_history",
+        "~/.irb_history",
+        "~/.lesshst",
+        "~/Library/Application Support/iTerm2/SavedState/"
+      ],
+      "owners": [
+        {
+          "label": "Terminal",
+          "bundles": [
+            "/System/**/Terminal.app"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "iTerm2",
+          "bundles": [
+            "/Applications/iTerm.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cloud-storage",
+      "name": {
+        "en": "Cloud drives",
+        "zh-Hans": "云盘同步目录"
+      },
+      "group": "cloud",
+      "severity": "high",
+      "paths": [
+        "~/Library/CloudStorage/",
+        "~/Library/Mobile Documents/"
+      ],
+      "owners": [
+        {
+          "label": "iCloud / File Provider",
+          "executables": [
+            "/System/**/bird",
+            "/System/**/cloudd",
+            "/System/**/fileproviderd",
+            "/usr/bin/bird",
+            "/usr/bin/cloudd",
+            "/usr/bin/fileproviderd",
+            "/usr/sbin/bird",
+            "/usr/sbin/cloudd",
+            "/usr/sbin/fileproviderd",
+            "/usr/libexec/**/bird",
+            "/usr/libexec/**/cloudd",
+            "/usr/libexec/**/fileproviderd",
+            "/bin/bird",
+            "/bin/cloudd",
+            "/bin/fileproviderd",
+            "/sbin/bird",
+            "/sbin/cloudd",
+            "/sbin/fileproviderd",
+            "/Library/Apple/**/bird",
+            "/Library/Apple/**/cloudd",
+            "/Library/Apple/**/fileproviderd"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "Dropbox",
+          "bundles": [
+            "/Applications/Dropbox.app"
+          ]
+        },
+        {
+          "label": "Google Drive",
+          "bundles": [
+            "/Applications/Google Drive.app"
+          ]
+        },
+        {
+          "label": "OneDrive",
+          "bundles": [
+            "/Applications/OneDrive.app"
+          ]
+        },
+        {
+          "label": "Box",
+          "bundles": [
+            "/Applications/Box.app"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "iphone-backup",
+      "name": {
+        "en": "iPhone backups",
+        "zh-Hans": "iPhone 备份"
+      },
+      "group": "personal",
+      "severity": "critical",
+      "paths": [
+        "~/Library/Application Support/MobileSync/Backup/"
+      ],
+      "owners": [
+        {
+          "label": "Device sync",
+          "executables": [
+            "/System/**/AMPDevicesAgent",
+            "/System/**/AMPDeviceDiscoveryAgent",
+            "/System/**/AMPLibraryAgent",
+            "/System/**/MobileDeviceUpdater",
+            "/System/**/AppleMobileDeviceHelper",
+            "/System/**/AppleMobileBackup",
+            "/usr/bin/AMPDevicesAgent",
+            "/usr/bin/AMPDeviceDiscoveryAgent",
+            "/usr/bin/AMPLibraryAgent",
+            "/usr/bin/MobileDeviceUpdater",
+            "/usr/bin/AppleMobileDeviceHelper",
+            "/usr/bin/AppleMobileBackup",
+            "/usr/sbin/AMPDevicesAgent",
+            "/usr/sbin/AMPDeviceDiscoveryAgent",
+            "/usr/sbin/AMPLibraryAgent",
+            "/usr/sbin/MobileDeviceUpdater",
+            "/usr/sbin/AppleMobileDeviceHelper",
+            "/usr/sbin/AppleMobileBackup",
+            "/usr/libexec/**/AMPDevicesAgent",
+            "/usr/libexec/**/AMPDeviceDiscoveryAgent",
+            "/usr/libexec/**/AMPLibraryAgent",
+            "/usr/libexec/**/MobileDeviceUpdater",
+            "/usr/libexec/**/AppleMobileDeviceHelper",
+            "/usr/libexec/**/AppleMobileBackup",
+            "/bin/AMPDevicesAgent",
+            "/bin/AMPDeviceDiscoveryAgent",
+            "/bin/AMPLibraryAgent",
+            "/bin/MobileDeviceUpdater",
+            "/bin/AppleMobileDeviceHelper",
+            "/bin/AppleMobileBackup",
+            "/sbin/AMPDevicesAgent",
+            "/sbin/AMPDeviceDiscoveryAgent",
+            "/sbin/AMPLibraryAgent",
+            "/sbin/MobileDeviceUpdater",
+            "/sbin/AppleMobileDeviceHelper",
+            "/sbin/AppleMobileBackup",
+            "/Library/Apple/**/AMPDevicesAgent",
+            "/Library/Apple/**/AMPDeviceDiscoveryAgent",
+            "/Library/Apple/**/AMPLibraryAgent",
+            "/Library/Apple/**/MobileDeviceUpdater",
+            "/Library/Apple/**/AppleMobileDeviceHelper",
+            "/Library/Apple/**/AppleMobileBackup"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "Finder",
+          "bundles": [
+            "/System/**/Finder.app"
+          ],
+          "platformBinary": true
+        }
+      ]
+    },
+    {
+      "id": "volumes",
+      "name": {
+        "en": "External & decrypted volumes",
+        "zh-Hans": "外接卷与解密挂载点"
+      },
+      "group": "volumes",
+      "severity": "high",
+      "description": {
+        "en": "Includes Cryptomator / VeraCrypt mounts under /Volumes. Add other mount points here.",
+        "zh-Hans": "包含挂载在 /Volumes 下的 Cryptomator、VeraCrypt 等解密卷；其他挂载点请自行添加。"
+      },
+      "paths": [
+        "/Volumes/"
+      ],
+      "patterns": [
+        {
+          "glob": "*/.Spotlight-V100/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/.fseventsd/**",
+          "exclude": true
+        },
+        {
+          "glob": "*/.Trashes/**",
+          "exclude": true
+        }
+      ],
+      "owners": []
+    },
+    {
+      "id": "claude-sessions",
+      "name": {
+        "en": "Claude Code transcripts",
+        "zh-Hans": "Claude Code 会话记录"
+      },
+      "group": "ai",
+      "severity": "high",
+      "description": {
+        "en": "Plain-text copies of everything the agent has seen.",
+        "zh-Hans": "存着 agent 看过的所有内容的明文副本。"
+      },
+      "paths": [
+        "~/.claude/projects/"
+      ],
+      "owners": [
+        {
+          "label": "Claude Code (native)",
+          "executables": [
+            "/Users/*/.local/share/claude/versions/*",
+            "/opt/homebrew/Caskroom/claude-code/*/claude",
+            "/usr/local/Caskroom/claude-code/*/claude"
+          ]
+        },
+        {
+          "label": "Claude Code (npm)",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+            "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+            "/Users/*/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+            "/Users/*/.nvm/versions/node/*/bin/claude",
+            "/Users/*/.npm-global/bin/claude",
+            "/Users/*/.volta/bin/claude",
+            "/Users/*/.bun/bin/claude"
+          ]
+        },
+        {
+          "label": "Claude Code (local install)",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/Users/*/.claude/local/node_modules/@anthropic-ai/claude-code/cli.js",
+            "/Users/*/.claude/local/node_modules/.bin/claude"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "codex-sessions",
+      "name": {
+        "en": "Codex CLI transcripts",
+        "zh-Hans": "Codex CLI 会话记录"
+      },
+      "group": "ai",
+      "severity": "high",
+      "description": {
+        "en": "Plain-text copies of everything the agent has seen.",
+        "zh-Hans": "存着 agent 看过的所有内容的明文副本。"
+      },
+      "paths": [
+        "~/.codex/sessions/"
+      ],
+      "owners": [
+        {
+          "label": "Codex CLI (native)",
+          "executables": [
+            "/opt/homebrew/lib/node_modules/@openai/codex/vendor/*/codex/codex",
+            "/usr/local/lib/node_modules/@openai/codex/vendor/*/codex/codex",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/@openai/codex/vendor/*/codex/codex",
+            "/Users/*/.npm-global/lib/node_modules/@openai/codex/vendor/*/codex/codex",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/@openai/codex/vendor/*/codex/codex",
+            "/opt/homebrew/Caskroom/codex/*/codex*",
+            "/usr/local/Caskroom/codex/*/codex*",
+            "/opt/homebrew/Cellar/codex/*/bin/codex",
+            "/usr/local/Cellar/codex/*/bin/codex"
+          ]
+        },
+        {
+          "label": "Codex CLI (npm)",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js",
+            "/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/@openai/codex/bin/codex.js",
+            "/Users/*/.npm-global/lib/node_modules/@openai/codex/bin/codex.js",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/@openai/codex/bin/codex.js",
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            "/Users/*/.nvm/versions/node/*/bin/codex",
+            "/Users/*/.npm-global/bin/codex",
+            "/Users/*/.volta/bin/codex",
+            "/Users/*/.bun/bin/codex"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gemini-sessions",
+      "name": {
+        "en": "Gemini CLI transcripts",
+        "zh-Hans": "Gemini CLI 会话记录"
+      },
+      "group": "ai",
+      "severity": "high",
+      "description": {
+        "en": "Plain-text copies of everything the agent has seen.",
+        "zh-Hans": "存着 agent 看过的所有内容的明文副本。"
+      },
+      "paths": [
+        "~/.gemini/tmp/"
+      ],
+      "owners": [
+        {
+          "label": "Gemini CLI (npm)",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/lib/node_modules/@google/gemini-cli/dist/index.js",
+            "/usr/local/lib/node_modules/@google/gemini-cli/dist/index.js",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/@google/gemini-cli/dist/index.js",
+            "/Users/*/.npm-global/lib/node_modules/@google/gemini-cli/dist/index.js",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/@google/gemini-cli/dist/index.js",
+            "/opt/homebrew/bin/gemini",
+            "/usr/local/bin/gemini",
+            "/Users/*/.nvm/versions/node/*/bin/gemini",
+            "/Users/*/.npm-global/bin/gemini",
+            "/Users/*/.volta/bin/gemini",
+            "/Users/*/.bun/bin/gemini"
+          ]
+        },
+        {
+          "label": "Gemini CLI (Homebrew)",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/Cellar/gemini-cli/*/libexec/lib/node_modules/@google/gemini-cli/dist/index.js",
+            "/usr/local/Cellar/gemini-cli/*/libexec/lib/node_modules/@google/gemini-cli/dist/index.js",
+            "/opt/homebrew/Cellar/gemini-cli/*/bin/gemini",
+            "/usr/local/Cellar/gemini-cli/*/bin/gemini"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cursor-data",
+      "name": {
+        "en": "Cursor workspace data",
+        "zh-Hans": "Cursor 工作区数据"
+      },
+      "group": "ai",
+      "severity": "high",
+      "description": {
+        "en": "Plain-text copies of everything the agent has seen.",
+        "zh-Hans": "存着 agent 看过的所有内容的明文副本。"
+      },
+      "paths": [
+        "~/Library/Application Support/Cursor/User/workspaceStorage/",
+        "~/Library/Application Support/Cursor/User/globalStorage/",
+        "~/.cursor/"
+      ],
+      "owners": [
+        {
+          "label": "Cursor",
+          "bundles": [
+            "/Applications/Cursor.app"
+          ]
+        },
+        {
+          "label": "cursor-agent",
+          "executables": [
+            "/Users/*/.local/share/cursor-agent/versions/*/*"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "opencode-data",
+      "name": {
+        "en": "opencode data",
+        "zh-Hans": "opencode 数据"
+      },
+      "group": "ai",
+      "severity": "high",
+      "description": {
+        "en": "Plain-text copies of everything the agent has seen.",
+        "zh-Hans": "存着 agent 看过的所有内容的明文副本。"
+      },
+      "paths": [
+        "~/.local/share/opencode/"
+      ],
+      "owners": [
+        {
+          "label": "opencode (native)",
+          "executables": [
+            "/opt/homebrew/Cellar/opencode/*/bin/opencode",
+            "/usr/local/Cellar/opencode/*/bin/opencode",
+            "/Users/*/.opencode/bin/opencode",
+            "/opt/homebrew/lib/node_modules/opencode-ai/node_modules/opencode-darwin-*/bin/opencode",
+            "/usr/local/lib/node_modules/opencode-ai/node_modules/opencode-darwin-*/bin/opencode",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/opencode-ai/node_modules/opencode-darwin-*/bin/opencode",
+            "/Users/*/.npm-global/lib/node_modules/opencode-ai/node_modules/opencode-darwin-*/bin/opencode",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/opencode-ai/node_modules/opencode-darwin-*/bin/opencode",
+            "/opt/homebrew/lib/node_modules/opencode-darwin-*/bin/opencode",
+            "/usr/local/lib/node_modules/opencode-darwin-*/bin/opencode",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/opencode-darwin-*/bin/opencode",
+            "/Users/*/.npm-global/lib/node_modules/opencode-darwin-*/bin/opencode",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/opencode-darwin-*/bin/opencode"
+          ]
+        },
+        {
+          "label": "opencode (npm)",
+          "executables": [
+            "/opt/homebrew/Cellar/node*/*/bin/node",
+            "/usr/local/Cellar/node*/*/bin/node",
+            "/usr/local/bin/node",
+            "/Users/*/.nvm/versions/node/*/bin/node",
+            "/Users/*/.volta/tools/image/node/*/bin/node",
+            "/Users/*/.local/share/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/Library/Application Support/fnm/node-versions/*/installation/bin/node",
+            "/Users/*/.asdf/installs/nodejs/*/bin/node",
+            "/Users/*/.local/share/mise/installs/node/*/bin/node",
+            "/opt/homebrew/Cellar/bun/*/bin/bun",
+            "/usr/local/Cellar/bun/*/bin/bun",
+            "/Users/*/.bun/bin/bun"
+          ],
+          "argvGlobs": [
+            "/opt/homebrew/lib/node_modules/opencode-ai/bin/opencode",
+            "/usr/local/lib/node_modules/opencode-ai/bin/opencode",
+            "/Users/*/.nvm/versions/node/*/lib/node_modules/opencode-ai/bin/opencode",
+            "/Users/*/.npm-global/lib/node_modules/opencode-ai/bin/opencode",
+            "/Users/*/.volta/tools/image/packages/*/lib/node_modules/opencode-ai/bin/opencode",
+            "/opt/homebrew/bin/opencode",
+            "/usr/local/bin/opencode",
+            "/Users/*/.nvm/versions/node/*/bin/opencode",
+            "/Users/*/.npm-global/bin/opencode",
+            "/Users/*/.volta/bin/opencode",
+            "/Users/*/.bun/bin/opencode"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "test-vault",
+      "name": {
+        "en": "WhoRead test vault",
+        "zh-Hans": "WhoRead 测试保险库"
+      },
+      "kind": "test",
+      "group": "test",
+      "severity": "critical",
+      "description": {
+        "en": "Fake keys and credentials used by automated tests. Never real secrets.",
+        "zh-Hans": "自动化测试使用的假私钥和假凭证，绝不放真实凭证。"
+      },
+      "paths": [
+        "~/WhoReadTestVault/"
+      ],
+      "patterns": [
+        {
+          "glob": "ssh/*.pub",
+          "severity": "medium"
+        },
+        {
+          "glob": "ssh/config",
+          "severity": "medium"
+        },
+        {
+          "glob": "ssh/known_hosts*",
+          "severity": "medium"
+        },
+        {
+          "glob": "notes/**",
+          "severity": "medium"
+        }
+      ],
+      "owners": [
+        {
+          "label": "OpenSSH (Apple)",
+          "executables": [
+            "/System/**/ssh",
+            "/System/**/ssh-agent",
+            "/System/**/ssh-add",
+            "/System/**/ssh-keygen",
+            "/System/**/ssh-keyscan",
+            "/System/**/scp",
+            "/System/**/sftp",
+            "/System/**/sshd",
+            "/System/**/sshd-session",
+            "/System/**/ssh-keysign",
+            "/System/**/ssh-sk-helper",
+            "/System/**/ssh-pkcs11-helper",
+            "/usr/bin/ssh",
+            "/usr/bin/ssh-agent",
+            "/usr/bin/ssh-add",
+            "/usr/bin/ssh-keygen",
+            "/usr/bin/ssh-keyscan",
+            "/usr/bin/scp",
+            "/usr/bin/sftp",
+            "/usr/bin/sshd",
+            "/usr/bin/sshd-session",
+            "/usr/bin/ssh-keysign",
+            "/usr/bin/ssh-sk-helper",
+            "/usr/bin/ssh-pkcs11-helper",
+            "/usr/sbin/ssh",
+            "/usr/sbin/ssh-agent",
+            "/usr/sbin/ssh-add",
+            "/usr/sbin/ssh-keygen",
+            "/usr/sbin/ssh-keyscan",
+            "/usr/sbin/scp",
+            "/usr/sbin/sftp",
+            "/usr/sbin/sshd",
+            "/usr/sbin/sshd-session",
+            "/usr/sbin/ssh-keysign",
+            "/usr/sbin/ssh-sk-helper",
+            "/usr/sbin/ssh-pkcs11-helper",
+            "/usr/libexec/**/ssh",
+            "/usr/libexec/**/ssh-agent",
+            "/usr/libexec/**/ssh-add",
+            "/usr/libexec/**/ssh-keygen",
+            "/usr/libexec/**/ssh-keyscan",
+            "/usr/libexec/**/scp",
+            "/usr/libexec/**/sftp",
+            "/usr/libexec/**/sshd",
+            "/usr/libexec/**/sshd-session",
+            "/usr/libexec/**/ssh-keysign",
+            "/usr/libexec/**/ssh-sk-helper",
+            "/usr/libexec/**/ssh-pkcs11-helper",
+            "/bin/ssh",
+            "/bin/ssh-agent",
+            "/bin/ssh-add",
+            "/bin/ssh-keygen",
+            "/bin/ssh-keyscan",
+            "/bin/scp",
+            "/bin/sftp",
+            "/bin/sshd",
+            "/bin/sshd-session",
+            "/bin/ssh-keysign",
+            "/bin/ssh-sk-helper",
+            "/bin/ssh-pkcs11-helper",
+            "/sbin/ssh",
+            "/sbin/ssh-agent",
+            "/sbin/ssh-add",
+            "/sbin/ssh-keygen",
+            "/sbin/ssh-keyscan",
+            "/sbin/scp",
+            "/sbin/sftp",
+            "/sbin/sshd",
+            "/sbin/sshd-session",
+            "/sbin/ssh-keysign",
+            "/sbin/ssh-sk-helper",
+            "/sbin/ssh-pkcs11-helper",
+            "/Library/Apple/**/ssh",
+            "/Library/Apple/**/ssh-agent",
+            "/Library/Apple/**/ssh-add",
+            "/Library/Apple/**/ssh-keygen",
+            "/Library/Apple/**/ssh-keyscan",
+            "/Library/Apple/**/scp",
+            "/Library/Apple/**/sftp",
+            "/Library/Apple/**/sshd",
+            "/Library/Apple/**/sshd-session",
+            "/Library/Apple/**/ssh-keysign",
+            "/Library/Apple/**/ssh-sk-helper",
+            "/Library/Apple/**/ssh-pkcs11-helper"
+          ],
+          "platformBinary": true
+        },
+        {
+          "label": "OpenSSH (Homebrew)",
+          "executables": [
+            "/opt/homebrew/Cellar/openssh/*/bin/ssh",
+            "/opt/homebrew/Cellar/openssh/*/bin/ssh-agent",
+            "/opt/homebrew/Cellar/openssh/*/bin/ssh-add",
+            "/opt/homebrew/Cellar/openssh/*/bin/ssh-keygen",
+            "/opt/homebrew/Cellar/openssh/*/bin/scp",
+            "/opt/homebrew/Cellar/openssh/*/bin/sftp",
+            "/usr/local/Cellar/openssh/*/bin/ssh",
+            "/usr/local/Cellar/openssh/*/bin/ssh-agent",
+            "/usr/local/Cellar/openssh/*/bin/ssh-add",
+            "/usr/local/Cellar/openssh/*/bin/ssh-keygen",
+            "/usr/local/Cellar/openssh/*/bin/scp",
+            "/usr/local/Cellar/openssh/*/bin/sftp",
+            "/opt/homebrew/Cellar/openssh/*/libexec/ssh-sk-helper",
+            "/opt/homebrew/Cellar/openssh/*/libexec/ssh-pkcs11-helper",
+            "/opt/homebrew/Cellar/openssh/*/libexec/ssh-keysign",
+            "/usr/local/Cellar/openssh/*/libexec/ssh-sk-helper",
+            "/usr/local/Cellar/openssh/*/libexec/ssh-pkcs11-helper",
+            "/usr/local/Cellar/openssh/*/libexec/ssh-keysign"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "project-secrets",
+      "name": {
+        "en": "Project secrets",
+        "zh-Hans": "项目密钥文件"
+      },
+      "kind": "projectRoots",
+      "group": "projects",
+      "severity": "high",
+      "description": {
+        "en": "Only inside your configured project roots: .env*, *.pem, *.key.",
+        "zh-Hans": "仅在你配置的 project roots 内匹配 .env*、*.pem、*.key。"
+      },
+      "paths": [],
+      "patterns": [
+        {
+          "glob": "**/node_modules/**",
+          "exclude": true
+        },
+        {
+          "glob": "**/.git/**",
+          "exclude": true
+        },
+        {
+          "glob": ".env.example",
+          "exclude": true
+        },
+        {
+          "glob": ".env.sample",
+          "exclude": true
+        },
+        {
+          "glob": ".env.template",
+          "exclude": true
+        },
+        {
+          "glob": "*.pem",
+          "severity": "critical"
+        },
+        {
+          "glob": "*.key",
+          "severity": "critical"
+        },
+        {
+          "glob": ".env*",
+          "severity": "high"
+        }
+      ],
+      "matchOnlyPatterns": true,
+      "owners": []
+    },
+    {
+      "id": "custom",
+      "name": {
+        "en": "Custom",
+        "zh-Hans": "用户自定义"
+      },
+      "kind": "custom",
+      "group": "custom",
+      "severity": "high",
+      "description": {
+        "en": "Add your own paths.",
+        "zh-Hans": "在这里添加你自己的路径。"
+      },
+      "paths": [],
+      "owners": []
+    }
+  ]
+}

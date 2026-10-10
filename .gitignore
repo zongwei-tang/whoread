@@ -1,0 +1,24 @@
+.build/
+.swiftpm/
+*.xcodeproj/
+!Xcode/*.xcodeproj/xcshareddata/
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+.DS_Store
+# Raw eslogger captures may contain private paths; only sanitized fixtures are committed.
+Tests/Fixtures/eslogger/captured/raw/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+Xcode/Local.xcconfig
+scripts/dev/es-typecheck/.build/
+.build-sc/
+.build-native/
+.claude/
+.worktrees/
+.vm/
+
+# Local working notes, never published.
+.local/

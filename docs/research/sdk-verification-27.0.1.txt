@@ -1,0 +1,1877 @@
+# WhoRead SDK verification (scripts/verify-sdk.sh)
+# macOS: 27.0.1 (26A434)
+# Xcode: Xcode 27.0 Build version 27A266a 
+# SDK: 27.0 (MacOSX.sdk)
+# swiftc: Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
+# clang: Apple clang version 21.0.0 (clang-2100.3.34.2)
+# EndpointSecurity headers: ESClient.h ESMessage.h ESMessageCore.h ESTypes.h EndpointSecurity.h module.modulemap 
+
+## ES functions WhoRead calls (header comment, availability, prototype)
+
+### es_new_client
+usr/include/EndpointSecurity/ESClient.h:736: /**
+usr/include/EndpointSecurity/ESClient.h:737:  * Initialise a new es_client_t and connect to the ES subsystem
+usr/include/EndpointSecurity/ESClient.h:738:  * @param client Out param. On success this will be set to point to the newly allocated es_client_t.
+usr/include/EndpointSecurity/ESClient.h:739:  * @param handler The handler block that will be run on all messages sent to this client
+usr/include/EndpointSecurity/ESClient.h:740:  * @return es_new_client_result_t indicating success or a specific error.
+usr/include/EndpointSecurity/ESClient.h:741:  * @discussion Messages are handled strictly serially and in the order they are delivered.
+usr/include/EndpointSecurity/ESClient.h:742:  *             Returning control from the handler causes the next available message to be dequeued.
+usr/include/EndpointSecurity/ESClient.h:743:  *             Messages can be responded to out of order by returning control before calling es_respond_*.
+usr/include/EndpointSecurity/ESClient.h:744:  *             The es_message_t is only guaranteed to live as long as the scope it is passed into.
+usr/include/EndpointSecurity/ESClient.h:745:  *             The memory for the given es_message_t is NOT owned by clients and it must not be freed.
+usr/include/EndpointSecurity/ESClient.h:746:  *             For out of order responding the handler must retain the message with es_retain_message.
+usr/include/EndpointSecurity/ESClient.h:747:  *             Callers are required to be entitled with com.apple.developer.endpoint-security.client.
+usr/include/EndpointSecurity/ESClient.h:748:  *             The application calling this interface must also be approved by users via Transparency, Consent & Control
+usr/include/EndpointSecurity/ESClient.h:749:  *             (TCC) mechanisms using the Privacy Preferences pane and adding the application to Full Disk Access.
+usr/include/EndpointSecurity/ESClient.h:750:  *             When a new client is successfully created, all cached results are automatically cleared.
+usr/include/EndpointSecurity/ESClient.h:751:  *
+usr/include/EndpointSecurity/ESClient.h:752:  * @note When a new client is initialized, there will be a set of paths and a subset of `es_event_type_t` events that are
+usr/include/EndpointSecurity/ESClient.h:753:  *       automatically muted by default. Generally, most AUTH event variants are muted but NOTIFY event variants will
+usr/include/EndpointSecurity/ESClient.h:754:  *       still be sent to the client. The set of paths muted by default are ones that can have an extremely negative impact to
+usr/include/EndpointSecurity/ESClient.h:755:  *       end users if their AUTH events are not allowed in a timely manner (for example, executable paths for processes
+usr/include/EndpointSecurity/ESClient.h:756:  *       that are monitored by the watchdogd daemon). It is important to understand that this list is *not* exhaustive and
+usr/include/EndpointSecurity/ESClient.h:757:  *       developers using the EndpointSecurity framework can still interfere with critical system components and must use
+usr/include/EndpointSecurity/ESClient.h:758:  *       caution to limit user impact. The set of default muted paths and event types may change across macOS releases.
+usr/include/EndpointSecurity/ESClient.h:759:  *       It is possible to both inspect and unmute the set of default muted paths and associated event types using the
+usr/include/EndpointSecurity/ESClient.h:760:  *       appropriate mute-related API, however it is not recommended to unmute these items.
+usr/include/EndpointSecurity/ESClient.h:761:  *
+usr/include/EndpointSecurity/ESClient.h:762:  * @note The only supported way to check if an application is properly TCC authorized for Full Disk Access
+usr/include/EndpointSecurity/ESClient.h:763:  *       is to call es_new_client and handling ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED in a way appropriate
+usr/include/EndpointSecurity/ESClient.h:764:  *       to your application.  Most applications will want to ask the user for TCC authorization when
+usr/include/EndpointSecurity/ESClient.h:765:  *       es_new_client returns ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED.
+usr/include/EndpointSecurity/ESClient.h:766:  *       To direct the user to the Full Disk Access section in System Settings, applications can use the following URLs:
+usr/include/EndpointSecurity/ESClient.h:767:  *       `x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles` (macOS 13 and later)
+usr/include/EndpointSecurity/ESClient.h:768:  *       `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles` (until macOS 12)
+usr/include/EndpointSecurity/ESClient.h:769:  *       Applications are advised to use the new URL in macOS 13 as the old one may stop working in a future release.
+usr/include/EndpointSecurity/ESClient.h:770:  *
+usr/include/EndpointSecurity/ESClient.h:771:  * @see es_retain_message
+usr/include/EndpointSecurity/ESClient.h:772:  * @see es_release_message
+usr/include/EndpointSecurity/ESClient.h:773:  * @see es_new_client_result_t
+usr/include/EndpointSecurity/ESClient.h:774:  * @see es_muted_paths_events
+usr/include/EndpointSecurity/ESClient.h:775:  * @see es_unmute_path_events
+usr/include/EndpointSecurity/ESClient.h:776:  *
+usr/include/EndpointSecurity/ESClient.h:777:  * @discussion Thread Safety
+usr/include/EndpointSecurity/ESClient.h:778:  * The handler block is invoked strictly serially and in the order messages are
+usr/include/EndpointSecurity/ESClient.h:779:  * delivered. All other es_* APIs — including subscribe, unsubscribe, mute,
+usr/include/EndpointSecurity/ESClient.h:780:  * unmute, respond, retain, release, and cache operations — are safe to call
+usr/include/EndpointSecurity/ESClient.h:781:  * concurrently from any thread on the same es_client_t.
+usr/include/EndpointSecurity/ESClient.h:782:  *
+usr/include/EndpointSecurity/ESClient.h:783:  * The only exception is es_delete_client(), which is not safe to call
+usr/include/EndpointSecurity/ESClient.h:784:  * concurrently with any other es_* function (including itself). It can be
+usr/include/EndpointSecurity/ESClient.h:785:  * called from any thread as long as that thread has exclusive access to the
+usr/include/EndpointSecurity/ESClient.h:786:  * client.
+usr/include/EndpointSecurity/ESClient.h:787:  *
+usr/include/EndpointSecurity/ESClient.h:788:  * @discussion Client Lifecycle
+usr/include/EndpointSecurity/ESClient.h:789:  * After es_delete_client() returns, the client pointer is invalid. Passing a
+usr/include/EndpointSecurity/ESClient.h:790:  * deleted client to any es_* function is undefined behavior.
+usr/include/EndpointSecurity/ESClient.h:791:  */
+usr/include/EndpointSecurity/ESClient.h:792: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:793: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:794: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:795: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:796: es_new_client_result_t es_new_client(es_client_t *_Nullable *_Nonnull client, es_handler_block_t _Nonnull handler);
+
+### es_delete_client
+usr/include/EndpointSecurity/ESClient.h:948: /**
+usr/include/EndpointSecurity/ESClient.h:949:  * Destroy an es_client_t, freeing resources and disconnecting from the ES subsystem
+usr/include/EndpointSecurity/ESClient.h:950:  * @param client The client to be destroyed
+usr/include/EndpointSecurity/ESClient.h:951:  * @return  ES_RETURN_SUCCESS indicates all resources were freed.
+usr/include/EndpointSecurity/ESClient.h:952:  *          ES_RETURN_ERROR indicates an error occurred during shutdown and resources were leaked.
+usr/include/EndpointSecurity/ESClient.h:953:  * @note Not safe to call concurrently with any other es_* function (including itself).
+usr/include/EndpointSecurity/ESClient.h:954:  *       Can be called from any thread as long as that thread has exclusive access to the client.
+usr/include/EndpointSecurity/ESClient.h:955:  * @note Passing NULL is a safe no-op and returns ES_RETURN_SUCCESS.
+usr/include/EndpointSecurity/ESClient.h:956:  * @note Using a client pointer after it has been deleted is undefined behavior.
+usr/include/EndpointSecurity/ESClient.h:957:  */
+usr/include/EndpointSecurity/ESClient.h:958: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:959: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:960: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) es_return_t es_delete_client(es_client_t *_Nullable client);
+
+### es_subscribe
+usr/include/EndpointSecurity/ESClient.h:19: /**
+usr/include/EndpointSecurity/ESClient.h:20:  * Subscribe to some set of events
+usr/include/EndpointSecurity/ESClient.h:21:  * @param client The client that will be subscribing
+usr/include/EndpointSecurity/ESClient.h:22:  * @param events Array of es_event_type_t to subscribe to
+usr/include/EndpointSecurity/ESClient.h:23:  * @param event_count Count of es_event_type_t in `events`
+usr/include/EndpointSecurity/ESClient.h:24:  * @return es_return_t indicating success or error
+usr/include/EndpointSecurity/ESClient.h:25:  *
+usr/include/EndpointSecurity/ESClient.h:26:  * @note Subscribing to new event types does not remove previous subscriptions.
+usr/include/EndpointSecurity/ESClient.h:27:  *
+usr/include/EndpointSecurity/ESClient.h:28:  * @note Subscribing to events is not optional for clients that have opted into
+usr/include/EndpointSecurity/ESClient.h:29:  *       early boot mode (see NSEndpointSecurityEarlyBoot in EndpointSecurity(7)).
+usr/include/EndpointSecurity/ESClient.h:30:  *       Early boot clients that fail to subscribe to at least one event type will
+usr/include/EndpointSecurity/ESClient.h:31:  *       cause early boot to time out, resulting in a bad user experience and
+usr/include/EndpointSecurity/ESClient.h:32:  *       risking watchdog timeout panics.
+usr/include/EndpointSecurity/ESClient.h:33:  *
+usr/include/EndpointSecurity/ESClient.h:34:  * @note Event types with values >= ES_EVENT_TYPE_LAST are silently ignored.
+usr/include/EndpointSecurity/ESClient.h:35:  *       The remaining valid events in the array are still processed and
+usr/include/EndpointSecurity/ESClient.h:36:  *       ES_RETURN_SUCCESS is returned even if some events were invalid.
+usr/include/EndpointSecurity/ESClient.h:37:  *       Calling with an event_count of 0 is a no-op returning ES_RETURN_SUCCESS.
+usr/include/EndpointSecurity/ESClient.h:38:  */
+usr/include/EndpointSecurity/ESClient.h:39: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:40: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:41: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:42: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:43: es_return_t es_subscribe(es_client_t *_Nonnull client, const es_event_type_t *_Nonnull events, uint32_t event_count);
+
+### es_unsubscribe
+usr/include/EndpointSecurity/ESClient.h:45: /**
+usr/include/EndpointSecurity/ESClient.h:46:  * Unsubscribe from some set of events
+usr/include/EndpointSecurity/ESClient.h:47:  * @param client The client that will be unsubscribing
+usr/include/EndpointSecurity/ESClient.h:48:  * @param events Array of es_event_type_t to unsubscribe from
+usr/include/EndpointSecurity/ESClient.h:49:  * @param event_count Count of es_event_type_t in `events`
+usr/include/EndpointSecurity/ESClient.h:50:  * @return es_return_t indicating success or error
+usr/include/EndpointSecurity/ESClient.h:51:  * @note Events not included in the given `events` array that were previously subscribed to will continue to be subscribed to
+usr/include/EndpointSecurity/ESClient.h:52:  *
+usr/include/EndpointSecurity/ESClient.h:53:  * @note Unsubscribing from an event type that is not currently subscribed to
+usr/include/EndpointSecurity/ESClient.h:54:  *       is a safe no-op. Event types >= ES_EVENT_TYPE_LAST are silently ignored.
+usr/include/EndpointSecurity/ESClient.h:55:  *       Calling with an event_count of 0 is a no-op returning ES_RETURN_SUCCESS.
+usr/include/EndpointSecurity/ESClient.h:56:  */
+usr/include/EndpointSecurity/ESClient.h:57: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:58: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:59: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:60: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:61: es_return_t es_unsubscribe(es_client_t *_Nonnull client, const es_event_type_t *_Nonnull events, uint32_t event_count);
+
+### es_unsubscribe_all
+usr/include/EndpointSecurity/ESClient.h:63: /**
+usr/include/EndpointSecurity/ESClient.h:64:  * Unsubscribe from all events
+usr/include/EndpointSecurity/ESClient.h:65:  * @param client The client that will be unsubscribing
+usr/include/EndpointSecurity/ESClient.h:66:  * @return es_return_t indicating success or error
+usr/include/EndpointSecurity/ESClient.h:67:  */
+usr/include/EndpointSecurity/ESClient.h:68: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:69: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:70: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) es_return_t es_unsubscribe_all(es_client_t *_Nonnull client);
+
+### es_respond_auth_result
+usr/include/EndpointSecurity/ESClient.h:87: /**
+usr/include/EndpointSecurity/ESClient.h:88:  * Respond to an auth event that requires an es_auth_result_t response
+usr/include/EndpointSecurity/ESClient.h:89:  * @param client The client that produced the event
+usr/include/EndpointSecurity/ESClient.h:90:  * @param message The message being responded to
+usr/include/EndpointSecurity/ESClient.h:91:  * @param result A result indicating the action the ES subsystem should take
+usr/include/EndpointSecurity/ESClient.h:92:  * @param cache Indicates if this result should be cached.  The specific
+usr/include/EndpointSecurity/ESClient.h:93:  *        caching semantics depend on es_event_type_t.  Cache key is generally
+usr/include/EndpointSecurity/ESClient.h:94:  *        the involved files, with modifications to those files invalidating
+usr/include/EndpointSecurity/ESClient.h:95:  *        the cache entry.  A cache hit leads to no AUTH event being produced,
+usr/include/EndpointSecurity/ESClient.h:96:  *        while still producing a NOTIFY event normally.
+usr/include/EndpointSecurity/ESClient.h:97:  *        The cache argument is ignored for events that do not support caching.
+usr/include/EndpointSecurity/ESClient.h:98:  * @return es_respond_result_t indicating success or an error
+usr/include/EndpointSecurity/ESClient.h:99:  * @brief Some events must be responded to with `es_respond_flags_result`. Responding to flags events with this function will
+usr/include/EndpointSecurity/ESClient.h:100:  * fail.
+usr/include/EndpointSecurity/ESClient.h:101:  */
+usr/include/EndpointSecurity/ESClient.h:102: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:103: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:104: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:105: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:106: es_respond_result_t
+usr/include/EndpointSecurity/ESClient.h:107: es_respond_auth_result(es_client_t *_Nonnull client, const es_message_t *_Nonnull message, es_auth_result_t result, bool cache);
+
+### es_respond_flags_result
+usr/include/EndpointSecurity/ESClient.h:109: /**
+usr/include/EndpointSecurity/ESClient.h:110:  * Respond to an auth event that requires an uint32_t flags response
+usr/include/EndpointSecurity/ESClient.h:111:  * @param client The client that produced the event
+usr/include/EndpointSecurity/ESClient.h:112:  * @param message The message being responded to
+usr/include/EndpointSecurity/ESClient.h:113:  * @param authorized_flags A flags value that will mask the flags in event being
+usr/include/EndpointSecurity/ESClient.h:114:  *        responded to; pass 0 to deny and UINT32_MAX to allow regardless of what
+usr/include/EndpointSecurity/ESClient.h:115:  *        flags are set on the event.
+usr/include/EndpointSecurity/ESClient.h:116:  * @param cache Indicates if this result should be cached.  The specific
+usr/include/EndpointSecurity/ESClient.h:117:  *        caching semantics depend on es_event_type_t.  Cache key is generally
+usr/include/EndpointSecurity/ESClient.h:118:  *        the involved files, with modifications to those files invalidating
+usr/include/EndpointSecurity/ESClient.h:119:  *        the cache entry.  A cache hit leads to no AUTH event being produced,
+usr/include/EndpointSecurity/ESClient.h:120:  *        while still producing a NOTIFY event normally.
+usr/include/EndpointSecurity/ESClient.h:121:  *        The cache argument is ignored for events that do not support caching.
+usr/include/EndpointSecurity/ESClient.h:122:  * @return es_respond_result_t indicating success or an error
+usr/include/EndpointSecurity/ESClient.h:123:  * @brief Some events must be responded to with `es_respond_auth_result`. Responding to auth events with the function will fail.
+usr/include/EndpointSecurity/ESClient.h:124:  * @note Enabling caching caches authorized_flags.  Subsequent cache hits
+usr/include/EndpointSecurity/ESClient.h:125:  *       will result in the event being allowed only if the flags of the
+usr/include/EndpointSecurity/ESClient.h:126:  *       event are a subset of the flags in authorized_flags, and denied
+usr/include/EndpointSecurity/ESClient.h:127:  *       otherwise.  As a result, UINT32_MAX should be passed for
+usr/include/EndpointSecurity/ESClient.h:128:  *       authorized_flags, unless denying events with certain flags is
+usr/include/EndpointSecurity/ESClient.h:129:  *       intentional.  A common mistake is passing the flags from the
+usr/include/EndpointSecurity/ESClient.h:130:  *       event, which together with caching may result in subsequent
+usr/include/EndpointSecurity/ESClient.h:131:  *       events getting unintentionally denied if they have flags set
+usr/include/EndpointSecurity/ESClient.h:132:  *       that were not set in the cached authorized_flags.
+usr/include/EndpointSecurity/ESClient.h:133:  */
+usr/include/EndpointSecurity/ESClient.h:134: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:135: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:136: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:137: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:138: es_respond_result_t es_respond_flags_result(
+usr/include/EndpointSecurity/ESClient.h:139: 	es_client_t *_Nonnull client, const es_message_t *_Nonnull message, uint32_t authorized_flags, bool cache
+usr/include/EndpointSecurity/ESClient.h:140: );
+
+### es_retain_message
+usr/include/EndpointSecurity/ESMessage.h:2840: /**
+usr/include/EndpointSecurity/ESMessage.h:2841:  * Retains the given es_message_t, extending its lifetime until released with `es_release_message`.
+usr/include/EndpointSecurity/ESMessage.h:2842:  *
+usr/include/EndpointSecurity/ESMessage.h:2843:  * @param msg The message to be retained
+usr/include/EndpointSecurity/ESMessage.h:2844:  *
+usr/include/EndpointSecurity/ESMessage.h:2845:  * @note It is necessary to retain a message when the es_message_t provided
+usr/include/EndpointSecurity/ESMessage.h:2846:  *       in the event handler block of `es_new_client` will be processed
+usr/include/EndpointSecurity/ESMessage.h:2847:  *       asynchronously.
+usr/include/EndpointSecurity/ESMessage.h:2848:  *
+usr/include/EndpointSecurity/ESMessage.h:2849:  * @note Each call to es_retain_message must be balanced by exactly one call
+usr/include/EndpointSecurity/ESMessage.h:2850:  *       to es_release_message. Failing to release a retained message leaks
+usr/include/EndpointSecurity/ESMessage.h:2851:  *       memory. Releasing a message more than once per retain, or releasing
+usr/include/EndpointSecurity/ESMessage.h:2852:  *       a message that was never retained, is undefined behavior.
+usr/include/EndpointSecurity/ESMessage.h:2853:  */
+usr/include/EndpointSecurity/ESMessage.h:2854: OS_EXPORT
+usr/include/EndpointSecurity/ESMessage.h:2855: API_AVAILABLE(macos(11.0))
+usr/include/EndpointSecurity/ESMessage.h:2856: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) void es_retain_message(const es_message_t *_Nonnull msg);
+
+### es_release_message
+usr/include/EndpointSecurity/ESMessage.h:2858: /**
+usr/include/EndpointSecurity/ESMessage.h:2859:  * Releases a message previously retained with `es_retain_message`.
+usr/include/EndpointSecurity/ESMessage.h:2860:  *
+usr/include/EndpointSecurity/ESMessage.h:2861:  * @param msg The message to be released
+usr/include/EndpointSecurity/ESMessage.h:2862:  *
+usr/include/EndpointSecurity/ESMessage.h:2863:  * @see es_retain_message
+usr/include/EndpointSecurity/ESMessage.h:2864:  */
+usr/include/EndpointSecurity/ESMessage.h:2865: OS_EXPORT
+usr/include/EndpointSecurity/ESMessage.h:2866: API_AVAILABLE(macos(11.0))
+usr/include/EndpointSecurity/ESMessage.h:2867: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) void es_release_message(const es_message_t *_Nonnull msg);
+
+### es_clear_cache
+usr/include/EndpointSecurity/ESClient.h:680: /**
+usr/include/EndpointSecurity/ESClient.h:681:  * Clear all cached results for all clients.
+usr/include/EndpointSecurity/ESClient.h:682:  * @param client that will perform the request
+usr/include/EndpointSecurity/ESClient.h:683:  * @return es_clear_cache_result_t value indicating success or an error
+usr/include/EndpointSecurity/ESClient.h:684:  * @discussion This functions clears the shared cache for all ES clients and is hence rate limited.
+usr/include/EndpointSecurity/ESClient.h:685:  *             If es_clear_cache is called too frequently it will return ES_CLEAR_CACHE_RESULT_ERR_THROTTLE
+usr/include/EndpointSecurity/ESClient.h:686:  *             It is permissible to pass any valid es_client_t object created by `es_new_client`
+usr/include/EndpointSecurity/ESClient.h:687:  */
+usr/include/EndpointSecurity/ESClient.h:688: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:689: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:690: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:691: API_UNAVAILABLE(tvos, watchos) es_clear_cache_result_t es_clear_cache(es_client_t *_Nonnull client);
+
+### es_mute_process
+usr/include/EndpointSecurity/ESClient.h:142: /**
+usr/include/EndpointSecurity/ESClient.h:143:  * @brief Suppress all events from the process described by the given `audit_token`
+usr/include/EndpointSecurity/ESClient.h:144:  *
+usr/include/EndpointSecurity/ESClient.h:145:  * @param client The client for which events will be suppressed
+usr/include/EndpointSecurity/ESClient.h:146:  * @param audit_token The audit token of the process for which events will be suppressed
+usr/include/EndpointSecurity/ESClient.h:147:  *
+usr/include/EndpointSecurity/ESClient.h:148:  * @return es_return_t indicating success or error
+usr/include/EndpointSecurity/ESClient.h:149:  *
+usr/include/EndpointSecurity/ESClient.h:150:  * @see es_mute_process_events
+usr/include/EndpointSecurity/ESClient.h:151:  *
+usr/include/EndpointSecurity/ESClient.h:152:  * @note The audit_token must refer to a currently running process. Muting a
+usr/include/EndpointSecurity/ESClient.h:153:  *       process that has already exited returns ES_RETURN_ERROR.
+usr/include/EndpointSecurity/ESClient.h:154:  * @note Muted processes are automatically unmuted when they exit.
+usr/include/EndpointSecurity/ESClient.h:155:  *
+usr/include/EndpointSecurity/ESClient.h:156:  * @note es_mute_process and es_mute_process_events install a rule for the
+usr/include/EndpointSecurity/ESClient.h:157:  *       process identified by audit_token. The rule applies in two roles: it
+usr/include/EndpointSecurity/ESClient.h:158:  *       matches an event when the specified process is the event's submitter
+usr/include/EndpointSecurity/ESClient.h:159:  *       (the process whose action produced the event), and it matches an event
+usr/include/EndpointSecurity/ESClient.h:160:  *       when the specified process is the event's instigator (the process that
+usr/include/EndpointSecurity/ESClient.h:161:  *       caused that action, present only on events that carry an instigator).
+usr/include/EndpointSecurity/ESClient.h:162:  *
+usr/include/EndpointSecurity/ESClient.h:163:  * @note Voting: Each role an event has (its submitter, and optionally an
+usr/include/EndpointSecurity/ESClient.h:164:  *       instigator) yields one vote. A role's vote (suppress, deliver, or
+usr/include/EndpointSecurity/ESClient.h:165:  *       abstain) is determined by the client's rule for the process filling
+usr/include/EndpointSecurity/ESClient.h:166:  *       that role; a role abstains when the client has no such rule (for
+usr/include/EndpointSecurity/ESClient.h:167:  *       example any process outside a descendants client's subtree). The event
+usr/include/EndpointSecurity/ESClient.h:168:  *       is suppressed if any role votes suppress; otherwise it is delivered if
+usr/include/EndpointSecurity/ESClient.h:169:  *       any role votes deliver; if every role abstains, the event is suppressed.
+usr/include/EndpointSecurity/ESClient.h:170:  *
+usr/include/EndpointSecurity/ESClient.h:171:  * @note Inversion: es_invert_muting(client, ES_MUTE_INVERSION_TYPE_PROCESS)
+usr/include/EndpointSecurity/ESClient.h:172:  *       toggles the client's process-mute inversion. It is an involution: any
+usr/include/EndpointSecurity/ESClient.h:173:  *       even number of toggles is a no-op and any odd number is equivalent to a
+usr/include/EndpointSecurity/ESClient.h:174:  *       single toggle. Each toggle exchanges the two non-abstaining votes for
+usr/include/EndpointSecurity/ESClient.h:175:  *       every process the client has a rule for - a suppress vote becomes
+usr/include/EndpointSecurity/ESClient.h:176:  *       deliver and a deliver vote becomes suppress. Abstain is self-dual: a
+usr/include/EndpointSecurity/ESClient.h:177:  *       role with no rule abstains regardless of inversion, and the
+usr/include/EndpointSecurity/ESClient.h:178:  *       all-abstain-is-suppressed rule above is unchanged. So under an odd
+usr/include/EndpointSecurity/ESClient.h:179:  *       number of inversions the processes named through es_mute_process /
+usr/include/EndpointSecurity/ESClient.h:180:  *       es_mute_process_events vote deliver, while every other
+usr/include/EndpointSecurity/ESClient.h:181:  *       process the client tracks votes suppress.
+usr/include/EndpointSecurity/ESClient.h:182:  *
+usr/include/EndpointSecurity/ESClient.h:183:  * @note Events that carry an instigator (so the instigator role can vote on
+usr/include/EndpointSecurity/ESClient.h:184:  *       them); every other event has only a submitter, so muting a process
+usr/include/EndpointSecurity/ESClient.h:185:  *       affects it only when that process is the submitter:
+usr/include/EndpointSecurity/ESClient.h:186:  *         - ES_EVENT_TYPE_AUTH_SIGNAL / ES_EVENT_TYPE_NOTIFY_SIGNAL
+usr/include/EndpointSecurity/ESClient.h:187:  *         - ES_EVENT_TYPE_AUTH_BOOTSTRAP_CHECK_IN / ES_EVENT_TYPE_NOTIFY_BOOTSTRAP_CHECK_IN
+usr/include/EndpointSecurity/ESClient.h:188:  *         - ES_EVENT_TYPE_AUTH_BOOTSTRAP_LOOK_UP / ES_EVENT_TYPE_NOTIFY_BOOTSTRAP_LOOK_UP
+usr/include/EndpointSecurity/ESClient.h:189:  *         - ES_EVENT_TYPE_AUTH_FILE_PROVIDER_MATERIALIZE / ES_EVENT_TYPE_NOTIFY_FILE_PROVIDER_MATERIALIZE
+usr/include/EndpointSecurity/ESClient.h:190:  *         - ES_EVENT_TYPE_NOTIFY_AUTHENTICATION
+usr/include/EndpointSecurity/ESClient.h:191:  *         - ES_EVENT_TYPE_NOTIFY_TCC_MODIFY
+usr/include/EndpointSecurity/ESClient.h:192:  *         - ES_EVENT_TYPE_NOTIFY_PROFILE_ADD / ES_EVENT_TYPE_NOTIFY_PROFILE_REMOVE
+usr/include/EndpointSecurity/ESClient.h:193:  *         - ES_EVENT_TYPE_NOTIFY_AUTHORIZATION_PETITION / ES_EVENT_TYPE_NOTIFY_AUTHORIZATION_JUDGEMENT
+usr/include/EndpointSecurity/ESClient.h:194:  *         - ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD / ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_REMOVE
+usr/include/EndpointSecurity/ESClient.h:195:  *         - the Open Directory events ES_EVENT_TYPE_NOTIFY_OD_GROUP_ADD,
+usr/include/EndpointSecurity/ESClient.h:196:  *           _OD_GROUP_REMOVE, _OD_GROUP_SET, _OD_MODIFY_PASSWORD, _OD_DISABLE_USER,
+usr/include/EndpointSecurity/ESClient.h:197:  *           _OD_ENABLE_USER, _OD_ATTRIBUTE_VALUE_ADD, _OD_ATTRIBUTE_VALUE_REMOVE,
+usr/include/EndpointSecurity/ESClient.h:198:  *           _OD_ATTRIBUTE_SET, _OD_CREATE_USER, _OD_CREATE_GROUP, _OD_DELETE_USER,
+usr/include/EndpointSecurity/ESClient.h:199:  *           and _OD_DELETE_GROUP
+usr/include/EndpointSecurity/ESClient.h:200:  *       For all of these the instigator role is filled by the event's
+usr/include/EndpointSecurity/ESClient.h:201:  *       instigator field, with one exception: for the two AUTHORIZATION events
+usr/include/EndpointSecurity/ESClient.h:202:  *       the instigator role is the petitioner (the process that initiated the
+usr/include/EndpointSecurity/ESClient.h:203:  *       authorization request), NOT the event's instigator field, which is the
+usr/include/EndpointSecurity/ESClient.h:204:  *       process that conveyed the request (e.g. SecurityAgent) and does not
+usr/include/EndpointSecurity/ESClient.h:205:  *       fill the role.
+usr/include/EndpointSecurity/ESClient.h:206:  */
+usr/include/EndpointSecurity/ESClient.h:207: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:208: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:209: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:210: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:211: es_return_t es_mute_process(es_client_t *_Nonnull client, const audit_token_t *_Nonnull audit_token);
+
+### es_mute_path
+usr/include/EndpointSecurity/ESClient.h:332: /**
+usr/include/EndpointSecurity/ESClient.h:333:  * @brief Suppress all events matching a path.
+usr/include/EndpointSecurity/ESClient.h:334:  *
+usr/include/EndpointSecurity/ESClient.h:335:  * @param client The es_client_t for which the path will be muted.
+usr/include/EndpointSecurity/ESClient.h:336:  * @param path The path to mute.
+usr/include/EndpointSecurity/ESClient.h:337:  * @param type Describes the type of the `path` parameter.
+usr/include/EndpointSecurity/ESClient.h:338:  *
+usr/include/EndpointSecurity/ESClient.h:339:  * @return es_return_t A value indicating whether or not the path was successfully muted.
+usr/include/EndpointSecurity/ESClient.h:340:  *
+usr/include/EndpointSecurity/ESClient.h:341:  * @note Path-based muting applies to the real and potentially firmlinked path
+usr/include/EndpointSecurity/ESClient.h:342:  *       of a file as seen by VFS, and as available from fcntl(2) F_GETPATH.
+usr/include/EndpointSecurity/ESClient.h:343:  *       No special provisions are made for files with multiple ("hard") links,
+usr/include/EndpointSecurity/ESClient.h:344:  *       or for symbolic links.
+usr/include/EndpointSecurity/ESClient.h:345:  *       In particular, when using inverted target path muting to monitor a
+usr/include/EndpointSecurity/ESClient.h:346:  *       particular path for writing, you will need to check if the file(s) of
+usr/include/EndpointSecurity/ESClient.h:347:  *       interest are also reachable via additional hard links outside of the
+usr/include/EndpointSecurity/ESClient.h:348:  *       paths you are observing.
+usr/include/EndpointSecurity/ESClient.h:349:  *
+usr/include/EndpointSecurity/ESClient.h:350:  * @see es_mute_path_events
+usr/include/EndpointSecurity/ESClient.h:351:  * @discussion When using the path types ES_MUTE_PATH_TYPE_TARGET_PREFIX and ES_MUTE_PATH_TYPE_TARGET_LITERAL Not all events are
+usr/include/EndpointSecurity/ESClient.h:352:  * supported. Furthermore the interpretation of target path is contextual. For events with more than one target path (such as
+usr/include/EndpointSecurity/ESClient.h:353:  * exchangedata) the behavior depends on the mute inversion state Under normal muting the event is suppressed only if ALL paths
+usr/include/EndpointSecurity/ESClient.h:354:  * are muted When target path muting is inverted the event is selected if ANY target path is muted For example a rename will be
+usr/include/EndpointSecurity/ESClient.h:355:  * suppressed if and only if both the source path and destination path are muted. Supported events are listed below. For each
+usr/include/EndpointSecurity/ESClient.h:356:  * event the target path is defined as:
+usr/include/EndpointSecurity/ESClient.h:357:  *
+usr/include/EndpointSecurity/ESClient.h:358:  * EXEC: The file being executed
+usr/include/EndpointSecurity/ESClient.h:359:  * OPEN: The file being opened
+usr/include/EndpointSecurity/ESClient.h:360:  * MMAP: The file being memory mapped
+usr/include/EndpointSecurity/ESClient.h:361:  * RENAME: Both the source and destination path.
+usr/include/EndpointSecurity/ESClient.h:362:  * SIGNAL: The path of the process being signalled
+usr/include/EndpointSecurity/ESClient.h:363:  * UNLINK: The file being unlinked
+usr/include/EndpointSecurity/ESClient.h:364:  * CLOSE: The file being closed
+usr/include/EndpointSecurity/ESClient.h:365:  * CREATE: The path to the file that will be created or replaced
+usr/include/EndpointSecurity/ESClient.h:366:  * GET_TASK: The path of the process for which the task port is being retrieved
+usr/include/EndpointSecurity/ESClient.h:367:  * LINK: Both the source and destination path
+usr/include/EndpointSecurity/ESClient.h:368:  * SETATTRLIST: The file for which the attributes are being set
+usr/include/EndpointSecurity/ESClient.h:369:  * SETEXTATTR: The file for which the extended attributes are being set
+usr/include/EndpointSecurity/ESClient.h:370:  * SETFLAGS: The file for which flags are being set
+usr/include/EndpointSecurity/ESClient.h:371:  * SETMODE: The file for which the mode is being set
+usr/include/EndpointSecurity/ESClient.h:372:  * SETOWNER: The file for which the owner is being set
+usr/include/EndpointSecurity/ESClient.h:373:  * WRITE: The file being written to
+usr/include/EndpointSecurity/ESClient.h:374:  * READLINK: The symbolic link being resolved
+usr/include/EndpointSecurity/ESClient.h:375:  * TRUNCATE: The file being truncated
+usr/include/EndpointSecurity/ESClient.h:376:  * CHDIR: The new working directory
+usr/include/EndpointSecurity/ESClient.h:377:  * GETATTRLIST: The file for which the attribute list is being retrieved
+usr/include/EndpointSecurity/ESClient.h:378:  * STAT: The file for which the stat is being retrieved
+usr/include/EndpointSecurity/ESClient.h:379:  * ACCESS: The file for which access is being tested
+usr/include/EndpointSecurity/ESClient.h:380:  * CHROOT: The file which will become the new root
+usr/include/EndpointSecurity/ESClient.h:381:  * UTIMES: The file for which times are being set
+usr/include/EndpointSecurity/ESClient.h:382:  * CLONE: Both the source file and target path
+usr/include/EndpointSecurity/ESClient.h:383:  * FCNTL: The file under file control
+usr/include/EndpointSecurity/ESClient.h:384:  * GETEXTATTR The file for which extended attributes are being retrieved
+usr/include/EndpointSecurity/ESClient.h:385:  * LISTEXTATTR The file for which extended attributes are being listed
+usr/include/EndpointSecurity/ESClient.h:386:  * READDIR The directory for whose contents will be read
+usr/include/EndpointSecurity/ESClient.h:387:  * DELETEEXTATTR The file for which extended attribues will be deleted
+usr/include/EndpointSecurity/ESClient.h:388:  * DUP: The file being duplicated
+usr/include/EndpointSecurity/ESClient.h:389:  * UIPC_BIND: The path to the unix socket that will be created
+usr/include/EndpointSecurity/ESClient.h:390:  * UIPC_CONNECT: The file that the unix socket being connected is bound to
+usr/include/EndpointSecurity/ESClient.h:391:  * EXCHANGEDATA: The path of both file1 and file2
+usr/include/EndpointSecurity/ESClient.h:392:  * SETACL: The file for which ACLs are being set
+usr/include/EndpointSecurity/ESClient.h:393:  * PROC_CHECK: The path of the process against which access is being checked
+usr/include/EndpointSecurity/ESClient.h:394:  * SEARCHFS: The path of the volume which will be searched
+usr/include/EndpointSecurity/ESClient.h:395:  * PROC_SUSPEND_RESUME: The path of the process being suspended or resumed
+usr/include/EndpointSecurity/ESClient.h:396:  * GET_TASK_NAME: The path of the process for which the task name port will be retrieved
+usr/include/EndpointSecurity/ESClient.h:397:  * TRACE: The path of the process that will be attached to
+usr/include/EndpointSecurity/ESClient.h:398:  * REMOTE_THREAD_CREATE: The path of the process in which the new thread is created
+usr/include/EndpointSecurity/ESClient.h:399:  * GET_TASK_READ: The path of the process for which the task read port will be retrieved
+usr/include/EndpointSecurity/ESClient.h:400:  * GET_TASK_INSPECT: The path of the process for which the task inspect port will be retrieved
+usr/include/EndpointSecurity/ESClient.h:401:  * COPYFILE: The path to the source file and the path to either the new file to be created or the existing file to be overwritten
+usr/include/EndpointSecurity/ESClient.h:402:  */
+usr/include/EndpointSecurity/ESClient.h:403: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:404: API_AVAILABLE(macos(12.0))
+usr/include/EndpointSecurity/ESClient.h:405: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:406: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:407: es_return_t es_mute_path(es_client_t *_Nonnull client, const char *_Nonnull path, es_mute_path_type_t type);
+
+### es_unmute_path
+usr/include/EndpointSecurity/ESClient.h:490: /**
+usr/include/EndpointSecurity/ESClient.h:491:  * @brief Unmute a path for all event types.
+usr/include/EndpointSecurity/ESClient.h:492:  *
+usr/include/EndpointSecurity/ESClient.h:493:  * @param client The es_client_t for which the path will be unmuted.
+usr/include/EndpointSecurity/ESClient.h:494:  * @param path The path to unmute.
+usr/include/EndpointSecurity/ESClient.h:495:  * @param type Describes the type of the `path` parameter, either a prefix path or literal path.
+usr/include/EndpointSecurity/ESClient.h:496:  *
+usr/include/EndpointSecurity/ESClient.h:497:  * @return es_return_t A value indicating whether or not the path was successfully unmuted.
+usr/include/EndpointSecurity/ESClient.h:498:  *
+usr/include/EndpointSecurity/ESClient.h:499:  * @note Muting and unmuting operations logically work on a set of (path_type, path, es_event_type_t) tuples.
+usr/include/EndpointSecurity/ESClient.h:500:  * Unmuting is an idempotent set-subtraction: unmuting a path that is not currently muted is a safe no-op,
+usr/include/EndpointSecurity/ESClient.h:501:  * and muting the same path N times followed by a single unmute fully removes it.
+usr/include/EndpointSecurity/ESClient.h:502:  * Subtracting an element from the set that is not present has no effect.
+usr/include/EndpointSecurity/ESClient.h:503:  * For example if `(literal, /foo/bar/, *)` is muted
+usr/include/EndpointSecurity/ESClient.h:504:  * then `(prefix, /foo, *)` is unmuted the mute set is still:
+usr/include/EndpointSecurity/ESClient.h:505:  * `(literal, /foo/bar, *)`.
+usr/include/EndpointSecurity/ESClient.h:506:  * Prefixes only apply to mute evaluation not to modifications of the mute set.
+usr/include/EndpointSecurity/ESClient.h:507:  *
+usr/include/EndpointSecurity/ESClient.h:508:  * @see es_unmute_path_events
+usr/include/EndpointSecurity/ESClient.h:509:  */
+usr/include/EndpointSecurity/ESClient.h:510: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:511: API_AVAILABLE(macos(12.0))
+usr/include/EndpointSecurity/ESClient.h:512: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:513: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:514: es_return_t es_unmute_path(es_client_t *_Nonnull client, const char *_Nonnull path, es_mute_path_type_t type);
+
+### es_unmute_all_target_paths
+usr/include/EndpointSecurity/ESClient.h:481: /**
+usr/include/EndpointSecurity/ESClient.h:482:  * Unmute all target paths
+usr/include/EndpointSecurity/ESClient.h:483:  * @param client The client for which all currently muted target paths will be unmuted
+usr/include/EndpointSecurity/ESClient.h:484:  * @return es_return_t indicating success or error
+usr/include/EndpointSecurity/ESClient.h:485:  */
+usr/include/EndpointSecurity/ESClient.h:486: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:487: API_AVAILABLE(macos(13.0))
+usr/include/EndpointSecurity/ESClient.h:488: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) es_return_t es_unmute_all_target_paths(es_client_t *_Nonnull client);
+
+### es_invert_muting
+usr/include/EndpointSecurity/ESClient.h:569: /*
+usr/include/EndpointSecurity/ESClient.h:570:  * @brief Invert the mute state of a given mute dimension
+usr/include/EndpointSecurity/ESClient.h:571:  *
+usr/include/EndpointSecurity/ESClient.h:572:  * @param client The es_client_t for which muting will be inverted
+usr/include/EndpointSecurity/ESClient.h:573:  * @param mute_type The type of muting to invert (process, path, or target path).
+usr/include/EndpointSecurity/ESClient.h:574:  *
+usr/include/EndpointSecurity/ESClient.h:575:  * @return es_return_t A value indicating whether or not muting was inverted
+usr/include/EndpointSecurity/ESClient.h:576:  *
+usr/include/EndpointSecurity/ESClient.h:577:  * @discussion Inverting muting can be used to create a client that monitors a specific process(es) or set of directories
+usr/include/EndpointSecurity/ESClient.h:578:  * When muting is inverted it still combines with other types of muting using OR, and inversion happens first.
+usr/include/EndpointSecurity/ESClient.h:579:  * Consider a series of inputs for a system where pid 12 is muted, process muting is inverted, and /bin/bash is also path muted:
+usr/include/EndpointSecurity/ESClient.h:580:  *   (12, /bin/foo)  MATCHING (true, false)  INVERSION (false, false) || false → event is not suppressed
+usr/include/EndpointSecurity/ESClient.h:581:  *   (13, /bin/foo)  MATCHING (false, false) INVERSION (true, false)  || true  → event is suppressed
+usr/include/EndpointSecurity/ESClient.h:582:  *   (12, /bin/bash) MATCHING (true, true)   INVERSION (false, true)  || true  → event is suppressed
+usr/include/EndpointSecurity/ESClient.h:583:  *
+usr/include/EndpointSecurity/ESClient.h:584:  *   Note that because muting is combined using OR even when pid 12 is being selected using inverted process muting,
+usr/include/EndpointSecurity/ESClient.h:585:  *   (12, /bin/bash) is still suppressed because the path is muted
+usr/include/EndpointSecurity/ESClient.h:586:  *
+usr/include/EndpointSecurity/ESClient.h:587:  * The relationship between all three types of muting (proc,path,target-path) and how each can be inverted is complex.
+usr/include/EndpointSecurity/ESClient.h:588:  * The below flow chart explains in detail exactly how muting is applied in the kernel:
+usr/include/EndpointSecurity/ESClient.h:589:  *
+usr/include/EndpointSecurity/ESClient.h:590:  *  ┌──────────────────┐
+usr/include/EndpointSecurity/ESClient.h:591:  *  │      Event       │
+usr/include/EndpointSecurity/ESClient.h:592:  *  └──────────────────┘
+usr/include/EndpointSecurity/ESClient.h:593:  *            │
+usr/include/EndpointSecurity/ESClient.h:594:  *            ▼
+usr/include/EndpointSecurity/ESClient.h:595:  *  ┌──────────────────┐                                           ┌──────────────────┐
+usr/include/EndpointSecurity/ESClient.h:596:  *  │  Is Subscribed?  │────No────────────────────────────────────▶│  Suppress Event  │
+usr/include/EndpointSecurity/ESClient.h:597:  *  └──────────────────┘                                           └──────────────────┘
+usr/include/EndpointSecurity/ESClient.h:598:  *            │                                                              ▲
+usr/include/EndpointSecurity/ESClient.h:599:  *         Yes│                                                              │
+usr/include/EndpointSecurity/ESClient.h:600:  *            ▼                ┌────────────────┐                            │
+usr/include/EndpointSecurity/ESClient.h:601:  *  ┌──────────────────┐       │ Is Proc Muting │                            │
+usr/include/EndpointSecurity/ESClient.h:602:  *  │  Is Proc Muted?  ├─Yes──▶│   Inverted?    ├──No───────────────────────▶│
+usr/include/EndpointSecurity/ESClient.h:603:  *  └─────────┬────────┘       └────────────────┘                            │
+usr/include/EndpointSecurity/ESClient.h:604:  *            │                         │                                    │
+usr/include/EndpointSecurity/ESClient.h:605:  *          No│                        Yes                                   │
+usr/include/EndpointSecurity/ESClient.h:606:  *            ▼                         │                                    │
+usr/include/EndpointSecurity/ESClient.h:607:  *  ┌──────────────────┐                │                                    │
+usr/include/EndpointSecurity/ESClient.h:608:  *  │  Is Proc Muting  │                │                                    │
+usr/include/EndpointSecurity/ESClient.h:609:  *  │    Inverted?     │──Yes───────────)───────────────────────────────────▶│
+usr/include/EndpointSecurity/ESClient.h:610:  *  └─────────┬────────┘                │                                    │
+usr/include/EndpointSecurity/ESClient.h:611:  *            │                         │                                    │
+usr/include/EndpointSecurity/ESClient.h:612:  *          No│◀────────────────────────┘                                    │
+usr/include/EndpointSecurity/ESClient.h:613:  *            ▼                 ┌───────────────┐                            │
+usr/include/EndpointSecurity/ESClient.h:614:  *  ┌──────────────────┐        │Is Path Muting │                            │
+usr/include/EndpointSecurity/ESClient.h:615:  *  │  Is Path Muted?  │──Yes──▶│   Inverted?   ├──No───────────────────────▶│
+usr/include/EndpointSecurity/ESClient.h:616:  *  └─────────┬────────┘        └───────┬───────┘                            │
+usr/include/EndpointSecurity/ESClient.h:617:  *            │                         │                                    │
+usr/include/EndpointSecurity/ESClient.h:618:  *          No│                        Yes                                   │
+usr/include/EndpointSecurity/ESClient.h:619:  *            ▼                         │                                    │
+usr/include/EndpointSecurity/ESClient.h:620:  *  ┌──────────────────┐                │                                    │
+usr/include/EndpointSecurity/ESClient.h:621:  *  │  Is Path Muting  │                │                                    │
+usr/include/EndpointSecurity/ESClient.h:622:  *  │    Inverted?     │──Yes───────────)───────────────────────────────────▶│
+usr/include/EndpointSecurity/ESClient.h:623:  *  └─────────┬────────┘                │                                    │
+usr/include/EndpointSecurity/ESClient.h:624:  *            │                         │                                    │
+usr/include/EndpointSecurity/ESClient.h:625:  *          No│◀────────────────────────┘                                    │
+usr/include/EndpointSecurity/ESClient.h:626:  *            ▼                                                              │
+usr/include/EndpointSecurity/ESClient.h:627:  *  ┌──────────────────┐                                                     │
+usr/include/EndpointSecurity/ESClient.h:628:  *  │  Event Supports  │      ┌───────────────┐      ┌─────────────────┐     │
+usr/include/EndpointSecurity/ESClient.h:629:  *  │   Target Path    │─Yes─▶│Is Target Path ├─Yes─▶│ Are ANY target  ├─No─▶│
+usr/include/EndpointSecurity/ESClient.h:630:  *  │     Muting?      │      │Muting Inverted│      │  paths muted?   │     │
+usr/include/EndpointSecurity/ESClient.h:631:  *  └──────────────────┘      └──────┬────────┘      └───────┬─────────┘     │
+usr/include/EndpointSecurity/ESClient.h:632:  *            │                      │                       │               │
+usr/include/EndpointSecurity/ESClient.h:633:  *          No│                    No│                      Yes              │
+usr/include/EndpointSecurity/ESClient.h:634:  *            │                      ▼                       │               │
+usr/include/EndpointSecurity/ESClient.h:635:  *            │              ┌────────────────┐              │               │
+usr/include/EndpointSecurity/ESClient.h:636:  *            │              │ Are ALL target │              │               │
+usr/include/EndpointSecurity/ESClient.h:637:  *            │              │  paths muted?  ├─Yes──────────)───────────────┘
+usr/include/EndpointSecurity/ESClient.h:638:  *            │              └───────┬────────┘              │
+usr/include/EndpointSecurity/ESClient.h:639:  *            │                      │                       │
+usr/include/EndpointSecurity/ESClient.h:640:  *            │                    No│                       │
+usr/include/EndpointSecurity/ESClient.h:641:  *            │◀─────────────────────┘                       │
+usr/include/EndpointSecurity/ESClient.h:642:  *            │                                              │
+usr/include/EndpointSecurity/ESClient.h:643:  *            │◀─────────────────────────────────────────────┘
+usr/include/EndpointSecurity/ESClient.h:644:  *            │
+usr/include/EndpointSecurity/ESClient.h:645:  *            ▼
+usr/include/EndpointSecurity/ESClient.h:646:  *  ┌──────────────────┐
+usr/include/EndpointSecurity/ESClient.h:647:  *  │  Deliver Event   │
+usr/include/EndpointSecurity/ESClient.h:648:  *  └──────────────────┘
+usr/include/EndpointSecurity/ESClient.h:649:  *
+usr/include/EndpointSecurity/ESClient.h:650:  * @note Mute inversion does NOT clear the default mute set.
+usr/include/EndpointSecurity/ESClient.h:651:  * When a new `es_client_t` is created certain paths are muted by default.
+usr/include/EndpointSecurity/ESClient.h:652:  * This is known as "the default mute set".
+usr/include/EndpointSecurity/ESClient.h:653:  * The default mute set exists to protect ES clients from deadlocks, and to prevent watchdog timeout panics.
+usr/include/EndpointSecurity/ESClient.h:654:  * Creating a new client and calling `es_invert_muting(c, ES_MUTE_INVERSION_TYPE_PATH)` will result in the default mute set being
+usr/include/EndpointSecurity/ESClient.h:655:  * selected rather than muted. In most cases this is unintended. Consider calling `es_unmute_all_paths` before inverting process
+usr/include/EndpointSecurity/ESClient.h:656:  * path muting. Consider calling `es_unmute_all_target_paths` before inverting target path muting. Make sure the client has no
+usr/include/EndpointSecurity/ESClient.h:657:  * auth subscriptions before doing so. If desired the default mute set can be saved using `es_muted_paths_events` and then
+usr/include/EndpointSecurity/ESClient.h:658:  * restored after inverting again.
+usr/include/EndpointSecurity/ESClient.h:659:  *
+usr/include/EndpointSecurity/ESClient.h:660:  */
+usr/include/EndpointSecurity/ESClient.h:661: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:662: API_AVAILABLE(macos(13.0))
+usr/include/EndpointSecurity/ESClient.h:663: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:664: API_UNAVAILABLE(tvos, watchos) es_return_t es_invert_muting(es_client_t *_Nonnull client, es_mute_inversion_type_t mute_type);
+
+### es_muting_inverted
+usr/include/EndpointSecurity/ESClient.h:666: /*
+usr/include/EndpointSecurity/ESClient.h:667:  * @brief Query mute inversion state
+usr/include/EndpointSecurity/ESClient.h:668:  *
+usr/include/EndpointSecurity/ESClient.h:669:  * @param client The es_client_t for which mute inversion state is being queried.
+usr/include/EndpointSecurity/ESClient.h:670:  * @param mute_type The type of muting to query (process, path, or target path).
+usr/include/EndpointSecurity/ESClient.h:671:  *
+usr/include/EndpointSecurity/ESClient.h:672:  * @return es_mute_inverted_return_t Indicates if muting was inverted, not inverted, or if an error occurred.
+usr/include/EndpointSecurity/ESClient.h:673:  */
+usr/include/EndpointSecurity/ESClient.h:674: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:675: API_AVAILABLE(macos(13.0))
+usr/include/EndpointSecurity/ESClient.h:676: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:677: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:678: es_mute_inverted_return_t es_muting_inverted(es_client_t *_Nonnull client, es_mute_inversion_type_t mute_type);
+
+### es_exec_arg_count
+usr/include/EndpointSecurity/ESMessage.h:2869: /**
+usr/include/EndpointSecurity/ESMessage.h:2870:  * Get the number of arguments in a message containing an es_event_exec_t
+usr/include/EndpointSecurity/ESMessage.h:2871:  * @param event The es_event_exec_t being inspected
+usr/include/EndpointSecurity/ESMessage.h:2872:  * @return The number of arguments
+usr/include/EndpointSecurity/ESMessage.h:2873:  */
+usr/include/EndpointSecurity/ESMessage.h:2874: OS_EXPORT
+usr/include/EndpointSecurity/ESMessage.h:2875: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESMessage.h:2876: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) uint32_t es_exec_arg_count(const es_event_exec_t *_Nonnull event);
+
+### es_exec_arg
+usr/include/EndpointSecurity/ESMessage.h:2896: /**
+usr/include/EndpointSecurity/ESMessage.h:2897:  * Get the argument at the specified position in the message containing an es_event_exec_t
+usr/include/EndpointSecurity/ESMessage.h:2898:  * @param event The es_event_exec_t being inspected
+usr/include/EndpointSecurity/ESMessage.h:2899:  * @param index Index of the argument to retrieve (starts from 0)
+usr/include/EndpointSecurity/ESMessage.h:2900:  * @return  es_string_token_t containing a pointer to the argument and its length.
+usr/include/EndpointSecurity/ESMessage.h:2901:  *          This is a zero-allocation operation. The returned pointer must not outlive exec_event.
+usr/include/EndpointSecurity/ESMessage.h:2902:  * @brief Reading an an argument where `index` >= `es_exec_arg_count()` is undefined
+usr/include/EndpointSecurity/ESMessage.h:2903:  */
+usr/include/EndpointSecurity/ESMessage.h:2904: OS_EXPORT
+usr/include/EndpointSecurity/ESMessage.h:2905: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESMessage.h:2906: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESMessage.h:2907: API_UNAVAILABLE(tvos, watchos) es_string_token_t es_exec_arg(const es_event_exec_t *_Nonnull event, uint32_t index);
+
+## ES functions WhoRead does not call yet (macOS 12-27)
+
+### es_set_deadline_miss_mode
+usr/include/EndpointSecurity/ESClient.h:829: /**
+usr/include/EndpointSecurity/ESClient.h:830:  * Set the deadline miss mode for the specified client
+usr/include/EndpointSecurity/ESClient.h:831:  *
+usr/include/EndpointSecurity/ESClient.h:832:  * This determines how the system responds when the client fails to respond to an auth event
+usr/include/EndpointSecurity/ESClient.h:833:  * within the deadline. The default mode is ES_DEADLINE_MISS_MODE_KILL.
+usr/include/EndpointSecurity/ESClient.h:834:  *
+usr/include/EndpointSecurity/ESClient.h:835:  * @param client The client to configure
+usr/include/EndpointSecurity/ESClient.h:836:  * @param mode The deadline miss mode to set
+usr/include/EndpointSecurity/ESClient.h:837:  * @return ES_RETURN_SUCCESS on success, ES_RETURN_ERROR on failure
+usr/include/EndpointSecurity/ESClient.h:838:  *
+usr/include/EndpointSecurity/ESClient.h:839:  * @note This allows clients to defer deadline management to the kernel instead of implementing
+usr/include/EndpointSecurity/ESClient.h:840:  * their own timeout mechanisms.
+usr/include/EndpointSecurity/ESClient.h:841:  * @note When `ES_DEADLINE_MISS_MODE_FAIL_CLOSED` is used, if an `AUTH` message is dropped because
+usr/include/EndpointSecurity/ESClient.h:842:  * the message queue was full, it will be `DENY`ed instead of the usual `ALLOW` behaviour.
+usr/include/EndpointSecurity/ESClient.h:843:  */
+usr/include/EndpointSecurity/ESClient.h:844: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:845: API_AVAILABLE(macos(27.0))
+usr/include/EndpointSecurity/ESClient.h:846: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:847: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:848: es_return_t es_set_deadline_miss_mode(es_client_t *_Nonnull client, es_deadline_miss_mode_t mode);
+
+### es_get_deadline_miss_mode
+usr/include/EndpointSecurity/ESClient.h:850: /**
+usr/include/EndpointSecurity/ESClient.h:851:  * Get the current deadline miss mode for the specified client
+usr/include/EndpointSecurity/ESClient.h:852:  *
+usr/include/EndpointSecurity/ESClient.h:853:  * @param client The client to query
+usr/include/EndpointSecurity/ESClient.h:854:  * @param mode Output parameter for the current deadline miss mode
+usr/include/EndpointSecurity/ESClient.h:855:  * @return ES_RETURN_SUCCESS on success, ES_RETURN_ERROR on failure
+usr/include/EndpointSecurity/ESClient.h:856:  */
+usr/include/EndpointSecurity/ESClient.h:857: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:858: API_AVAILABLE(macos(27.0))
+usr/include/EndpointSecurity/ESClient.h:859: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:860: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:861: es_return_t es_get_deadline_miss_mode(es_client_t *_Nonnull client, es_deadline_miss_mode_t *_Nonnull mode);
+
+### es_set_deadline_max_milliseconds
+usr/include/EndpointSecurity/ESClient.h:863: /**
+usr/include/EndpointSecurity/ESClient.h:864:  * Set the maximum deadline in milliseconds for specified auth event types for this client
+usr/include/EndpointSecurity/ESClient.h:865:  *
+usr/include/EndpointSecurity/ESClient.h:866:  * This allows clients to configure lower per-event-type deadlines so that operations don't block for too long
+usr/include/EndpointSecurity/ESClient.h:867:  * if the client fails to respond. The kernel will automatically unblock operations based on the
+usr/include/EndpointSecurity/ESClient.h:868:  * client's deadline miss mode when the deadline expires.
+usr/include/EndpointSecurity/ESClient.h:869:  *
+usr/include/EndpointSecurity/ESClient.h:870:  * @param client The client to configure
+usr/include/EndpointSecurity/ESClient.h:871:  * @param events Array of event types to configure deadlines for
+usr/include/EndpointSecurity/ESClient.h:872:  * @param event_count Number of events in the events array
+usr/include/EndpointSecurity/ESClient.h:873:  * @return ES_RETURN_SUCCESS on success, ES_RETURN_ERROR on failure or if milliseconds exceeds system default
+usr/include/EndpointSecurity/ESClient.h:874:  *
+usr/include/EndpointSecurity/ESClient.h:875:  * @note If a deadline minimum has been set (see es_set_deadline_min_milliseconds) and the new maximum
+usr/include/EndpointSecurity/ESClient.h:876:  * would be lower than the current minimum, the minimum is adjusted down to match.
+usr/include/EndpointSecurity/ESClient.h:877:  */
+usr/include/EndpointSecurity/ESClient.h:878: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:879: API_AVAILABLE(macos(27.0))
+usr/include/EndpointSecurity/ESClient.h:880: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:881: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:882: es_return_t es_set_deadline_max_milliseconds(
+usr/include/EndpointSecurity/ESClient.h:883: 	es_client_t *_Nonnull client, const es_event_type_t *_Nonnull events, uint32_t event_count, uint32_t milliseconds
+usr/include/EndpointSecurity/ESClient.h:884: );
+
+### es_get_deadline_max_milliseconds
+usr/include/EndpointSecurity/ESClient.h:886: /**
+usr/include/EndpointSecurity/ESClient.h:887:  * Get the current maximum deadline in milliseconds for a specific event type
+usr/include/EndpointSecurity/ESClient.h:888:  *
+usr/include/EndpointSecurity/ESClient.h:889:  * @param client The client to query
+usr/include/EndpointSecurity/ESClient.h:890:  * @param event The event type to query the deadline for
+usr/include/EndpointSecurity/ESClient.h:891:  * @param milliseconds Output parameter for the current maximum deadline in milliseconds for the specified event
+usr/include/EndpointSecurity/ESClient.h:892:  * @return ES_RETURN_SUCCESS on success, ES_RETURN_ERROR on failure
+usr/include/EndpointSecurity/ESClient.h:893:  */
+usr/include/EndpointSecurity/ESClient.h:894: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:895: API_AVAILABLE(macos(27.0))
+usr/include/EndpointSecurity/ESClient.h:896: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:897: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:898: es_return_t
+usr/include/EndpointSecurity/ESClient.h:899: es_get_deadline_max_milliseconds(es_client_t *_Nonnull client, es_event_type_t event, uint32_t *_Nonnull milliseconds);
+
+### es_set_deadline_min_milliseconds
+usr/include/EndpointSecurity/ESClient.h:901: /**
+usr/include/EndpointSecurity/ESClient.h:902:  * Set the minimum deadline in milliseconds for specified auth event types for this client
+usr/include/EndpointSecurity/ESClient.h:903:  *
+usr/include/EndpointSecurity/ESClient.h:904:  * This allows descendants clients to configure a deadline floor so that deadlines are never shorter
+usr/include/EndpointSecurity/ESClient.h:905:  * than the specified value. Descendants clients can already kill or suspend their child processes
+usr/include/EndpointSecurity/ESClient.h:906:  * directly, furthermore no system daemons are the children of ES clients, so strict deadline
+usr/include/EndpointSecurity/ESClient.h:907:  * enforcement is unnecessary.
+usr/include/EndpointSecurity/ESClient.h:908:  *
+usr/include/EndpointSecurity/ESClient.h:909:  * @param client The client to configure. Must be a descendants client created with es_new_descendants_client().
+usr/include/EndpointSecurity/ESClient.h:910:  * @param events Array of event types to configure deadlines for. May not include
+usr/include/EndpointSecurity/ESClient.h:911:  *               ES_EVENT_TYPE_AUTH_BOOTSTRAP_CHECK_IN or ES_EVENT_TYPE_AUTH_BOOTSTRAP_LOOK_UP.
+usr/include/EndpointSecurity/ESClient.h:912:  * @param event_count Number of events in the events array
+usr/include/EndpointSecurity/ESClient.h:913:  * @param milliseconds The minimum deadline in milliseconds
+usr/include/EndpointSecurity/ESClient.h:914:  * @return ES_RETURN_SUCCESS on success, ES_RETURN_ERROR on failure, if client is not a descendants
+usr/include/EndpointSecurity/ESClient.h:915:  *         client, or if any event in the array is a bootstrap auth event.
+usr/include/EndpointSecurity/ESClient.h:916:  *
+usr/include/EndpointSecurity/ESClient.h:917:  * @note The default minimum deadline is 0 (no floor).
+usr/include/EndpointSecurity/ESClient.h:918:  *
+usr/include/EndpointSecurity/ESClient.h:919:  * @note The minimum is not capped by the system default. Setting a minimum above the system
+usr/include/EndpointSecurity/ESClient.h:920:  * default is permitted and will effectively extend deadlines beyond the system default.
+usr/include/EndpointSecurity/ESClient.h:921:  *
+usr/include/EndpointSecurity/ESClient.h:922:  * @note If the new minimum would exceed the current maximum for any of the specified events,
+usr/include/EndpointSecurity/ESClient.h:923:  * the maximum is adjusted up to match.
+usr/include/EndpointSecurity/ESClient.h:924:  */
+usr/include/EndpointSecurity/ESClient.h:925: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:926: API_AVAILABLE(macos(27.0))
+usr/include/EndpointSecurity/ESClient.h:927: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:928: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:929: es_return_t es_set_deadline_min_milliseconds(
+usr/include/EndpointSecurity/ESClient.h:930: 	es_client_t *_Nonnull client, const es_event_type_t *_Nonnull events, uint32_t event_count, uint32_t milliseconds
+usr/include/EndpointSecurity/ESClient.h:931: );
+
+### es_get_deadline_min_milliseconds
+usr/include/EndpointSecurity/ESClient.h:933: /**
+usr/include/EndpointSecurity/ESClient.h:934:  * Get the current minimum deadline in milliseconds for a specific event type
+usr/include/EndpointSecurity/ESClient.h:935:  *
+usr/include/EndpointSecurity/ESClient.h:936:  * @param client The client to query. Must be a descendants client created with es_new_descendants_client().
+usr/include/EndpointSecurity/ESClient.h:937:  * @param event The event type to query the deadline for
+usr/include/EndpointSecurity/ESClient.h:938:  * @param milliseconds Output parameter for the current minimum deadline in milliseconds for the specified event
+usr/include/EndpointSecurity/ESClient.h:939:  * @return ES_RETURN_SUCCESS on success, ES_RETURN_ERROR on failure or if client is not a descendants client
+usr/include/EndpointSecurity/ESClient.h:940:  */
+usr/include/EndpointSecurity/ESClient.h:941: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:942: API_AVAILABLE(macos(27.0))
+usr/include/EndpointSecurity/ESClient.h:943: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:944: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:945: es_return_t
+usr/include/EndpointSecurity/ESClient.h:946: es_get_deadline_min_milliseconds(es_client_t *_Nonnull client, es_event_type_t event, uint32_t *_Nonnull milliseconds);
+
+### es_new_descendants_client
+usr/include/EndpointSecurity/ESClient.h:798: /**
+usr/include/EndpointSecurity/ESClient.h:799:  * Create a new ES client scoped to descendant processes only.
+usr/include/EndpointSecurity/ESClient.h:800:  *
+usr/include/EndpointSecurity/ESClient.h:801:  * The returned client receives notify events for the calling process and
+usr/include/EndpointSecurity/ESClient.h:802:  * auth+notify events for its descendant processes (the entire subtree rooted
+usr/include/EndpointSecurity/ESClient.h:803:  * at the calling process). This includes descendants that already exist at the
+usr/include/EndpointSecurity/ESClient.h:804:  * time the client is created as well as any forked or exec'd afterward,
+usr/include/EndpointSecurity/ESClient.h:805:  * recursively. All other processes are invisible.
+usr/include/EndpointSecurity/ESClient.h:806:  *
+usr/include/EndpointSecurity/ESClient.h:807:  * Process muting works, but only for processes that are already in the
+usr/include/EndpointSecurity/ESClient.h:808:  * descendant subtree. es_mute_process / es_mute_process_events (and their
+usr/include/EndpointSecurity/ESClient.h:809:  * unmute counterparts) succeed for a process the client can already observe and
+usr/include/EndpointSecurity/ESClient.h:810:  * return ES_RETURN_ERROR for any process outside the subtree; the client
+usr/include/EndpointSecurity/ESClient.h:811:  * cannot reach a process it was never allowed to see. Path muting and
+usr/include/EndpointSecurity/ESClient.h:812:  * target-path muting work normally.
+usr/include/EndpointSecurity/ESClient.h:813:  *
+usr/include/EndpointSecurity/ESClient.h:814:  * @param client Out param. On success, set to the newly created es_client_t.
+usr/include/EndpointSecurity/ESClient.h:815:  * @param handler The handler block invoked for each event.
+usr/include/EndpointSecurity/ESClient.h:816:  * @return es_new_client_result_t indicating success or a specific error.
+usr/include/EndpointSecurity/ESClient.h:817:  *
+usr/include/EndpointSecurity/ESClient.h:818:  * @note Requires the com.apple.developer.endpoint-security.client entitlement.
+usr/include/EndpointSecurity/ESClient.h:819:  * @note Does NOT require root privilege.
+usr/include/EndpointSecurity/ESClient.h:820:  * @note Does NOT require TCC approval.
+usr/include/EndpointSecurity/ESClient.h:821:  * @note Events will be delivered when a descendant submits the event or instigates it
+usr/include/EndpointSecurity/ESClient.h:822:  */
+usr/include/EndpointSecurity/ESClient.h:823: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:824: API_AVAILABLE(macos(27.0))
+usr/include/EndpointSecurity/ESClient.h:825: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:826: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:827: es_new_client_result_t es_new_descendants_client(es_client_t *_Nullable *_Nonnull client, es_handler_block_t _Nonnull handler);
+
+### es_sync_client
+usr/include/EndpointSecurity/ESClient.h:700: /**
+usr/include/EndpointSecurity/ESClient.h:701:  * @brief Place a sync marker at the back of the message queue for `client`, run `block` when it reaches the front of the queue.
+usr/include/EndpointSecurity/ESClient.h:702:  * @param client The client to synchronise.
+usr/include/EndpointSecurity/ESClient.h:703:  * @param block The block that runs after all messages in front of the sync marker have been handled.
+usr/include/EndpointSecurity/ESClient.h:704:  * @discussion To best take advantage of this function it's important the caller understand the message queue invariants of an ES
+usr/include/EndpointSecurity/ESClient.h:705:  * client.
+usr/include/EndpointSecurity/ESClient.h:706:  *
+usr/include/EndpointSecurity/ESClient.h:707:  * When a program issues a syscall (or similar), it is guaranteed that before control is returned to the caller, the associated ES
+usr/include/EndpointSecurity/ESClient.h:708:  * message has been created and enqueued with all ES clients.
+usr/include/EndpointSecurity/ESClient.h:709:  * Message delivery is asynchronous (even for auth evnts), but enqueing is fully synchronous.
+usr/include/EndpointSecurity/ESClient.h:710:  * With that in mind, it makes it possible to write such code as:
+usr/include/EndpointSecurity/ESClient.h:711:  *
+usr/include/EndpointSecurity/ESClient.h:712:  * ```
+usr/include/EndpointSecurity/ESClient.h:713:  * dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+usr/include/EndpointSecurity/ESClient.h:714:  * (void)open("/tmp/foo");
+usr/include/EndpointSecurity/ESClient.h:715:  * es_sync_client(client, ^(){ dispatch_semaphore_signal(sema); });
+usr/include/EndpointSecurity/ESClient.h:716:  * dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+usr/include/EndpointSecurity/ESClient.h:717:  * // At this point the open event for /tmp/foo has been delivered
+usr/include/EndpointSecurity/ESClient.h:718:  * ```
+usr/include/EndpointSecurity/ESClient.h:719:  * This is useful for any program that both has effects and subsribes to ES events.
+usr/include/EndpointSecurity/ESClient.h:720:  * `es_sync_client()` can tell you "When have all the events I am waiting for arrived?"
+usr/include/EndpointSecurity/ESClient.h:721:  *
+usr/include/EndpointSecurity/ESClient.h:722:  * Sync points are a more general concept with uses beyond this, for example if a caller unsubscribes from a certain event type,
+usr/include/EndpointSecurity/ESClient.h:723:  * they could then call `es_sync_client()`, and after the callback fires, know that all events of that type have now been
+usr/include/EndpointSecurity/ESClient.h:724:  * delivered.
+usr/include/EndpointSecurity/ESClient.h:725:  *
+usr/include/EndpointSecurity/ESClient.h:726:  * @note If the ES client is destroyed, all sync blocks are called.
+usr/include/EndpointSecurity/ESClient.h:727:  * @note This forces the current batch of messages to be flushed, the handler will be scheduled until the sync marker
+usr/include/EndpointSecurity/ESClient.h:728:  * is reached.
+usr/include/EndpointSecurity/ESClient.h:729:  * @note Can NOT be called from the ES handler block of `client`.
+usr/include/EndpointSecurity/ESClient.h:730:  * @note If client is null, the callback is immediately invoked and the function returns `ES_RETURN_SUCCESS`.
+usr/include/EndpointSecurity/ESClient.h:731:  */
+usr/include/EndpointSecurity/ESClient.h:732: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:733: API_AVAILABLE(macos(27.0), ios(27.0))
+usr/include/EndpointSecurity/ESClient.h:734: API_UNAVAILABLE(tvos, watchos) es_return_t es_sync_client(es_client_t *_Nonnull client, void (^_Nonnull block)(void));
+
+### es_exec_entitlements
+usr/include/EndpointSecurity/ESMessage.h:2935: /**
+usr/include/EndpointSecurity/ESMessage.h:2936:  * @brief Get the dictionary of entitlements associated with a message containing an es_event_exec_t
+usr/include/EndpointSecurity/ESMessage.h:2937:  *
+usr/include/EndpointSecurity/ESMessage.h:2938:  * @param exec The es_event_exec_t being inspected
+usr/include/EndpointSecurity/ESMessage.h:2939:  * @return The XPC dictionary containing all entitlements, or NULL if there are no entitlements.
+usr/include/EndpointSecurity/ESMessage.h:2940:  *
+usr/include/EndpointSecurity/ESMessage.h:2941:  * @note The caller is responsible for releasing the returned object.
+usr/include/EndpointSecurity/ESMessage.h:2942:  */
+usr/include/EndpointSecurity/ESMessage.h:2943: OS_EXPORT
+usr/include/EndpointSecurity/ESMessage.h:2944: OS_OBJECT_RETURNS_RETAINED
+usr/include/EndpointSecurity/ESMessage.h:2945: API_AVAILABLE(macos(27.0))
+usr/include/EndpointSecurity/ESMessage.h:2946: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESMessage.h:2947: API_UNAVAILABLE(tvos, watchos) _Nullable xpc_object_t es_exec_entitlements(const es_event_exec_t *_Nonnull exec);
+
+### es_muted_paths_events
+usr/include/EndpointSecurity/ESClient.h:541: /**
+usr/include/EndpointSecurity/ESClient.h:542:  * @brief Retrieve a list of all muted paths.
+usr/include/EndpointSecurity/ESClient.h:543:  *
+usr/include/EndpointSecurity/ESClient.h:544:  * @param client The es_client_t for which the muted paths will be retrieved.
+usr/include/EndpointSecurity/ESClient.h:545:  * @param muted_paths OUT param the will contain newly created memory describing the set of
+usr/include/EndpointSecurity/ESClient.h:546:  *        muted paths. This memory must be deleted using `es_release_muted_paths`.
+usr/include/EndpointSecurity/ESClient.h:547:  *
+usr/include/EndpointSecurity/ESClient.h:548:  * @return es_return_t A value indicating whether or not the list of muted paths were successfully retrieved.
+usr/include/EndpointSecurity/ESClient.h:549:  *
+usr/include/EndpointSecurity/ESClient.h:550:  * @see es_release_muted_paths
+usr/include/EndpointSecurity/ESClient.h:551:  */
+usr/include/EndpointSecurity/ESClient.h:552: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:553: API_AVAILABLE(macos(12.0))
+usr/include/EndpointSecurity/ESClient.h:554: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:555: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:556: es_return_t es_muted_paths_events(es_client_t *_Nonnull client, es_muted_paths_t *_Nonnull *_Nullable muted_paths);
+
+### es_release_muted_paths
+usr/include/EndpointSecurity/ESClient.h:558: /**
+usr/include/EndpointSecurity/ESClient.h:559:  * @brief Delete a set of muted paths obtained from `es_muted_paths_events`, freeing resources.
+usr/include/EndpointSecurity/ESClient.h:560:  *
+usr/include/EndpointSecurity/ESClient.h:561:  * @param muted_paths A set of muted paths to delete.
+usr/include/EndpointSecurity/ESClient.h:562:  *
+usr/include/EndpointSecurity/ESClient.h:563:  * @see es_muted_paths_events
+usr/include/EndpointSecurity/ESClient.h:564:  */
+usr/include/EndpointSecurity/ESClient.h:565: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:566: API_AVAILABLE(macos(12.0))
+usr/include/EndpointSecurity/ESClient.h:567: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) void es_release_muted_paths(es_muted_paths_t *_Nonnull muted_paths);
+
+### es_mute_path_events
+usr/include/EndpointSecurity/ESClient.h:409: /**
+usr/include/EndpointSecurity/ESClient.h:410:  * @brief Suppress a subset of events matching a path.
+usr/include/EndpointSecurity/ESClient.h:411:  *
+usr/include/EndpointSecurity/ESClient.h:412:  * @param client The es_client_t for which the path will be muted.
+usr/include/EndpointSecurity/ESClient.h:413:  * @param path The path to mute.
+usr/include/EndpointSecurity/ESClient.h:414:  * @param type Describes the type of the `path` parameter, either a prefix path or literal path.
+usr/include/EndpointSecurity/ESClient.h:415:  * @param events Array of event types for which the path should be muted.
+usr/include/EndpointSecurity/ESClient.h:416:  * @param event_count The number of items in the `events` array.
+usr/include/EndpointSecurity/ESClient.h:417:  *
+usr/include/EndpointSecurity/ESClient.h:418:  * @return es_return_t A value indicating whether or not the path was successfully muted.
+usr/include/EndpointSecurity/ESClient.h:419:  *
+usr/include/EndpointSecurity/ESClient.h:420:  * @see es_mute_path
+usr/include/EndpointSecurity/ESClient.h:421:  * @discussion when using ES_MUTE_PATH_TYPE_TARGET_PREFIX and ES_MUTE_PATH_TYPE_TARGET_LITERAL not all events are supported.
+usr/include/EndpointSecurity/ESClient.h:422:  * Target muting a path for an event type that does not support target muting is a no-op.
+usr/include/EndpointSecurity/ESClient.h:423:  * If at least one event type was muted for a target path then ES_RETURN_SUCCESS is returned.
+usr/include/EndpointSecurity/ESClient.h:424:  * If all specified event types do not support target muting ES_RETURN_ERROR is returned.
+usr/include/EndpointSecurity/ESClient.h:425:  * See es_mute_path for the list of events that support target path muting.
+usr/include/EndpointSecurity/ESClient.h:426:  */
+usr/include/EndpointSecurity/ESClient.h:427: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:428: API_AVAILABLE(macos(12.0))
+usr/include/EndpointSecurity/ESClient.h:429: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:430: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:431: es_return_t es_mute_path_events(
+usr/include/EndpointSecurity/ESClient.h:432: 	es_client_t *_Nonnull client,
+usr/include/EndpointSecurity/ESClient.h:433: 	const char *_Nonnull path,
+usr/include/EndpointSecurity/ESClient.h:434: 	es_mute_path_type_t type,
+usr/include/EndpointSecurity/ESClient.h:435: 	const es_event_type_t *_Nonnull events,
+usr/include/EndpointSecurity/ESClient.h:436: 	size_t event_count
+usr/include/EndpointSecurity/ESClient.h:437: );
+
+### es_mute_process_events
+usr/include/EndpointSecurity/ESClient.h:213: /**
+usr/include/EndpointSecurity/ESClient.h:214:  * @brief Suppress a subset of events from the process described by the given `audit_token`
+usr/include/EndpointSecurity/ESClient.h:215:  *
+usr/include/EndpointSecurity/ESClient.h:216:  * @param client The client for which events will be suppressed
+usr/include/EndpointSecurity/ESClient.h:217:  * @param audit_token The audit token of the process for which events will be suppressed
+usr/include/EndpointSecurity/ESClient.h:218:  * @param events Array of event types for which the audit_token should be muted.
+usr/include/EndpointSecurity/ESClient.h:219:  * @param event_count The number of items in the `events` array.
+usr/include/EndpointSecurity/ESClient.h:220:  *
+usr/include/EndpointSecurity/ESClient.h:221:  * @return es_return_t A value indicating whether or not the process was successfully muted.
+usr/include/EndpointSecurity/ESClient.h:222:  *
+usr/include/EndpointSecurity/ESClient.h:223:  * @note Event types >= ES_EVENT_TYPE_LAST are silently ignored. The remaining
+usr/include/EndpointSecurity/ESClient.h:224:  *       valid events are still processed.
+usr/include/EndpointSecurity/ESClient.h:225:  *
+usr/include/EndpointSecurity/ESClient.h:226:  * @see es_mute_process
+usr/include/EndpointSecurity/ESClient.h:227:  */
+usr/include/EndpointSecurity/ESClient.h:228: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:229: API_AVAILABLE(macos(12.0))
+usr/include/EndpointSecurity/ESClient.h:230: API_UNAVAILABLE(ios)
+usr/include/EndpointSecurity/ESClient.h:231: API_UNAVAILABLE(tvos, watchos)
+usr/include/EndpointSecurity/ESClient.h:232: es_return_t es_mute_process_events(
+usr/include/EndpointSecurity/ESClient.h:233: 	es_client_t *_Nonnull client,
+usr/include/EndpointSecurity/ESClient.h:234: 	const audit_token_t *_Nonnull audit_token,
+usr/include/EndpointSecurity/ESClient.h:235: 	const es_event_type_t *_Nonnull events,
+usr/include/EndpointSecurity/ESClient.h:236: 	size_t event_count
+usr/include/EndpointSecurity/ESClient.h:237: );
+
+### es_unmute_all_paths
+usr/include/EndpointSecurity/ESClient.h:470: /**
+usr/include/EndpointSecurity/ESClient.h:471:  * Unmute all paths
+usr/include/EndpointSecurity/ESClient.h:472:  * @param client The client for which all currently muted paths will be unmuted
+usr/include/EndpointSecurity/ESClient.h:473:  * @return es_return_t indicating success or error
+usr/include/EndpointSecurity/ESClient.h:474:  *
+usr/include/EndpointSecurity/ESClient.h:475:  * @note Only unmutes executable paths. To unmute target paths see: `es_unmute_all_target_paths`.
+usr/include/EndpointSecurity/ESClient.h:476:  */
+usr/include/EndpointSecurity/ESClient.h:477: OS_EXPORT
+usr/include/EndpointSecurity/ESClient.h:478: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESClient.h:479: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) es_return_t es_unmute_all_paths(es_client_t *_Nonnull client);
+
+### es_exec_env_count
+usr/include/EndpointSecurity/ESMessage.h:2878: /**
+usr/include/EndpointSecurity/ESMessage.h:2879:  * Get the number of environment variables in a message containing an es_event_exec_t
+usr/include/EndpointSecurity/ESMessage.h:2880:  * @param event The es_event_exec_t being inspected
+usr/include/EndpointSecurity/ESMessage.h:2881:  * @return The number of environment variables
+usr/include/EndpointSecurity/ESMessage.h:2882:  */
+usr/include/EndpointSecurity/ESMessage.h:2883: OS_EXPORT
+usr/include/EndpointSecurity/ESMessage.h:2884: API_AVAILABLE(macos(10.15))
+usr/include/EndpointSecurity/ESMessage.h:2885: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) uint32_t es_exec_env_count(const es_event_exec_t *_Nonnull event);
+
+### es_exec_fd_count
+usr/include/EndpointSecurity/ESMessage.h:2887: /**
+usr/include/EndpointSecurity/ESMessage.h:2888:  * Get the number of file descriptors in a message containing an es_event_exec_t
+usr/include/EndpointSecurity/ESMessage.h:2889:  * @param event The es_event_exec_t being inspected
+usr/include/EndpointSecurity/ESMessage.h:2890:  * @return The number of file descriptors
+usr/include/EndpointSecurity/ESMessage.h:2891:  */
+usr/include/EndpointSecurity/ESMessage.h:2892: OS_EXPORT
+usr/include/EndpointSecurity/ESMessage.h:2893: API_AVAILABLE(macos(11.0))
+usr/include/EndpointSecurity/ESMessage.h:2894: API_UNAVAILABLE(ios) API_UNAVAILABLE(tvos, watchos) uint32_t es_exec_fd_count(const es_event_exec_t *_Nonnull event);
+
+## Header notes
+
+### grep: Cache key
+usr/include/EndpointSecurity/ESClient.h:93: *        caching semantics depend on es_event_type_t.  Cache key is generally
+usr/include/EndpointSecurity/ESClient.h:117: *        caching semantics depend on es_event_type_t.  Cache key is generally
+usr/include/EndpointSecurity/ESMessage.h:246: * @note Cache key for this event type:  (process executable file, target executable file)
+usr/include/EndpointSecurity/ESMessage.h:305: * @note Cache key for this event type:  (process executable file, file that will be opened)
+usr/include/EndpointSecurity/ESMessage.h:368: * @note Cache key for this event type:  (process executable file, source file)
+usr/include/EndpointSecurity/ESMessage.h:401: * @note Cache key for this event type:  (process executable file, mount point)
+usr/include/EndpointSecurity/ESMessage.h:552: * @note Cache key for this event type:  (process executable file, target file)
+usr/include/EndpointSecurity/ESMessage.h:583: * @note Cache key for this event type:  (process executable file, target file)
+usr/include/EndpointSecurity/ESMessage.h:600: * @note Cache key for this event type:  (process executable file, target file)
+usr/include/EndpointSecurity/ESMessage.h:618: * @note Cache key for this event type:  (process executable file, target file)
+usr/include/EndpointSecurity/ESMessage.h:763: * @note Cache key for this event type:  (process executable file, target directory)
+usr/include/EndpointSecurity/ESMessage.h:787: * @note Cache key for this event type:  (process executable file, target directory)
+usr/include/EndpointSecurity/ESMessage.h:799: * @note Cache key for this event type:  (process executable file, target file)
+usr/include/EndpointSecurity/ESMessage.h:855: * @note Cache key for this event type:
+usr/include/EndpointSecurity/ESMessage.h:874: * @note Cache key for this event type:
+usr/include/EndpointSecurity/ESMessage.h:925: * @note Cache key for this event type:  (process executable file, target file)
+usr/include/EndpointSecurity/ESMessage.h:1029: * @note Cache key for this event type:  (process executable file, target file)
+usr/include/EndpointSecurity/ESMessage.h:1100: * @note Cache key for this event type:  (process executable file, target directory)
+usr/include/EndpointSecurity/ESMessage.h:1115: * @note Cache key for this event type:  (process executable file, target file)
+usr/include/EndpointSecurity/ESMessage.h:1172: * @note Cache key for this event type:  (process executable file, socket file)
+usr/include/EndpointSecurity/ESMessage.h:1240: * @note Cache key for this event type:  (process executable file, target process executable file, type)
+usr/include/EndpointSecurity/ESMessage.h:1255: * @note Cache key for this event type:  (process executable file, target file)
+
+### grep: does not support caching
+usr/include/EndpointSecurity/ESMessage.h:279: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:320: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:335: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:351: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:386: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:414: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:428: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:442: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:456: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:488: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:517: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:538: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:566: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:635: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:687: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:713: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:726: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:739: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:751: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:775: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:824: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:893: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:911: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:939: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:953: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:969: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:1000: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:1014: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:1045: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:1069: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:1087: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:1130: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:1141: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:1155: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:1198: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:1214: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:1226: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:1271: * @note This event type does not support caching.
+usr/include/EndpointSecurity/ESMessage.h:1289: * @note This event type does not support caching (notify-only).
+usr/include/EndpointSecurity/ESMessage.h:1304: * @note This event type does not support caching (notify-only).
+
+### grep: ANY target path
+usr/include/EndpointSecurity/ESClient.h:354: * are muted When target path muting is inverted the event is selected if ANY target path is muted For example a rename will be
+
+### grep: ALL paths
+usr/include/EndpointSecurity/ESClient.h:353: * exchangedata) the behavior depends on the mute inversion state Under normal muting the event is suppressed only if ALL paths
+
+### grep: deadline
+usr/include/EndpointSecurity/ESClient.h:830: * Set the deadline miss mode for the specified client
+usr/include/EndpointSecurity/ESClient.h:833: * within the deadline. The default mode is ES_DEADLINE_MISS_MODE_KILL.
+usr/include/EndpointSecurity/ESClient.h:836: * @param mode The deadline miss mode to set
+usr/include/EndpointSecurity/ESClient.h:839: * @note This allows clients to defer deadline management to the kernel instead of implementing
+usr/include/EndpointSecurity/ESClient.h:848:es_return_t es_set_deadline_miss_mode(es_client_t *_Nonnull client, es_deadline_miss_mode_t mode);
+usr/include/EndpointSecurity/ESClient.h:851: * Get the current deadline miss mode for the specified client
+usr/include/EndpointSecurity/ESClient.h:854: * @param mode Output parameter for the current deadline miss mode
+usr/include/EndpointSecurity/ESClient.h:861:es_return_t es_get_deadline_miss_mode(es_client_t *_Nonnull client, es_deadline_miss_mode_t *_Nonnull mode);
+usr/include/EndpointSecurity/ESClient.h:864: * Set the maximum deadline in milliseconds for specified auth event types for this client
+usr/include/EndpointSecurity/ESClient.h:866: * This allows clients to configure lower per-event-type deadlines so that operations don't block for too long
+usr/include/EndpointSecurity/ESClient.h:868: * client's deadline miss mode when the deadline expires.
+usr/include/EndpointSecurity/ESClient.h:871: * @param events Array of event types to configure deadlines for
+usr/include/EndpointSecurity/ESClient.h:875: * @note If a deadline minimum has been set (see es_set_deadline_min_milliseconds) and the new maximum
+usr/include/EndpointSecurity/ESClient.h:882:es_return_t es_set_deadline_max_milliseconds(
+usr/include/EndpointSecurity/ESClient.h:887: * Get the current maximum deadline in milliseconds for a specific event type
+usr/include/EndpointSecurity/ESClient.h:890: * @param event The event type to query the deadline for
+usr/include/EndpointSecurity/ESClient.h:891: * @param milliseconds Output parameter for the current maximum deadline in milliseconds for the specified event
+usr/include/EndpointSecurity/ESClient.h:899:es_get_deadline_max_milliseconds(es_client_t *_Nonnull client, es_event_type_t event, uint32_t *_Nonnull milliseconds);
+usr/include/EndpointSecurity/ESClient.h:902: * Set the minimum deadline in milliseconds for specified auth event types for this client
+usr/include/EndpointSecurity/ESClient.h:904: * This allows descendants clients to configure a deadline floor so that deadlines are never shorter
+usr/include/EndpointSecurity/ESClient.h:906: * directly, furthermore no system daemons are the children of ES clients, so strict deadline
+usr/include/EndpointSecurity/ESClient.h:910: * @param events Array of event types to configure deadlines for. May not include
+usr/include/EndpointSecurity/ESClient.h:913: * @param milliseconds The minimum deadline in milliseconds
+usr/include/EndpointSecurity/ESClient.h:917: * @note The default minimum deadline is 0 (no floor).
+usr/include/EndpointSecurity/ESClient.h:920: * default is permitted and will effectively extend deadlines beyond the system default.
+usr/include/EndpointSecurity/ESClient.h:929:es_return_t es_set_deadline_min_milliseconds(
+usr/include/EndpointSecurity/ESClient.h:934: * Get the current minimum deadline in milliseconds for a specific event type
+usr/include/EndpointSecurity/ESClient.h:937: * @param event The event type to query the deadline for
+usr/include/EndpointSecurity/ESClient.h:938: * @param milliseconds Output parameter for the current minimum deadline in milliseconds for the specified event
+usr/include/EndpointSecurity/ESClient.h:946:es_get_deadline_min_milliseconds(es_client_t *_Nonnull client, es_event_type_t event, uint32_t *_Nonnull milliseconds);
+usr/include/EndpointSecurity/ESMessage.h:2704: * @field deadline The Mach absolute time before which an auth event must
+usr/include/EndpointSecurity/ESMessage.h:2705: *        be responded to. If a client fails to respond to auth events prior to the `deadline`,
+usr/include/EndpointSecurity/ESMessage.h:2707: *        Each message can contain its own unique deadline, and some deadlines
+usr/include/EndpointSecurity/ESMessage.h:2708: *        can vary substantially. Clients must take care to inspect the deadline
+usr/include/EndpointSecurity/ESMessage.h:2770:	uint64_t deadline;
+usr/include/EndpointSecurity/ESTypes.h:849: * within the deadline.
+usr/include/EndpointSecurity/ESTypes.h:858:} es_deadline_miss_mode_t;
+
+### grep: Thread Safety
+usr/include/EndpointSecurity/ESClient.h:777: * @discussion Thread Safety
+
+### grep: safe to call
+usr/include/EndpointSecurity/ESClient.h:780: * unmute, respond, retain, release, and cache operations — are safe to call
+usr/include/EndpointSecurity/ESClient.h:783: * The only exception is es_delete_client(), which is not safe to call
+usr/include/EndpointSecurity/ESClient.h:953: * @note Not safe to call concurrently with any other es_* function (including itself).
+
+### grep: default mute set
+usr/include/EndpointSecurity/ESClient.h:650: * @note Mute inversion does NOT clear the default mute set.
+usr/include/EndpointSecurity/ESClient.h:652: * This is known as "the default mute set".
+usr/include/EndpointSecurity/ESClient.h:653: * The default mute set exists to protect ES clients from deadlocks, and to prevent watchdog timeout panics.
+usr/include/EndpointSecurity/ESClient.h:654: * Creating a new client and calling `es_invert_muting(c, ES_MUTE_INVERSION_TYPE_PATH)` will result in the default mute set being
+usr/include/EndpointSecurity/ESClient.h:657: * auth subscriptions before doing so. If desired the default mute set can be saved using `es_muted_paths_events` and then
+
+### grep: hard") links
+usr/include/EndpointSecurity/ESClient.h:343: *       No special provisions are made for files with multiple ("hard") links,
+
+### grep: can fire multiple times
+usr/include/EndpointSecurity/ESMessage.h:348: * @note This event can fire multiple times for a single syscall, for example when the syscall
+usr/include/EndpointSecurity/ESMessage.h:514: * @note This event can fire multiple times for a single syscall, for example when the syscall
+usr/include/EndpointSecurity/ESMessage.h:684: * @note This event can fire multiple times for a single syscall, for example when the syscall
+usr/include/EndpointSecurity/ESMessage.h:1112: * @note This event can fire multiple times for a single syscall, for example when the syscall
+usr/include/EndpointSecurity/ESMessage.h:1301: * @note This event can fire multiple times for a single trace attempt, for example
+
+### grep: message version >=
+usr/include/EndpointSecurity/ESMessage.h:251:	es_string_token_t dyld_exec_path; /* field available only if message version >= 7 */
+usr/include/EndpointSecurity/ESMessage.h:255:			es_file_t *_Nullable script;    /* field available only if message version >= 2 */
+usr/include/EndpointSecurity/ESMessage.h:256:			es_file_t *_Nonnull cwd;        /* field available only if message version >= 3 */
+usr/include/EndpointSecurity/ESMessage.h:257:			int last_fd;                    /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessage.h:258:			cpu_type_t image_cputype;       /* field available only if message version >= 6 */
+usr/include/EndpointSecurity/ESMessage.h:259:			cpu_subtype_t image_cpusubtype; /* field available only if message version >= 6 */
+usr/include/EndpointSecurity/ESMessage.h:405:	es_mount_disposition_t disposition; /* field available only if message version >= 8 */
+usr/include/EndpointSecurity/ESMessage.h:432:	uint64_t remount_flags;             /* field available only if message version >= 8 */
+usr/include/EndpointSecurity/ESMessage.h:433:	es_mount_disposition_t disposition; /* field available only if message version >= 8 */
+usr/include/EndpointSecurity/ESMessage.h:495:	es_process_t *_Nullable instigator; /* field available only if message version >= 9 */
+usr/include/EndpointSecurity/ESMessage.h:651:			bool was_mapped_writable; /* Field available only if message version >= 6. */
+usr/include/EndpointSecurity/ESMessage.h:703:			acl_t _Nullable acl; /* field available only if message version >= 2 */
+usr/include/EndpointSecurity/ESMessage.h:829:	uint64_t parent_registry_id;   /* field available only if message version >= 10 */
+usr/include/EndpointSecurity/ESMessage.h:830:	es_string_token_t parent_path; /* field available only if message version >= 10 */
+usr/include/EndpointSecurity/ESMessage.h:860:	es_get_task_type_t type; /* field available only if message version >= 5 */
+usr/include/EndpointSecurity/ESMessage.h:879:	es_get_task_type_t type; /* field available only if message version >= 5 */
+usr/include/EndpointSecurity/ESMessage.h:897:	es_get_task_type_t type; /* field available only if message version >= 5 */
+usr/include/EndpointSecurity/ESMessage.h:915:	es_get_task_type_t type; /* field available only if message version >= 5 */
+usr/include/EndpointSecurity/ESMessage.h:1534:	es_string_token_t detected_executable; /* field available only if message version >= 10 */
+usr/include/EndpointSecurity/ESMessage.h:2772:	uint64_t seq_num; /* field available only if message version >= 2 */
+usr/include/EndpointSecurity/ESMessage.h:2780:	es_thread_t *_Nullable thread; /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessage.h:2781:	uint64_t global_seq_num;       /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessageCore.h:110:	es_file_t *_Nullable tty;                           /* field available only if message version >= 2 */
+usr/include/EndpointSecurity/ESMessageCore.h:111:	struct timeval start_time;                          /* field available only if message version >= 3 */
+usr/include/EndpointSecurity/ESMessageCore.h:112:	audit_token_t responsible_audit_token;              /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessageCore.h:113:	audit_token_t parent_audit_token;                   /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessageCore.h:114:	es_cs_validation_category_t cs_validation_category; /* field available only if message version >= 10 */
+usr/include/EndpointSecurity/ESMessageCore.h:125:	es_token_t cdhash_full; /* field available only if message version >= 11 */
+
+### grep: version >=
+usr/include/EndpointSecurity/ESMessage.h:251:	es_string_token_t dyld_exec_path; /* field available only if message version >= 7 */
+usr/include/EndpointSecurity/ESMessage.h:255:			es_file_t *_Nullable script;    /* field available only if message version >= 2 */
+usr/include/EndpointSecurity/ESMessage.h:256:			es_file_t *_Nonnull cwd;        /* field available only if message version >= 3 */
+usr/include/EndpointSecurity/ESMessage.h:257:			int last_fd;                    /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessage.h:258:			cpu_type_t image_cputype;       /* field available only if message version >= 6 */
+usr/include/EndpointSecurity/ESMessage.h:259:			cpu_subtype_t image_cpusubtype; /* field available only if message version >= 6 */
+usr/include/EndpointSecurity/ESMessage.h:405:	es_mount_disposition_t disposition; /* field available only if message version >= 8 */
+usr/include/EndpointSecurity/ESMessage.h:432:	uint64_t remount_flags;             /* field available only if message version >= 8 */
+usr/include/EndpointSecurity/ESMessage.h:433:	es_mount_disposition_t disposition; /* field available only if message version >= 8 */
+usr/include/EndpointSecurity/ESMessage.h:495:	es_process_t *_Nullable instigator; /* field available only if message version >= 9 */
+usr/include/EndpointSecurity/ESMessage.h:651:			bool was_mapped_writable; /* Field available only if message version >= 6. */
+usr/include/EndpointSecurity/ESMessage.h:703:			acl_t _Nullable acl; /* field available only if message version >= 2 */
+usr/include/EndpointSecurity/ESMessage.h:829:	uint64_t parent_registry_id;   /* field available only if message version >= 10 */
+usr/include/EndpointSecurity/ESMessage.h:830:	es_string_token_t parent_path; /* field available only if message version >= 10 */
+usr/include/EndpointSecurity/ESMessage.h:860:	es_get_task_type_t type; /* field available only if message version >= 5 */
+usr/include/EndpointSecurity/ESMessage.h:879:	es_get_task_type_t type; /* field available only if message version >= 5 */
+usr/include/EndpointSecurity/ESMessage.h:897:	es_get_task_type_t type; /* field available only if message version >= 5 */
+usr/include/EndpointSecurity/ESMessage.h:915:	es_get_task_type_t type; /* field available only if message version >= 5 */
+usr/include/EndpointSecurity/ESMessage.h:1534:	es_string_token_t detected_executable; /* field available only if message version >= 10 */
+usr/include/EndpointSecurity/ESMessage.h:2752: * if (msg->version >= 2) {
+usr/include/EndpointSecurity/ESMessage.h:2772:	uint64_t seq_num; /* field available only if message version >= 2 */
+usr/include/EndpointSecurity/ESMessage.h:2780:	es_thread_t *_Nullable thread; /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessage.h:2781:	uint64_t global_seq_num;       /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessageCore.h:110:	es_file_t *_Nullable tty;                           /* field available only if message version >= 2 */
+usr/include/EndpointSecurity/ESMessageCore.h:111:	struct timeval start_time;                          /* field available only if message version >= 3 */
+usr/include/EndpointSecurity/ESMessageCore.h:112:	audit_token_t responsible_audit_token;              /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessageCore.h:113:	audit_token_t parent_audit_token;                   /* field available only if message version >= 4 */
+usr/include/EndpointSecurity/ESMessageCore.h:114:	es_cs_validation_category_t cs_validation_category; /* field available only if message version >= 10 */
+usr/include/EndpointSecurity/ESMessageCore.h:125:	es_token_t cdhash_full; /* field available only if message version >= 11 */
+
+### grep: Available in msg versions
+usr/include/EndpointSecurity/ESMessage.h:975:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1427:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1450:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1470:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1808:	audit_token_t *_Nullable instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1809:	audit_token_t *_Nullable app_token;        // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1830:	audit_token_t *_Nullable instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1831:	audit_token_t *_Nullable app_token;        // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1938:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1952:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1974:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:1975:	audit_token_t petitioner_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2013:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2014:	audit_token_t petitioner_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2057:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2085:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2133:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2161:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2187:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2213:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2249:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2285:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2323:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2349:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2375:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2401:	audit_token_t instigator_token; // Available in msg versions >= 8.
+usr/include/EndpointSecurity/ESMessage.h:2428:	audit_token_t instigator_token; // Available in msg versions >= 8.
+
+## Structs WhoRead reads
+### es_string_token_t
+typedef struct {
+	// Length of the `data` field. Equivalent to strlen().
+	size_t length;
+	const char *data;
+} es_string_token_t;
+### es_token_t
+typedef struct {
+	// Size of the `data` field in bytes
+	size_t size;
+	const uint8_t *data;
+} es_token_t;
+### es_file_t
+typedef struct {
+	es_string_token_t path;
+	bool path_truncated;
+	struct stat stat;
+} es_file_t;
+### es_process_t
+typedef struct {
+	audit_token_t audit_token;
+	pid_t ppid;
+	pid_t original_ppid;
+	pid_t group_id;
+	pid_t session_id;
+	uint32_t codesigning_flags;
+	bool is_platform_binary;
+	bool is_es_client;
+	es_cdhash_t cdhash;
+	es_string_token_t signing_id;
+	es_string_token_t team_id;
+	es_file_t *_Nonnull executable;
+	es_file_t *_Nullable tty;                           /* field available only if message version >= 2 */
+	struct timeval start_time;                          /* field available only if message version >= 3 */
+	audit_token_t responsible_audit_token;              /* field available only if message version >= 4 */
+	audit_token_t parent_audit_token;                   /* field available only if message version >= 4 */
+	es_cs_validation_category_t cs_validation_category; /* field available only if message version >= 10 */
+	union {
+		uint8_t reserved[16];
+
+	};
+	/* Full CDHash for this process.
+	 *
+	 * The `cdhash` field only captures the first 20 bytes of the real CDHash
+	 * of the process. This field contains the full CDHash, the length and algorithm
+	 * of which is subject to change.
+	 */
+	es_token_t cdhash_full; /* field available only if message version >= 11 */
+} es_process_t;
+### es_thread_t
+typedef struct {
+	uint64_t thread_id;
+} es_thread_t;
+### es_message_t
+typedef struct {
+	uint32_t version;
+	struct timespec time;
+	uint64_t mach_time;
+	uint64_t deadline;
+	es_process_t *_Nonnull process;
+	uint64_t seq_num; /* field available only if message version >= 2 */
+	es_action_type_t action_type;
+	union {
+		es_event_id_t auth;
+		es_result_t notify;
+	} action;
+	es_event_type_t event_type;
+	es_events_t event;
+	es_thread_t *_Nullable thread; /* field available only if message version >= 4 */
+	uint64_t global_seq_num;       /* field available only if message version >= 4 */
+	uint64_t opaque[];             /* Opaque data that must not be accessed directly */
+} es_message_t;
+### es_event_open_t
+typedef struct {
+	int32_t fflag;
+	es_file_t *_Nonnull file;
+	uint8_t reserved[64];
+} es_event_open_t;
+### es_event_close_t
+typedef struct {
+	bool modified;
+	es_file_t *_Nonnull target;
+	union {
+		uint8_t reserved[64];
+		struct {
+			bool was_mapped_writable; /* Field available only if message version >= 6. */
+		};
+	};
+} es_event_close_t;
+### es_event_rename_t
+typedef struct {
+	es_file_t *_Nonnull source;
+	es_destination_type_t destination_type;
+	union {
+		es_file_t *_Nonnull existing_file;
+		struct {
+			es_file_t *_Nonnull dir;
+			es_string_token_t filename;
+		} new_path;
+	} destination;
+	uint8_t reserved[64];
+} es_event_rename_t;
+### es_event_clone_t
+typedef struct {
+	es_file_t *_Nonnull source;
+	es_file_t *_Nonnull target_dir;
+	es_string_token_t target_name;
+	uint8_t reserved[64];
+} es_event_clone_t;
+### es_event_copyfile_t
+typedef struct {
+	es_file_t *_Nonnull source;
+	es_file_t *_Nullable target_file;
+	es_file_t *_Nonnull target_dir;
+	es_string_token_t target_name;
+	mode_t mode;
+	int32_t flags;
+	uint8_t reserved[56];
+} es_event_copyfile_t;
+### es_event_link_t
+typedef struct {
+	es_file_t *_Nonnull source;
+	es_file_t *_Nonnull target_dir;
+	es_string_token_t target_filename;
+	uint8_t reserved[64];
+} es_event_link_t;
+### es_event_unlink_t
+typedef struct {
+	es_file_t *_Nonnull target;
+	es_file_t *_Nonnull parent_dir;
+	uint8_t reserved[64];
+} es_event_unlink_t;
+### es_event_truncate_t
+typedef struct {
+	es_file_t *_Nonnull target;
+	uint8_t reserved[64];
+} es_event_truncate_t;
+### es_event_exchangedata_t
+typedef struct {
+	es_file_t *_Nonnull file1;
+	es_file_t *_Nonnull file2;
+	uint8_t reserved[64];
+} es_event_exchangedata_t;
+### es_event_readdir_t
+typedef struct {
+	es_file_t *_Nonnull target;
+	uint8_t reserved[64];
+} es_event_readdir_t;
+### es_event_create_t
+typedef struct {
+	es_destination_type_t destination_type;
+	union {
+		es_file_t *_Nonnull existing_file;
+		struct {
+			es_file_t *_Nonnull dir;
+			es_string_token_t filename;
+			mode_t mode;
+		} new_path;
+	} destination;
+	uint8_t reserved2[16];
+	union {
+		uint8_t reserved[48];
+		struct {
+			acl_t _Nullable acl; /* field available only if message version >= 2 */
+		};
+	};
+} es_event_create_t;
+### es_event_exec_t
+typedef struct {
+	es_process_t *_Nonnull target;
+	es_string_token_t dyld_exec_path; /* field available only if message version >= 7 */
+	union {
+		uint8_t reserved[64];
+		struct {
+			es_file_t *_Nullable script;    /* field available only if message version >= 2 */
+			es_file_t *_Nonnull cwd;        /* field available only if message version >= 3 */
+			int last_fd;                    /* field available only if message version >= 4 */
+			cpu_type_t image_cputype;       /* field available only if message version >= 6 */
+			cpu_subtype_t image_cpusubtype; /* field available only if message version >= 6 */
+		};
+	};
+} es_event_exec_t;
+### es_event_fork_t
+typedef struct {
+	es_process_t *_Nonnull child;
+	uint8_t reserved[64];
+} es_event_fork_t;
+### es_event_exit_t
+typedef struct {
+	int stat;
+	uint8_t reserved[64];
+} es_event_exit_t;
+### es_muted_path_t
+typedef struct {
+	es_mute_path_type_t type;
+	size_t event_count;
+	const es_event_type_t *events;
+	es_string_token_t path;
+} es_muted_path_t;
+### es_muted_paths_t
+typedef struct {
+	size_t count;
+	const es_muted_path_t *paths;
+} es_muted_paths_t;
+### es_events_t
+typedef union {
+	/**
+	 * Events added before macOS 13.0 use structs directly.
+	 */
+	es_event_access_t access;
+	es_event_chdir_t chdir;
+	es_event_chroot_t chroot;
+	es_event_clone_t clone;
+	es_event_close_t close;
+	es_event_copyfile_t copyfile;
+	es_event_create_t create;
+	es_event_cs_invalidated_t cs_invalidated;
+	es_event_deleteextattr_t deleteextattr;
+	es_event_dup_t dup;
+	es_event_exchangedata_t exchangedata;
+	es_event_exec_t exec;
+	es_event_exit_t exit;
+	es_event_file_provider_materialize_t file_provider_materialize;
+	es_event_file_provider_update_t file_provider_update;
+	es_event_fcntl_t fcntl;
+	es_event_fork_t fork;
+	es_event_fsgetpath_t fsgetpath;
+	es_event_get_task_t get_task;
+	es_event_get_task_read_t get_task_read;
+	es_event_get_task_inspect_t get_task_inspect;
+	es_event_get_task_name_t get_task_name;
+	es_event_getattrlist_t getattrlist;
+	es_event_getextattr_t getextattr;
+	es_event_iokit_open_t iokit_open;
+	es_event_kextload_t kextload;
+	es_event_kextunload_t kextunload;
+	es_event_link_t link;
+	es_event_listextattr_t listextattr;
+	es_event_lookup_t lookup;
+	es_event_mmap_t mmap;
+	es_event_mount_t mount;
+	es_event_mprotect_t mprotect;
+	es_event_open_t open;
+	es_event_proc_check_t proc_check;
+	es_event_proc_suspend_resume_t proc_suspend_resume;
+	es_event_pty_close_t pty_close;
+	es_event_pty_grant_t pty_grant;
+	es_event_readdir_t readdir;
+	es_event_readlink_t readlink;
+	es_event_remote_thread_create_t remote_thread_create;
+	es_event_remount_t remount;
+	es_event_rename_t rename;
+	es_event_searchfs_t searchfs;
+	es_event_setacl_t setacl;
+	es_event_setattrlist_t setattrlist;
+	es_event_setextattr_t setextattr;
+	es_event_setflags_t setflags;
+	es_event_setmode_t setmode;
+	es_event_setowner_t setowner;
+	es_event_settime_t settime;
+	es_event_setuid_t setuid;
+	es_event_setgid_t setgid;
+	es_event_seteuid_t seteuid;
+	es_event_setegid_t setegid;
+	es_event_setreuid_t setreuid;
+	es_event_setregid_t setregid;
+	es_event_signal_t signal;
+	es_event_stat_t stat;
+	es_event_trace_t trace;
+	es_event_truncate_t truncate;
+	es_event_uipc_bind_t uipc_bind;
+	es_event_uipc_connect_t uipc_connect;
+	es_event_unlink_t unlink;
+	es_event_unmount_t unmount;
+	es_event_utimes_t utimes;
+	es_event_write_t write;
+
+	/**
+	 * Events added in macOS 13.0 or later use nonnull pointers.
+	 */
+	es_event_authentication_t *_Nonnull authentication;
+	es_event_xp_malware_detected_t *_Nonnull xp_malware_detected;
+	es_event_xp_malware_remediated_t *_Nonnull xp_malware_remediated;
+	es_event_lw_session_login_t *_Nonnull lw_session_login;
+	es_event_lw_session_logout_t *_Nonnull lw_session_logout;
+	es_event_lw_session_lock_t *_Nonnull lw_session_lock;
+	es_event_lw_session_unlock_t *_Nonnull lw_session_unlock;
+	es_event_screensharing_attach_t *_Nonnull screensharing_attach;
+	es_event_screensharing_detach_t *_Nonnull screensharing_detach;
+	es_event_openssh_login_t *_Nonnull openssh_login;
+	es_event_openssh_logout_t *_Nonnull openssh_logout;
+	es_event_login_login_t *_Nonnull login_login;
+	es_event_login_logout_t *_Nonnull login_logout;
+	es_event_btm_launch_item_add_t *_Nonnull btm_launch_item_add;
+	es_event_btm_launch_item_remove_t *_Nonnull btm_launch_item_remove;
+	es_event_profile_add_t *_Nonnull profile_add;
+	es_event_profile_remove_t *_Nonnull profile_remove;
+	es_event_su_t *_Nonnull su;
+	es_event_authorization_petition_t *_Nonnull authorization_petition;
+	es_event_authorization_judgement_t *_Nonnull authorization_judgement;
+	es_event_sudo_t *_Nonnull sudo;
+	es_event_od_group_add_t *_Nonnull od_group_add;
+	es_event_od_group_remove_t *_Nonnull od_group_remove;
+	es_event_od_group_set_t *_Nonnull od_group_set;
+	es_event_od_modify_password_t *_Nonnull od_modify_password;
+	es_event_od_disable_user_t *_Nonnull od_disable_user;
+	es_event_od_enable_user_t *_Nonnull od_enable_user;
+	es_event_od_attribute_value_add_t *_Nonnull od_attribute_value_add;
+	es_event_od_attribute_value_remove_t *_Nonnull od_attribute_value_remove;
+	es_event_od_attribute_set_t *_Nonnull od_attribute_set;
+	es_event_od_create_user_t *_Nonnull od_create_user;
+	es_event_od_create_group_t *_Nonnull od_create_group;
+	es_event_od_delete_user_t *_Nonnull od_delete_user;
+	es_event_od_delete_group_t *_Nonnull od_delete_group;
+	es_event_xpc_connect_t *_Nonnull xpc_connect;
+	es_event_gatekeeper_user_override_t *_Nonnull gatekeeper_user_override;
+	es_event_tcc_modify_t *_Nonnull tcc_modify;
+	es_event_bootstrap_check_in_t *_Nonnull bootstrap_check_in;
+	es_event_bootstrap_look_up_t *_Nonnull bootstrap_look_up;
+
+} es_events_t;
+
+## Numeric values, compiled from the headers
+ES_EVENT_TYPE_AUTH_EXEC                          0
+ES_EVENT_TYPE_AUTH_OPEN                          1
+ES_EVENT_TYPE_AUTH_KEXTLOAD                      2
+ES_EVENT_TYPE_AUTH_MMAP                          3
+ES_EVENT_TYPE_AUTH_MPROTECT                      4
+ES_EVENT_TYPE_AUTH_MOUNT                         5
+ES_EVENT_TYPE_AUTH_RENAME                        6
+ES_EVENT_TYPE_AUTH_SIGNAL                        7
+ES_EVENT_TYPE_AUTH_UNLINK                        8
+ES_EVENT_TYPE_NOTIFY_EXEC                        9
+ES_EVENT_TYPE_NOTIFY_OPEN                        10
+ES_EVENT_TYPE_NOTIFY_FORK                        11
+ES_EVENT_TYPE_NOTIFY_CLOSE                       12
+ES_EVENT_TYPE_NOTIFY_CREATE                      13
+ES_EVENT_TYPE_NOTIFY_EXCHANGEDATA                14
+ES_EVENT_TYPE_NOTIFY_EXIT                        15
+ES_EVENT_TYPE_NOTIFY_GET_TASK                    16
+ES_EVENT_TYPE_NOTIFY_KEXTLOAD                    17
+ES_EVENT_TYPE_NOTIFY_KEXTUNLOAD                  18
+ES_EVENT_TYPE_NOTIFY_LINK                        19
+ES_EVENT_TYPE_NOTIFY_MMAP                        20
+ES_EVENT_TYPE_NOTIFY_MPROTECT                    21
+ES_EVENT_TYPE_NOTIFY_MOUNT                       22
+ES_EVENT_TYPE_NOTIFY_UNMOUNT                     23
+ES_EVENT_TYPE_NOTIFY_IOKIT_OPEN                  24
+ES_EVENT_TYPE_NOTIFY_RENAME                      25
+ES_EVENT_TYPE_NOTIFY_SETATTRLIST                 26
+ES_EVENT_TYPE_NOTIFY_SETEXTATTR                  27
+ES_EVENT_TYPE_NOTIFY_SETFLAGS                    28
+ES_EVENT_TYPE_NOTIFY_SETMODE                     29
+ES_EVENT_TYPE_NOTIFY_SETOWNER                    30
+ES_EVENT_TYPE_NOTIFY_SIGNAL                      31
+ES_EVENT_TYPE_NOTIFY_UNLINK                      32
+ES_EVENT_TYPE_NOTIFY_WRITE                       33
+ES_EVENT_TYPE_AUTH_FILE_PROVIDER_MATERIALIZE     34
+ES_EVENT_TYPE_NOTIFY_FILE_PROVIDER_MATERIALIZE   35
+ES_EVENT_TYPE_AUTH_FILE_PROVIDER_UPDATE          36
+ES_EVENT_TYPE_NOTIFY_FILE_PROVIDER_UPDATE        37
+ES_EVENT_TYPE_AUTH_READLINK                      38
+ES_EVENT_TYPE_NOTIFY_READLINK                    39
+ES_EVENT_TYPE_AUTH_TRUNCATE                      40
+ES_EVENT_TYPE_NOTIFY_TRUNCATE                    41
+ES_EVENT_TYPE_AUTH_LINK                          42
+ES_EVENT_TYPE_NOTIFY_LOOKUP                      43
+ES_EVENT_TYPE_AUTH_CREATE                        44
+ES_EVENT_TYPE_AUTH_SETATTRLIST                   45
+ES_EVENT_TYPE_AUTH_SETEXTATTR                    46
+ES_EVENT_TYPE_AUTH_SETFLAGS                      47
+ES_EVENT_TYPE_AUTH_SETMODE                       48
+ES_EVENT_TYPE_AUTH_SETOWNER                      49
+ES_EVENT_TYPE_AUTH_CHDIR                         50
+ES_EVENT_TYPE_NOTIFY_CHDIR                       51
+ES_EVENT_TYPE_AUTH_GETATTRLIST                   52
+ES_EVENT_TYPE_NOTIFY_GETATTRLIST                 53
+ES_EVENT_TYPE_NOTIFY_STAT                        54
+ES_EVENT_TYPE_NOTIFY_ACCESS                      55
+ES_EVENT_TYPE_AUTH_CHROOT                        56
+ES_EVENT_TYPE_NOTIFY_CHROOT                      57
+ES_EVENT_TYPE_AUTH_UTIMES                        58
+ES_EVENT_TYPE_NOTIFY_UTIMES                      59
+ES_EVENT_TYPE_AUTH_CLONE                         60
+ES_EVENT_TYPE_NOTIFY_CLONE                       61
+ES_EVENT_TYPE_NOTIFY_FCNTL                       62
+ES_EVENT_TYPE_AUTH_GETEXTATTR                    63
+ES_EVENT_TYPE_NOTIFY_GETEXTATTR                  64
+ES_EVENT_TYPE_AUTH_LISTEXTATTR                   65
+ES_EVENT_TYPE_NOTIFY_LISTEXTATTR                 66
+ES_EVENT_TYPE_AUTH_READDIR                       67
+ES_EVENT_TYPE_NOTIFY_READDIR                     68
+ES_EVENT_TYPE_AUTH_DELETEEXTATTR                 69
+ES_EVENT_TYPE_NOTIFY_DELETEEXTATTR               70
+ES_EVENT_TYPE_AUTH_FSGETPATH                     71
+ES_EVENT_TYPE_NOTIFY_FSGETPATH                   72
+ES_EVENT_TYPE_NOTIFY_DUP                         73
+ES_EVENT_TYPE_AUTH_SETTIME                       74
+ES_EVENT_TYPE_NOTIFY_SETTIME                     75
+ES_EVENT_TYPE_NOTIFY_UIPC_BIND                   76
+ES_EVENT_TYPE_AUTH_UIPC_BIND                     77
+ES_EVENT_TYPE_NOTIFY_UIPC_CONNECT                78
+ES_EVENT_TYPE_AUTH_UIPC_CONNECT                  79
+ES_EVENT_TYPE_AUTH_EXCHANGEDATA                  80
+ES_EVENT_TYPE_AUTH_SETACL                        81
+ES_EVENT_TYPE_NOTIFY_SETACL                      82
+ES_EVENT_TYPE_NOTIFY_PTY_GRANT                   83
+ES_EVENT_TYPE_NOTIFY_PTY_CLOSE                   84
+ES_EVENT_TYPE_AUTH_PROC_CHECK                    85
+ES_EVENT_TYPE_NOTIFY_PROC_CHECK                  86
+ES_EVENT_TYPE_AUTH_GET_TASK                      87
+ES_EVENT_TYPE_AUTH_SEARCHFS                      88
+ES_EVENT_TYPE_NOTIFY_SEARCHFS                    89
+ES_EVENT_TYPE_AUTH_FCNTL                         90
+ES_EVENT_TYPE_AUTH_IOKIT_OPEN                    91
+ES_EVENT_TYPE_AUTH_PROC_SUSPEND_RESUME           92
+ES_EVENT_TYPE_NOTIFY_PROC_SUSPEND_RESUME         93
+ES_EVENT_TYPE_NOTIFY_CS_INVALIDATED              94
+ES_EVENT_TYPE_NOTIFY_GET_TASK_NAME               95
+ES_EVENT_TYPE_NOTIFY_TRACE                       96
+ES_EVENT_TYPE_NOTIFY_REMOTE_THREAD_CREATE        97
+ES_EVENT_TYPE_AUTH_REMOUNT                       98
+ES_EVENT_TYPE_NOTIFY_REMOUNT                     99
+ES_EVENT_TYPE_AUTH_GET_TASK_READ                 100
+ES_EVENT_TYPE_NOTIFY_GET_TASK_READ               101
+ES_EVENT_TYPE_NOTIFY_GET_TASK_INSPECT            102
+ES_EVENT_TYPE_NOTIFY_SETUID                      103
+ES_EVENT_TYPE_NOTIFY_SETGID                      104
+ES_EVENT_TYPE_NOTIFY_SETEUID                     105
+ES_EVENT_TYPE_NOTIFY_SETEGID                     106
+ES_EVENT_TYPE_NOTIFY_SETREUID                    107
+ES_EVENT_TYPE_NOTIFY_SETREGID                    108
+ES_EVENT_TYPE_AUTH_COPYFILE                      109
+ES_EVENT_TYPE_NOTIFY_COPYFILE                    110
+ES_EVENT_TYPE_NOTIFY_AUTHENTICATION              111
+ES_EVENT_TYPE_NOTIFY_XP_MALWARE_DETECTED         112
+ES_EVENT_TYPE_NOTIFY_XP_MALWARE_REMEDIATED       113
+ES_EVENT_TYPE_NOTIFY_LW_SESSION_LOGIN            114
+ES_EVENT_TYPE_NOTIFY_LW_SESSION_LOGOUT           115
+ES_EVENT_TYPE_NOTIFY_LW_SESSION_LOCK             116
+ES_EVENT_TYPE_NOTIFY_LW_SESSION_UNLOCK           117
+ES_EVENT_TYPE_NOTIFY_SCREENSHARING_ATTACH        118
+ES_EVENT_TYPE_NOTIFY_SCREENSHARING_DETACH        119
+ES_EVENT_TYPE_NOTIFY_OPENSSH_LOGIN               120
+ES_EVENT_TYPE_NOTIFY_OPENSSH_LOGOUT              121
+ES_EVENT_TYPE_NOTIFY_LOGIN_LOGIN                 122
+ES_EVENT_TYPE_NOTIFY_LOGIN_LOGOUT                123
+ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_ADD         124
+ES_EVENT_TYPE_NOTIFY_BTM_LAUNCH_ITEM_REMOVE      125
+ES_EVENT_TYPE_NOTIFY_PROFILE_ADD                 126
+ES_EVENT_TYPE_NOTIFY_PROFILE_REMOVE              127
+ES_EVENT_TYPE_NOTIFY_SU                          128
+ES_EVENT_TYPE_NOTIFY_AUTHORIZATION_PETITION      129
+ES_EVENT_TYPE_NOTIFY_AUTHORIZATION_JUDGEMENT     130
+ES_EVENT_TYPE_NOTIFY_SUDO                        131
+ES_EVENT_TYPE_NOTIFY_OD_GROUP_ADD                132
+ES_EVENT_TYPE_NOTIFY_OD_GROUP_REMOVE             133
+ES_EVENT_TYPE_NOTIFY_OD_GROUP_SET                134
+ES_EVENT_TYPE_NOTIFY_OD_MODIFY_PASSWORD          135
+ES_EVENT_TYPE_NOTIFY_OD_DISABLE_USER             136
+ES_EVENT_TYPE_NOTIFY_OD_ENABLE_USER              137
+ES_EVENT_TYPE_NOTIFY_OD_ATTRIBUTE_VALUE_ADD      138
+ES_EVENT_TYPE_NOTIFY_OD_ATTRIBUTE_VALUE_REMOVE   139
+ES_EVENT_TYPE_NOTIFY_OD_ATTRIBUTE_SET            140
+ES_EVENT_TYPE_NOTIFY_OD_CREATE_USER              141
+ES_EVENT_TYPE_NOTIFY_OD_CREATE_GROUP             142
+ES_EVENT_TYPE_NOTIFY_OD_DELETE_USER              143
+ES_EVENT_TYPE_NOTIFY_OD_DELETE_GROUP             144
+ES_EVENT_TYPE_NOTIFY_XPC_CONNECT                 145
+ES_EVENT_TYPE_NOTIFY_GATEKEEPER_USER_OVERRIDE    146
+ES_EVENT_TYPE_NOTIFY_TCC_MODIFY                  147
+ES_EVENT_TYPE_RESERVED_0                         148
+ES_EVENT_TYPE_RESERVED_1                         149
+ES_EVENT_TYPE_RESERVED_2                         150
+ES_EVENT_TYPE_RESERVED_3                         151
+ES_EVENT_TYPE_RESERVED_4                         152
+ES_EVENT_TYPE_RESERVED_5                         153
+ES_EVENT_TYPE_RESERVED_6                         154
+ES_EVENT_TYPE_RESERVED_7                         155
+ES_EVENT_TYPE_RESERVED_8                         156
+ES_EVENT_TYPE_AUTH_XPC_CONNECT                   157
+ES_EVENT_TYPE_AUTH_BOOTSTRAP_CHECK_IN            158
+ES_EVENT_TYPE_NOTIFY_BOOTSTRAP_CHECK_IN          159
+ES_EVENT_TYPE_AUTH_BOOTSTRAP_LOOK_UP             160
+ES_EVENT_TYPE_NOTIFY_BOOTSTRAP_LOOK_UP           161
+ES_EVENT_TYPE_LAST                               162
+ES_ACTION_TYPE_AUTH                              0
+ES_ACTION_TYPE_NOTIFY                            1
+ES_DESTINATION_TYPE_EXISTING_FILE                0
+ES_DESTINATION_TYPE_NEW_PATH                     1
+ES_AUTH_RESULT_ALLOW                             0
+ES_AUTH_RESULT_DENY                              1
+ES_RESULT_TYPE_AUTH                              0
+ES_RESULT_TYPE_FLAGS                             1
+ES_RETURN_SUCCESS                                0
+ES_RETURN_ERROR                                  1
+ES_RESPOND_RESULT_SUCCESS                        0
+ES_RESPOND_RESULT_ERR_INVALID_ARGUMENT           1
+ES_RESPOND_RESULT_ERR_INTERNAL                   2
+ES_RESPOND_RESULT_NOT_FOUND                      3
+ES_RESPOND_RESULT_ERR_DUPLICATE_RESPONSE         4
+ES_RESPOND_RESULT_ERR_EVENT_TYPE                 5
+ES_NEW_CLIENT_RESULT_SUCCESS                     0
+ES_NEW_CLIENT_RESULT_ERR_INVALID_ARGUMENT        1
+ES_NEW_CLIENT_RESULT_ERR_INTERNAL                2
+ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED            3
+ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED           4
+ES_NEW_CLIENT_RESULT_ERR_NOT_PRIVILEGED          5
+ES_NEW_CLIENT_RESULT_ERR_TOO_MANY_CLIENTS        6
+ES_CLEAR_CACHE_RESULT_SUCCESS                    0
+ES_CLEAR_CACHE_RESULT_ERR_INTERNAL               1
+ES_CLEAR_CACHE_RESULT_ERR_THROTTLE               2
+ES_MUTE_PATH_TYPE_PREFIX                         0
+ES_MUTE_PATH_TYPE_LITERAL                        1
+ES_MUTE_PATH_TYPE_TARGET_PREFIX                  2
+ES_MUTE_PATH_TYPE_TARGET_LITERAL                 3
+ES_MUTE_INVERSION_TYPE_PROCESS                   0
+ES_MUTE_INVERSION_TYPE_PATH                      1
+ES_MUTE_INVERSION_TYPE_TARGET_PATH               2
+ES_MUTE_INVERSION_TYPE_LAST                      3
+ES_MUTE_INVERTED                                 0
+ES_MUTE_NOT_INVERTED                             1
+ES_MUTE_INVERTED_ERROR                           2
+ES_CS_VALIDATION_CATEGORY_INVALID                0
+ES_CS_VALIDATION_CATEGORY_PLATFORM               1
+ES_CS_VALIDATION_CATEGORY_TESTFLIGHT             2
+ES_CS_VALIDATION_CATEGORY_DEVELOPMENT            3
+ES_CS_VALIDATION_CATEGORY_APP_STORE              4
+ES_CS_VALIDATION_CATEGORY_ENTERPRISE             5
+ES_CS_VALIDATION_CATEGORY_DEVELOPER_ID           6
+ES_CS_VALIDATION_CATEGORY_LOCAL_SIGNING          7
+ES_CS_VALIDATION_CATEGORY_ROSETTA                8
+ES_CS_VALIDATION_CATEGORY_OOPJIT                 9
+ES_CS_VALIDATION_CATEGORY_NONE                   10
+ES_DEADLINE_MISS_MODE_KILL                       0
+ES_DEADLINE_MISS_MODE_FAIL_CLOSED                1
+ES_DEADLINE_MISS_MODE_FAIL_OPEN                  2
+FREAD                                            1
+FWRITE                                           2
+O_CREAT                                          512
+O_TRUNC                                          1024
+O_EVTONLY                                        32768
+O_DIRECTORY                                      1048576
+O_SYMLINK                                        2097152
+O_CLOEXEC                                        16777216
+PROC_PIDTBSDINFO                                 3
+PROC_PIDPATHINFO                                 11
+PROC_PIDPATHINFO_MAXSIZE                         4096
+MAXPATHLEN                                       1024
+TASK_AUDIT_TOKEN                                 15
+KERN_PROCARGS2                                   49
+LOCAL_PEERCRED                                   1
+LOCAL_PEERPID                                    2
+LOCAL_PEERTOKEN                                  6
+sizeof(es_message_t)                             224
+offsetof(es_message_t, event)                    104
+offsetof(es_message_t, global_seq_num)           216
+sizeof(es_process_t)                             248
+offsetof(es_process_t, cs_validation_category)   208
+offsetof(es_process_t, cdhash_full)              232
+sizeof(es_file_t)                                168
+sizeof(es_event_exec_t)                          88
+
+## Swift's view of es_message_t (must equal the C layout above: es_exec_arg reads past the struct)
+MemoryLayout<es_message_t>.size 224
+MemoryLayout<es_message_t>.offset(of: \.event) 104
+MemoryLayout<es_message_t>.offset(of: \.global_seq_num) 216
+MemoryLayout<es_process_t>.size 248
+MemoryLayout<es_file_t>.size 168
+
+## libproc, sys/proc_info.h, sysctl, libbsm
+### libproc.h prototypes
+usr/include/libproc.h:92:int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize) __OSX_AVAILABLE_STARTING(__MAC_10_5, __IPHONE_2_0);
+usr/include/libproc.h:93:int proc_listallpids(void * buffer, int buffersize) __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_4_1);
+usr/include/libproc.h:96:int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize) __OSX_AVAILABLE_STARTING(__MAC_10_5, __IPHONE_2_0);
+usr/include/libproc.h:99:int proc_name(int pid, void * buffer, uint32_t buffersize) __OSX_AVAILABLE_STARTING(__MAC_10_5, __IPHONE_2_0);
+usr/include/libproc.h:102:int proc_pidpath(int pid, void * buffer, uint32_t  buffersize) __OSX_AVAILABLE_STARTING(__MAC_10_5, __IPHONE_2_0);
+usr/include/libproc.h:103:int proc_pidpath_audittoken(audit_token_t *audittoken, void * buffer, uint32_t  buffersize) API_AVAILABLE(macos(11.0), ios(14.0), watchos(7.0), tvos(14.0));
+### libproc.h status
+usr/include/libproc.h:42: * This header file contains private interfaces to obtain process information.
+### proc_info.h flavors
+usr/include/sys/proc_info.h:723:#define PROC_PIDTBSDINFO                3
+usr/include/sys/proc_info.h:724:#define PROC_PIDTBSDINFO_SIZE           (sizeof(struct proc_bsdinfo))
+usr/include/sys/proc_info.h:747:#define PROC_PIDPATHINFO                11
+usr/include/sys/proc_info.h:748:#define PROC_PIDPATHINFO_SIZE           (MAXPATHLEN)
+usr/include/sys/proc_info.h:749:#define PROC_PIDPATHINFO_MAXSIZE        (4*MAXPATHLEN)
+usr/include/sys/proc_info.h:754:#define PROC_PIDT_SHORTBSDINFO          13
+usr/include/sys/proc_info.h:755:#define PROC_PIDT_SHORTBSDINFO_SIZE     (sizeof(struct proc_bsdshortinfo))
+### PROC_PIDUNIQIDENTIFIERINFO (absent = not public)
+NOT FOUND
+### KERN_PROCARGS2
+usr/include/sys/sysctl.h-264-#ifdef __APPLE_API_UNSTABLE
+usr/include/sys/sysctl.h:265:#define KERN_PROCARGS2          49
+usr/include/sys/sysctl.h-266-#endif /* __APPLE_API_UNSTABLE */
+### libbsm audit token accessors
+usr/include/bsm/libbsm.h-1490- * @return - The effective user ID extracted from the Mach audit token.
+usr/include/bsm/libbsm.h-1491- */
+usr/include/bsm/libbsm.h:1492:uid_t audit_token_to_euid(audit_token_t atoken)
+--
+usr/include/bsm/libbsm.h-1546- * @return - The process ID extracted from the Mach audit token.
+usr/include/bsm/libbsm.h-1547- */
+usr/include/bsm/libbsm.h:1548:pid_t audit_token_to_pid(audit_token_t atoken)
+--
+usr/include/bsm/libbsm.h-1574- * @return - The process ID version extracted from the Mach audit token.
+usr/include/bsm/libbsm.h-1575- */
+usr/include/bsm/libbsm.h:1576:int audit_token_to_pidversion(audit_token_t atoken)
+### Darwin module map: libbsm
+usr/include/Darwin.modulemap:243:    module libbsm {
+usr/include/Darwin.modulemap-244-      header "bsm/libbsm.h"
+usr/include/Darwin.modulemap-245-      export *
+
+## Other APIs docs/RESEARCH.md lists (pending item 13)
+### NSXPCConnection
+System/Library/Frameworks/Foundation.framework/Headers/NSXPCConnection.h:135:@property (readonly) au_asid_t auditSessionIdentifier;
+System/Library/Frameworks/Foundation.framework/Headers/NSXPCConnection.h:137:@property (readonly) pid_t processIdentifier;
+System/Library/Frameworks/Foundation.framework/Headers/NSXPCConnection.h:139:@property (readonly) uid_t effectiveUserIdentifier;
+System/Library/Frameworks/Foundation.framework/Headers/NSXPCConnection.h:155:- (void)setCodeSigningRequirement:(NSString *)requirement API_AVAILABLE(macos(13.0)) API_UNAVAILABLE(ios, tvos, watchos);
+### SecCode
+System/Library/Frameworks/Security.framework/Headers/SecCode.h:126:extern const CFStringRef kSecGuestAttributePid;
+System/Library/Frameworks/Security.framework/Headers/SecCode.h:127:extern const CFStringRef kSecGuestAttributeAudit;
+System/Library/Frameworks/Security.framework/Headers/SecCode.h:189:OSStatus SecCodeCopyGuestWithAttributes(SecCodeRef __nullable host,
+System/Library/Frameworks/Security.framework/Headers/SecCode.h:237:OSStatus SecCodeCheckValidity(SecCodeRef code, SecCSFlags flags,
+### SecRequirement
+System/Library/Frameworks/Security.framework/Headers/SecRequirement.h:87:OSStatus SecRequirementCreateWithString(CFStringRef text, SecCSFlags flags,
+### task_info
+usr/include/mach/task_info.h:242:#define TASK_AUDIT_TOKEN                15
+usr/include/mach/task_info.h:243:#define TASK_AUDIT_TOKEN_COUNT  \
+### sys/un.h peer options
+usr/include/sys/un.h:88:#define LOCAL_PEERCRED          0x001           /* retrieve peer credentials */
+usr/include/sys/un.h:89:#define LOCAL_PEERPID           0x002           /* retrieve peer pid */
+usr/include/sys/un.h:90:#define LOCAL_PEEREPID          0x003           /* retrieve eff. peer pid */
+usr/include/sys/un.h:91:#define LOCAL_PEERUUID          0x004           /* retrieve peer UUID */
+usr/include/sys/un.h:93:#define LOCAL_PEERTOKEN         0x006           /* retrieve peer audit token */
+### getpeereid
+usr/include/unistd.h:673:int	 getpeereid(int, uid_t *, gid_t *);
+### libraries
+libEndpointSecurity.tbd
+libbsm.tbd
+
+## eslogger --list-events
+106 events
+access
+authentication
+authorization_judgement
+authorization_petition
+bootstrap_check_in
+bootstrap_look_up
+btm_launch_item_add
+btm_launch_item_remove
+chdir
+chroot
+clone
+close
+copyfile
+create
+cs_invalidated
+deleteextattr
+dup
+exchangedata
+exec
+exit
+fcntl
+file_provider_materialize
+file_provider_update
+fork
+fsgetpath
+gatekeeper_user_override
+get_task
+get_task_inspect
+get_task_name
+get_task_read
+getattrlist
+getextattr
+iokit_open
+kextload
+kextunload
+link
+listextattr
+login_login
+login_logout
+lookup
+lw_session_lock
+lw_session_login
+lw_session_logout
+lw_session_unlock
+mmap
+mount
+mprotect
+od_attribute_set
+od_attribute_value_add
+od_attribute_value_remove
+od_create_group
+od_create_user
+od_delete_group
+od_delete_user
+od_disable_user
+od_enable_user
+od_group_add
+od_group_remove
+od_group_set
+od_modify_password
+open
+openssh_login
+openssh_logout
+proc_check
+proc_suspend_resume
+profile_add
+profile_remove
+pty_close
+pty_grant
+readdir
+readlink
+remote_thread_create
+remount
+rename
+screensharing_attach
+screensharing_detach
+searchfs
+setacl
+setattrlist
+setegid
+seteuid
+setextattr
+setflags
+setgid
+setmode
+setowner
+setregid
+setreuid
+settime
+setuid
+signal
+stat
+su
+sudo
+tcc_modify
+trace
+truncate
+uipc_bind
+uipc_connect
+unlink
+unmount
+utimes
+write
+xp_malware_detected
+xp_malware_remediated
+xpc_connect

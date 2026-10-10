@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Development LaunchDaemon for whoreadd (eslogger backend). Installed by scripts/install-dev-daemon.sh. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.whoread.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/libexec/whoreadd</string>
+		<string>run</string>
+		<string>--source</string>
+		<string>__SOURCE__</string>
+		<string>--defaults</string>
+		<string>/Library/Application Support/WhoRead/defaults</string>
+		<!-- __EXTRA_ARGS__ (replaced by scripts/install-dev-daemon.sh) -->
+	</array>
+	<key>MachServices</key>
+	<dict>
+		<key>com.whoread.daemon.xpc</key>
+		<true/>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/WhoRead/whoreadd.log</string>
+	<key>StandardOutPath</key>
+	<string>/Library/Logs/WhoRead/whoreadd.log</string>
+</dict>
+</plist>
