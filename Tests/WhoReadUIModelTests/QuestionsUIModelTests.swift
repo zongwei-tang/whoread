@@ -1,4 +1,5 @@
 import XCTest
+import SQLite3
 import WhoReadCore
 import WhoReadIPC
 @testable import WhoReadEngine
@@ -281,6 +282,9 @@ final class QuestionsUIModelTests: XCTestCase {
         _ = poll(odd, signed)
         odd.apply(asks: .failed(IPCError(.versionMismatch, "new field")))
         XCTAssertTrue(try XCTUnwrap(odd.asksProblemText).hasPrefix("Open questions cannot be read:"))
+        // task-3-variant: the daemon runs (the status was read); the questions' read got no reply.
+        odd.apply(asks: .failed(IPCError(.unavailable, "daemon did not answer within 15 s")))
+        XCTAssertEqual(odd.asksProblemText, "Open questions cannot be read: No answer from the WhoRead daemon.")
     }
 
     func testTask1VariantFetchAsksReportsWhy() throws {
@@ -507,5 +511,90 @@ final class QuestionsUIModelTests: XCTestCase {
             XCTAssertEqual(AlertFormatter(language: .en).alwaysAllowTitle(kind: .agent), "Always allow this AI agent (any program it runs)")
             XCTAssertEqual(AlertFormatter(language: .en).alwaysAllowTitle(kind: .binary), "Always allow this program (and the Apple programs it starts)")
         }
+    }
+
+    // MARK: - task-3: what happened to an answer is reported as it happened
+
+    private func failure(_ request: IPCRequest, _ client: IPCClient) -> IPCError? {
+        do { _ = try client.call(request); return nil } catch let e as IPCError { return e } catch { return nil }
+    }
+
+    func testTask3RuleLimitLeavesTheQuestionOpenAndSaysWhy() throws {
+        try core.setRules((0..<DaemonCore.maxRules).map { _ in Rule(target: .category("aws"), subject: .anyNonOwner, action: .alert) })
+        let id = try openQuestion()
+        for action in [AlertAction.alwaysAllow, .allowOnce, .blockFromNowOn] {
+            let e = try XCTUnwrap(failure(.answerAsk(id: id, action: action), signed), "\(action)")
+            XCTAssertEqual(e.code, .invalid)
+            // Used to read "The daemon refused: too many rules", as if the answer itself was refused.
+            for language in [Language.en, .zhHans] {
+                XCTAssertEqual(L10n.answerError(e, askID: id, action: action, language), L10n.t(.answerRuleLimit, language))
+            }
+            XCTAssertTrue(L10n.answerError(e, askID: id, action: action, .en).contains("512"))
+            guard case .asks(let open) = SnapshotFetcher.fetchAsks(signed) else { return XCTFail() }
+            XCTAssertEqual(open.map(\.id), [id], "still open")
+            XCTAssertEqual(open.first?.holding, 1, "still holding the access")
+        }
+        // Deny still works.
+        guard case .asks(let left) = try signed.call(.answerAsk(id: id, action: .keepBlocking)) else { return XCTFail() }
+        XCTAssertTrue(left.isEmpty)
+
+        // The same on an alert: "always allow" saves the same answer rule.
+        let m = AppModel(language: .en)
+        _ = poll(m, signed, full: true)
+        let alert = try XCTUnwrap(m.alerts.first { $0.status != .resolved && $0.availableActions.contains(.alwaysAllow) })
+        let e = try XCTUnwrap(failure(.alertAction(alertID: alert.id, action: .alwaysAllow), signed))
+        XCTAssertEqual(L10n.alertActionError(e, alertID: alert.id, action: .alwaysAllow, .en), L10n.t(.answerRuleLimit, .en))
+    }
+
+    func testTask3AnswerAppliedButNotSavedIsNotReportedAsRefused() throws {
+        let id = try openQuestion()
+        // The disk refuses the write (here: the rules table is gone under the daemon).
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(core.config.databasePath, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "ALTER TABLE rules RENAME TO rules_gone", nil, nil, nil), SQLITE_OK)
+
+        let e = try XCTUnwrap(failure(.answerAsk(id: id, action: .alwaysAllow), signed))
+        XCTAssertEqual(e.code, .internalError)
+        let text = L10n.answerError(e, askID: id, action: .alwaysAllow, .en)
+        XCTAssertTrue(text.hasPrefix("Your answer applies now, but WhoRead could not save it ("), text)
+        XCTAssertFalse(text.contains("refused"), text)
+        // It did apply: the rule decides in memory and the question was released.
+        XCTAssertNil(core.askBroker.request(id: id))
+        XCTAssertTrue(core.rules.rules.contains { $0.template == DaemonCore.askAnswerTemplate })
+        XCTAssertTrue(L10n.answerError(e, askID: id, action: .alwaysAllow, .zhHans).hasPrefix("你的回答已经生效"))
+    }
+
+    func testTask3QuestionGoneOrNoReply() throws {
+        // A banner left from before the daemon restarted (question ids never repeat across restarts).
+        let gone = try XCTUnwrap(failure(.answerAsk(id: 4242, action: .alwaysAllow), signed))
+        XCTAssertEqual(gone.code, .notFound)
+        XCTAssertTrue(L10n.answerError(gone, askID: 4242, action: .alwaysAllow, .en).contains("the WhoRead monitor restarted"))
+        XCTAssertTrue(L10n.answerError(gone, askID: 4242, action: .alwaysAllow, .en).contains("you will be asked again"))
+        // No reply (timed out, connection lost): it may or may not have been taken; not "not running".
+        let silent = IPCError(.unavailable, "daemon did not answer within 15 s (x)")
+        XCTAssertEqual(L10n.answerError(silent, askID: 1, action: .alwaysAllow, .en), L10n.t(.answerNoReply, .en))
+        XCTAssertEqual(L10n.alertActionError(silent, alertID: 1, action: .ignore, .zhHans), L10n.t(.answerNoReply, .zhHans))
+        // Another user than the one at the console: even a deny is refused, and it says why.
+        handler.consoleUID = { geteuid() &+ 1 }
+        let id = try openQuestion()
+        let other = try XCTUnwrap(failure(.answerAsk(id: id, action: .keepBlocking), unrecognised))
+        XCTAssertEqual(L10n.answerError(other, askID: id, action: .keepBlocking, .en), L10n.t(.errNotConsoleUser, .en))
+    }
+
+    func testTask3VariantRefusalsSayTheAppIsNotRecognised() throws {
+        let id = try openQuestion()
+        let e = try XCTUnwrap(failure(.answerAsk(id: id, action: .allowOnce), unrecognised))
+        let text = L10n.answerError(e, askID: id, action: .allowOnce, .en)
+        XCTAssertFalse(text.contains("not signed"), "a signed app the daemon did not recognise is not unsigned: \(text)")
+        XCTAssertTrue(text.contains("does not recognise this app as the signed WhoRead app"), text)
+        XCTAssertTrue(text.contains("The question is still open"), text)
+        XCTAssertTrue(text.hasSuffix("sudo whoread ask \(id) allow-once"), text)
+        // On an alert: the `whoread alert` words.
+        let refused = IPCError(.notPermitted, "this change weakens protection")
+        XCTAssertTrue(L10n.alertActionError(refused, alertID: 5, action: .alwaysAllow, .en).hasSuffix("sudo whoread alert 5 always-allow"))
+        XCTAssertTrue(L10n.alertActionError(refused, alertID: 5, action: .keepBlocking, .zhHans).hasSuffix("sudo whoread alert 5 keep-blocking"))
+        // Other changes: not "need the WhoRead app" to the WhoRead app itself.
+        XCTAssertTrue(L10n.message(for: refused, .en).contains("does not recognise this app as the signed WhoRead app"))
     }
 }

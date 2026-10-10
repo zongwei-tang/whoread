@@ -17,6 +17,7 @@ public enum L: String, CaseIterable, Sendable {
     case askAllowOnce, askAlwaysAllow, askDeny, askAlwaysDeny, askTrustApple
     case askAllowNotPermittedFormat, askGone, askAgentsFormat, askPathHidden, asksCannotReadFormat
     case askCoversFormat, alertCoversFormat
+    case answerRuleLimit, answerNotSavedFormat, answerNoReply, alertNotPermittedFormat
     // What cannot be read (limited view)
     case limitedViewFormat, limitedAskPaths, notShownFormat, cannotReadFormat
     case partAlerts, partLive, partSummaries, partRules, partSettings, partCatalog, partAgents
@@ -118,8 +119,18 @@ public enum L10n {
         .askDeny: ("Deny", "拒绝"),
         .askAlwaysDeny: ("Always deny", "始终拒绝"),
         .askTrustApple: ("Allow all Apple programs", "允许所有苹果程序"),
-        .askAllowNotPermittedFormat: ("Not allowed: only the signed WhoRead app or an administrator can allow (this build is not signed). In Terminal: %@", "没有权限：只有已签名的 WhoRead 应用或管理员才能允许（当前版本未签名）。请在终端运行：%@"),
-        .askGone: ("This question is no longer open (answered elsewhere or expired).", "这个问题已经关闭（已在别处回答或已过期）。"),
+        .askAllowNotPermittedFormat: ("Not allowed: the WhoRead monitor does not recognise this app as the signed WhoRead app, and only that app or an administrator can allow. The question is still open. In Terminal: %@",
+                                      "没有权限：WhoRead 监控程序没有把这个应用识别为已签名的 WhoRead 应用，只有该应用或管理员才能允许。问题仍然保留。请在终端运行：%@"),
+        .askGone: ("This question is no longer open: it was answered elsewhere, expired, or the WhoRead monitor restarted. If the program tries again, you will be asked again.",
+                   "这个问题已经关闭：已在别处回答、已过期，或 WhoRead 监控程序已重启。如果程序再次尝试访问，会再次询问你。"),
+        .answerRuleLimit: ("Not saved: WhoRead keeps at most 512 rules and that limit is reached, so nothing changed and the question or alert stays open. Delete rules you no longer need in the Rules tab, then answer again (Deny still works).",
+                           "未保存：WhoRead 最多保存 512 条规则，现已达到上限，所以没有任何改变，问题或告警仍然保留。请在「规则」标签中删除不再需要的规则，然后再回答（「拒绝」仍然可用）。"),
+        .answerNotSavedFormat: ("Your answer applies now, but WhoRead could not save it (%@). After the WhoRead monitor restarts you may be asked again.",
+                                "你的回答已经生效，但 WhoRead 无法保存它（%@）。WhoRead 监控程序重启后可能会再次询问你。"),
+        .answerNoReply: ("No reply from the WhoRead daemon: your answer may not have been taken. If the question is still listed, answer it again.",
+                         "WhoRead 守护进程没有回应：你的回答可能没有生效。如果问题仍在列表中，请再回答一次。"),
+        .alertNotPermittedFormat: ("Not permitted: the WhoRead monitor does not recognise this app as the signed WhoRead app, and this needs that app or an administrator. In Terminal: %@",
+                                   "没有权限：WhoRead 监控程序没有把这个应用识别为已签名的 WhoRead 应用，这项操作需要该应用或管理员。请在终端运行：%@"),
         .askAgentsFormat: ("AI agent in the chain: %@", "调用链中有 AI agent：%@"),
         .askCoversFormat: ("Allow once (10 min) and Always allow cover: %@.", "「允许一次（10 分钟）」和「始终允许」适用于：%@。"),
         .alertCoversFormat: ("Always allow covers: %@.", "「始终允许」适用于：%@。"),
@@ -357,7 +368,8 @@ public enum L10n {
         .opSetacl: ("change ACL", "修改 ACL"),
         .opMount: ("mount over", "挂载覆盖"),
 
-        .errNotPermitted: ("Not permitted. Changes that weaken protection need the WhoRead app or sudo.", "没有权限：削弱保护的修改需要 WhoRead 应用或 sudo。"),
+        .errNotPermitted: ("Not permitted: the WhoRead monitor does not recognise this app as the signed WhoRead app, and changes that weaken protection need that app or sudo.",
+                           "没有权限：WhoRead 监控程序没有把这个应用识别为已签名的 WhoRead 应用，而削弱保护的修改需要该应用或 sudo。"),
         .errUnavailable: ("The WhoRead daemon is not running.", "WhoRead 守护进程没有运行。"),
         .errVersionMismatchFormat: ("The WhoRead app and daemon versions differ (%@). Update or restart the daemon.", "WhoRead 应用与守护进程版本不一致（%@）。请更新或重启守护进程。"),
         .errDaemonFormat: ("The daemon refused: %@", "守护进程拒绝了请求：%@"),
@@ -491,16 +503,55 @@ public enum L10n {
         }
     }
 
-    /// What to show when the daemon did not take an answer. An allow refused for lack of privilege
-    /// (an unsigned build, not root) says how to give it from Terminal instead.
+    /// What to show when the daemon did not take an answer to a question. An allow refused for lack
+    /// of privilege (not recognised as the signed app, not root) says how to give it from Terminal.
     public static func answerError(_ e: IPCError, askID: Int64, action: AlertAction, _ language: Language = current) -> String {
         switch e.code {
         case .notPermitted where AskAnswers.isAllow(action):
             return f(.askAllowNotPermittedFormat, "sudo whoread ask \(askID) \(AskAnswers.cliVerb(action))", language: language)
+        // Denying is open to the console user: refused only to another user.
+        case .notPermitted:
+            return t(.errNotConsoleUser, language)
         case .notFound:
             return t(.askGone, language)
         default:
-            return message(for: e, language)
+            return answerOutcome(e, language) ?? message(for: e, language)
+        }
+    }
+
+    /// The same for an answer given on an alert (Alerts tab, alert banners; `whoread alert` words).
+    public static func alertActionError(_ e: IPCError, alertID: Int64, action: AlertAction, _ language: Language = current) -> String {
+        if e.code == .notPermitted {
+            return f(.alertNotPermittedFormat, "sudo whoread alert \(alertID) \(alertCLIWord(action))", language: language)
+        }
+        return answerOutcome(e, language) ?? message(for: e, language)
+    }
+
+    /// `whoread alert ID WORD`.
+    static func alertCLIWord(_ a: AlertAction) -> String {
+        switch a {
+        case .allowOnce: return "allow-once"
+        case .alwaysAllow: return "always-allow"
+        case .keepBlocking: return "keep-blocking"
+        case .blockFromNowOn: return "block"
+        case .ignore: return "ignore"
+        case .trustApplePrograms: return "trust-apple"
+        }
+    }
+
+    /// Outcomes of an answer that a plain "refused" would misreport: the rule limit (nothing changed),
+    /// a rule or setting applied but not saved (it took effect), no reply (it may or may not have).
+    /// The daemon's messages are matched as DaemonCore words them (pinned by tests).
+    static func answerOutcome(_ e: IPCError, _ language: Language) -> String? {
+        switch e.code {
+        case .invalid where e.message.hasPrefix("too many rules"):
+            return t(.answerRuleLimit, language)
+        case .internalError where e.message.contains("applied but not saved"):
+            return f(.answerNotSavedFormat, DisplayText.escaped(e.message, limit: 300), language: language)
+        case .unavailable:
+            return t(.answerNoReply, language)
+        default:
+            return nil
         }
     }
 

@@ -258,7 +258,16 @@ final class DaemonConnection {
         queue.async {
             var response: IPCResponse?
             var failure: IPCError?
-            do { response = try work(client) } catch let e as IPCError { failure = e } catch { failure = IPCError(.internalError, "\(error)") }
+            do {
+                response = try work(client)
+            } catch let e as IPCError {
+                failure = e
+            } catch let e as DecodingError {
+                // A reply in a shape this app does not know: another version, not a refusal.
+                failure = SnapshotFetcher.ipcError(e)
+            } catch {
+                failure = IPCError(.internalError, "\(error)")
+            }
             Task { @MainActor in
                 if let failure {
                     self.lastActionError = failed?(failure) ?? L10n.message(for: failure)
@@ -279,7 +288,15 @@ final class DaemonConnection {
     /// `fromNotification`: the user answered a banner, so explain there if "block from now on"
     /// saved a rule that cannot block right now.
     func act(on alert: Int64, _ action: AlertAction, fromNotification: Bool = false) {
-        perform(.alertAction(alertID: alert, action: action)) {
+        run({ try $0.call(.alertAction(alertID: alert, action: action)) }, failed: { e in
+            // The rule limit, an answer applied but not saved, no reply: said as such, not "refused".
+            let text = L10n.alertActionError(e, alertID: alert, action: action)
+            if fromNotification {
+                NotificationManager.shared.post(SystemNotice(identifier: "whoread.alert-failed-\(alert)",
+                                                             title: L10n.t(.notifAskFailedTitle), body: text), tab: .alerts)
+            }
+            return text
+        }) {
             guard fromNotification, action == .blockFromNowOn, let caveat = self.model.enforcementCaveat else { return }
             NotificationManager.shared.post(SystemNotice(identifier: "whoread.rule-not-blocking-\(alert)",
                                                          title: L10n.t(.notifRuleNotBlockingTitle), body: caveat), tab: .rules)
@@ -300,6 +317,11 @@ final class DaemonConnection {
                 if let failure {
                     let text = L10n.answerError(failure, askID: id, action: action)
                     self.lastActionError = text
+                    // Allowing refused: this connection may not have been taken for the app.
+                    if failure.code == .notPermitted, AskAnswers.isAllow(action),
+                       self.askRecovery.shouldReconnect(now: Date(), refused: true) {
+                        self.reconnect(questions: true)
+                    }
                     if fromNotification {
                         NotificationManager.shared.post(SystemNotice(identifier: "whoread.ask-failed-\(id)",
                                                                      title: L10n.t(.notifAskFailedTitle), body: text), tab: .alerts)

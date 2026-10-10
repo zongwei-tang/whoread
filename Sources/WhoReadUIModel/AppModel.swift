@@ -517,8 +517,12 @@ public final class AppModel {
     /// Why the open questions cannot be read, while the daemon is otherwise reachable.
     public var asksProblemText: String? {
         guard let e = asksError, connected else { return nil }
-        if e.code == .notPermitted { return L10n.t(.errNotConsoleUser, language) }
-        return L10n.f(.asksCannotReadFormat, L10n.message(for: e, language), language: language)
+        switch e.code {
+        case .notPermitted: return L10n.t(.errNotConsoleUser, language)
+        // The status was read: the daemon runs, this read got no reply in time.
+        case .unavailable: return L10n.f(.asksCannotReadFormat, L10n.t(.errNoAnswer, language), language: language)
+        default: return L10n.f(.asksCannotReadFormat, L10n.message(for: e, language), language: language)
+        }
     }
 
     // MARK: - Enforcement

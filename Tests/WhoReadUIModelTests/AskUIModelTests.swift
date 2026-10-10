@@ -396,15 +396,18 @@ final class AskUIModelTests: XCTestCase {
         XCTAssertEqual(m.actionTitle(.keepBlocking, for: .blocked), "Keep blocking")
         XCTAssertEqual(m.actionTitle(.blockFromNowOn, for: .firstAccess), "Block from now on")
 
-        // An unsigned build (not root) cannot allow: say how to do it instead.
+        // An app the daemon does not recognise as the signed one (not root) cannot allow: say how to do
+        // it instead. Not "this build is not signed": the genuine app on a misjudged connection gets it too.
         let refused = IPCError(.notPermitted, "allowing needs root or the signed app")
         XCTAssertEqual(L10n.answerError(refused, askID: 7, action: .allowOnce, .en),
-                       "Not allowed: only the signed WhoRead app or an administrator can allow (this build is not signed). In Terminal: sudo whoread ask 7 allow-once")
+                       "Not allowed: the WhoRead monitor does not recognise this app as the signed WhoRead app, and only that app "
+                       + "or an administrator can allow. The question is still open. In Terminal: sudo whoread ask 7 allow-once")
         XCTAssertTrue(L10n.answerError(refused, askID: 7, action: .trustApplePrograms, .zhHans).hasSuffix("sudo whoread ask 7 trust-apple"))
         XCTAssertTrue(L10n.answerError(refused, askID: 7, action: .alwaysAllow, .en).hasSuffix("sudo whoread ask 7 allow"))
-        XCTAssertEqual(L10n.answerError(refused, askID: 7, action: .keepBlocking, .en), L10n.t(.errNotPermitted, .en))
+        // Denying is open to the console user: refused only to another user, and that is what it says.
+        XCTAssertEqual(L10n.answerError(refused, askID: 7, action: .keepBlocking, .en), L10n.t(.errNotConsoleUser, .en))
         XCTAssertEqual(L10n.answerError(IPCError(.notFound, "no question #7"), askID: 7, action: .keepBlocking, .zhHans),
-                       "这个问题已经关闭（已在别处回答或已过期）。")
+                       "这个问题已经关闭：已在别处回答、已过期，或 WhoRead 监控程序已重启。如果程序再次尝试访问，会再次询问你。")
         XCTAssertEqual(L10n.answerError(IPCError(.invalid, "bad"), askID: 7, action: .alwaysAllow, .en), "The daemon refused: bad")
         XCTAssertEqual(AskAnswers.denyActions.map(AskAnswers.cliVerb), ["deny", "block"])
     }
