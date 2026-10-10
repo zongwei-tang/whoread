@@ -917,29 +917,60 @@ final class LinkRediscoveryTests: XCTestCase {
         XCTAssertEqual(found.map(\.target), [real(target)])
     }
 
-    // The directories one classifier build walks anew share one budget; a walk the budget cut short is
-    // not kept, so the next build walks that directory again.
+    // files-9-walk-caps: the directories of a full search share one budget in catalog order, so once
+    // the first ones (agent data in two homes) had used it up, every later one (a custom path, a
+    // category added by the user) was searched with none left, at every full search: a link at its top
+    // was never followed. Each directory now keeps a share the others cannot use up.
+    func testADirectorySearchedLastStillGetsItsShare() throws {
+        let home = try makeHome()
+        for d in ["/.big1", "/.big2"] {
+            try FileManager.default.createDirectory(atPath: home + d, withIntermediateDirectories: true)
+            for i in 0..<10 { XCTAssertTrue(touch(home + d + "/f\(i)")) }
+        }
+        let target = home + "/dotfiles/azure/late.json"
+        XCTAssertTrue(touch(target))
+        XCTAssertEqual(symlink(target, home + "/.azure/late.json"), 0)
+        let inventory = LinkInventory()
+        inventory.walk([home + "/.big1", home + "/.big2", home + "/.azure"], budget: 15)
+        let found = inventory.links(under: home + "/.azure", maxDepth: 8, maxEntries: 100, limit: 10)
+        XCTAssertEqual(found.map(\.link), [home + "/.azure/late.json"])
+        XCTAssertEqual(found.map(\.target), [real(target)])
+    }
+
+    // The directories one classifier build walks anew share one budget, each keeping
+    // LinkInventory.minimumEntriesPerDirectory; a walk the budget cut short is not kept, so the next
+    // build walks that directory again.
     func testWalksDuringARebuildShareABudget() throws {
         let home = try makeHome()
-        let root = home + "/.azure"
-        try FileManager.default.createDirectory(atPath: root + "/a", withIntermediateDirectories: true)
-        for name in ["b", "c"] { XCTAssertTrue(touch(root + "/" + name)) }
+        let floor = LinkInventory.minimumEntriesPerDirectory
         XCTAssertTrue(touch(home + "/dotfiles/azure/x"))
-        XCTAssertEqual(symlink(home + "/dotfiles/azure/x", root + "/a/link"), 0)
+        // A small directory, and one with more entries at its top than the floor ("a" sorts first; its
+        // link is one level down).
+        let small = home + "/.azure", big = home + "/.big"
+        for root in [small, big] {
+            try FileManager.default.createDirectory(atPath: root + "/a", withIntermediateDirectories: true)
+            XCTAssertEqual(symlink(home + "/dotfiles/azure/x", root + "/a/link"), 0)
+        }
+        for name in ["b", "c"] { XCTAssertTrue(touch(small + "/" + name)) }
+        for i in 0..<(floor + 10) { XCTAssertTrue(touch(big + String(format: "/f%05d", i))) }
         let inventory = LinkInventory()
-        func links(_ budget: inout Int) -> [String] {
-            inventory.links(under: root, maxDepth: 8, maxEntries: 100, limit: 10, resolver: LinkFollowingResolver(), budget: &budget)
+        func links(_ root: String, _ budget: inout Int) -> [String] {
+            inventory.links(under: root, maxDepth: 8, maxEntries: 20_000, limit: 10, resolver: LinkFollowingResolver(), budget: &budget)
                 .map(\.link)
         }
-        // The top level (a, b, c) uses it up.
-        var budget = 3
-        XCTAssertEqual(links(&budget), [])
-        XCTAssertEqual(budget, 0)
-        budget = 100
-        XCTAssertEqual(links(&budget), [root + "/a/link"], "walked again")
-        XCTAssertEqual(budget, 96)
-        XCTAssertEqual(links(&budget), [root + "/a/link"])
-        XCTAssertEqual(budget, 96, "kept: not walked again")
+        // Other directories used the budget up: each still looks at the floor's worth of entries.
+        var budget = 0
+        XCTAssertEqual(links(small, &budget), [small + "/a/link"])
+        XCTAssertEqual(budget, -4)
+        // The floor ends at the top level of the big one: cut short, so not kept.
+        XCTAssertEqual(links(big, &budget), [])
+        XCTAssertEqual(budget, -4 - floor)
+        budget = 100_000
+        XCTAssertEqual(links(big, &budget), [big + "/a/link"], "walked again")
+        XCTAssertEqual(budget, 100_000 - (floor + 12))
+        XCTAssertEqual(links(big, &budget), [big + "/a/link"])
+        XCTAssertEqual(links(small, &budget), [small + "/a/link"])
+        XCTAssertEqual(budget, 100_000 - (floor + 12), "kept: neither is walked again")
     }
 
     // files-9-dangling-missing-dir: a link whose target lies below directories that do not exist yet

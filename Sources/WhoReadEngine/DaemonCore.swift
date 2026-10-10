@@ -1970,14 +1970,24 @@ struct LinkFollowingResolver: SymlinkResolver {
 /// (PathClassifier.walksForLinks): what the last full walk of those directories found, plus links file
 /// events showed since, at any depth (files-9). A classifier rebuild after a link change re-reads only
 /// these, so it costs in proportion to the number of links, not to the size of the directories. The
-/// full walk (at most `walkBudget` entries in all) runs at start, at every periodic rediscovery, and
-/// after events were lost. A rebuild searches a directory again only when it was not searched yet or
-/// its real path changed since (it, or a directory above it, was made a link: what the walk found
-/// there is somewhere else now), sharing `walkBudget`. Thread-safe.
+/// full walk (`walkBudget` entries in all, but at least `minimumEntriesPerDirectory` for each
+/// directory) runs at start, at every periodic rediscovery, and after events were lost. A rebuild
+/// searches a directory again only when it was not searched yet or its real path changed since (it,
+/// or a directory above it, was made a link: what the walk found there is somewhere else now),
+/// sharing `walkBudget` the same way. Thread-safe.
 final class LinkInventory: @unchecked Sendable {
     /// Entries one full walk looks at, over every directory (each also stops at
     /// PathClassifier.linkWalkMaxEntries).
     static let walkBudget = 100_000
+    /// Entries every directory may look at even when the others used up `walkBudget`: the directories
+    /// are walked in catalog order, and the last ones (a custom path) still need a share.
+    static let minimumEntriesPerDirectory = 2_000
+
+    /// Entries a walk of one directory looks at, out of `budget` left.
+    static func share(of budget: Int, maxEntries: Int) -> Int {
+        min(maxEntries, max(minimumEntriesPerDirectory, budget))
+    }
+
     /// Links remembered from file events (the oldest are forgotten first).
     static let maxReported = 1024
     /// Links one classifier follows: each one adds monitored prefixes, mute paths and prefilter needles.
@@ -2001,18 +2011,18 @@ final class LinkInventory: @unchecked Sendable {
         return _fullWalks
     }
 
-    /// Searches `dirs` again, in order, sharing `walkBudget`, and forgets what was found before. Call it
-    /// outside the daemon's locks: it reads the disk.
-    func walk(_ dirs: [String]) {
+    /// Searches `dirs` again, in order, sharing `budget` (each keeps `minimumEntriesPerDirectory`), and
+    /// forgets what was found before. Call it outside the daemon's locks: it reads the disk.
+    func walk(_ dirs: [String], budget: Int = LinkInventory.walkBudget) {
         var found: [String: (links: [String], roots: [String])] = [:]
         var roots: [String] = []
-        var budget = LinkInventory.walkBudget
+        var budget = budget
         for d in dirs {
             let key = PathNormalizer.fold(d)
             guard found[key] == nil else { continue }
             let dirRoots = LinkInventory.roots(of: d)
             let r = LinkFollowingResolver.links(under: d, maxDepth: PathClassifier.linkWalkMaxDepth,
-                                                maxEntries: max(0, min(PathClassifier.linkWalkMaxEntries, budget)))
+                                                maxEntries: LinkInventory.share(of: budget, maxEntries: PathClassifier.linkWalkMaxEntries))
             budget -= r.visited
             found[key] = (r.links, dirRoots)
             roots += dirRoots
@@ -2078,7 +2088,8 @@ final class LinkInventory: @unchecked Sendable {
     }
 
     /// `budget`: entries a walk of `dir` may still look at, shared by the directories one classifier
-    /// build walks. A walk it cut short is not kept (the next build walks again).
+    /// build walks (each keeps `minimumEntriesPerDirectory`). A walk it cut short is not kept (the next
+    /// build walks again).
     func links(under dir: String, maxDepth: Int, maxEntries: Int, limit: Int, resolver: LinkFollowingResolver,
                budget: inout Int) -> [(link: String, target: String)] {
         guard limit > 0 else { return [] }
@@ -2098,7 +2109,7 @@ final class LinkInventory: @unchecked Sendable {
         if let known {
             listed = known
         } else {
-            let cap = max(0, min(maxEntries, budget))
+            let cap = LinkInventory.share(of: budget, maxEntries: maxEntries)
             let r = LinkFollowingResolver.links(under: dir, maxDepth: maxDepth, maxEntries: cap)
             budget -= r.visited
             complete = cap == maxEntries || r.visited < cap
