@@ -8,7 +8,7 @@ struct Args {
 
     static let valueFlags: Set<String> = [
         "since", "until", "category", "app", "agent", "limit", "format", "output", "o", "lang", "service", "socket",
-        "json-file", "home", "defaults", "learning-days", "input", "vault", "sample", "path", "data-dir",
+        "json-file", "home", "defaults", "learning-days", "input", "vault", "sample", "path", "data-dir", "capture-pid",
     ]
 
     init(_ argv: [String]) {

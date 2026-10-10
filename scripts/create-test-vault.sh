@@ -4,6 +4,13 @@
 # it is never added to any account. AWS values are AWS's documented example credentials.
 set -euo pipefail
 VAULT="${WHOREAD_TEST_VAULT:-$HOME/WhoReadTestVault}"
+# Every write below goes through these names: refuse symbolic links, so a link planted or left in
+# the vault can never turn a fake key, config or credentials file into a write to a real one.
+for p in "$VAULT" "$VAULT/ssh" "$VAULT/aws" "$VAULT/notes" "$VAULT/project" \
+         "$VAULT/ssh/id_ed25519" "$VAULT/ssh/id_ed25519.pub" "$VAULT/ssh/config" "$VAULT/aws/credentials" \
+         "$VAULT/project/.env" "$VAULT/notes/todo.txt" "$VAULT/notes/old.txt"; do
+  if [ -L "$p" ]; then echo "refusing: $p is a symbolic link" >&2; exit 1; fi
+done
 mkdir -p "$VAULT/ssh" "$VAULT/aws" "$VAULT/notes" "$VAULT/project"
 chmod 700 "$VAULT" "$VAULT/ssh"
 if [ ! -f "$VAULT/ssh/id_ed25519" ]; then

@@ -59,7 +59,7 @@ Local (no daemon):
   kill-switch engage|release|status [--path P]   creates/removes the disable-enforcement file (root)
   replay FILE [--home DIR] [--defaults DIR] [--all] [--json]
                                  run an eslogger JSONL capture through the full pipeline
-  fixture sanitize --input RAW --output OUT [--home DIR] [--vault DIR] [--sample N]
+  fixture sanitize --input RAW|/dev/stdin --output OUT [--home DIR] [--vault DIR] [--capture-pid PID] [--sample N]
   version
 
 Global: --json   --lang en|zh-Hans   --service MACH_NAME   --socket PATH
@@ -1113,15 +1113,20 @@ func cmdReplay() throws {
 
 func cmdFixture() throws {
     guard args.positional.dropFirst().first == "sanitize", let input = args.value("input"), let output = args.value("output") else {
-        throw CLIError("whoread fixture sanitize --input RAW.jsonl --output OUT.jsonl [--home DIR] [--vault DIR] [--sample N]")
+        throw CLIError("whoread fixture sanitize --input RAW.jsonl|/dev/stdin --output OUT.jsonl [--home DIR] [--vault DIR] [--capture-pid PID] [--sample N]")
     }
     let home = args.value("home") ?? NSHomeDirectory()
-    let text = try String(contentsOfFile: input, encoding: .utf8)
-    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
-    let sanitizer = FixtureSanitizer(home: home, vault: args.value("vault"), samplePerKind: Int(args.value("sample") ?? "40") ?? 40)
-    let (kept, report) = sanitizer.sanitize(lines: lines)
+    // A file or a pipe (capture-fixture.sh streams the root-only raw capture through `sudo cat`).
+    guard let handle = FileHandle(forReadingAtPath: input) else { throw CLIError("cannot read \(input)") }
+    let data = try handle.readToEnd() ?? Data()
+    var sanitizer = FixtureSanitizer(home: home, vault: args.value("vault"), samplePerKind: Int(args.value("sample") ?? "40") ?? 40)
+    if let pid = args.value("capture-pid") {
+        guard let p = Int32(pid), p > 1 else { throw CLIError("--capture-pid: not a pid: \(pid)") }
+        sanitizer.capturePID = p
+    }
+    let (kept, report) = sanitizer.sanitize(data: data)
     try SafeFile.replace(output, with: Data((kept.joined(separator: "\n") + "\n").utf8), mode: 0o600)
-    out("kept \(report.kept) of \(report.inputLines) lines: \(report.vaultEvents) vault events, \(report.lifecycle) lifecycle, \(report.samples) samples; by kind \(report.byKind)")
+    out("kept \(report.kept) of \(report.inputLines) lines: \(report.vaultEvents) vault events, \(report.lifecycle) lifecycle, \(report.samples) samples; by kind \(report.byKind); dropped \(report.foreignVaultEvents) vault events of other programs, \(report.undecodableLines) lines not UTF-8")
 }
 
 // MARK: - Dispatch
