@@ -6,9 +6,9 @@ your Mac.
 
 [中文说明见下方](#whoread-中文)
 
-> **Status:** in development. The core, storage, daemon, eslogger backend and CLI are built and
-> tested (440 tests, two adversarial review rounds). The SwiftUI app, the native Endpoint Security client and enforcement are
-> written but not yet compiled on a Mac. See [docs/STATUS.md](docs/STATUS.md).
+> **Status:** in development. Everything builds on macOS 27 and 640 tests pass (three security
+> review rounds). On-device acceptance in a test VM is in progress, and blocking on a normal Mac
+> needs Apple's Endpoint Security entitlement. See [docs/STATUS.md](docs/STATUS.md).
 
 ## Why
 
@@ -116,8 +116,8 @@ Pending: the app has not been run on a Mac yet (M7).
 **谁读了我的 SSH 密钥？** WhoRead 告诉你：哪个 app、哪个进程，在什么时候，读或写了你的哪个敏感文件，又是谁启动了它；并且可以按规则拦截。所有数据都只留在这台 Mac 上。
 
 > **状态：** 开发中。
-> - 已完成并通过测试（440 个测试，经过两轮对抗性审查）：核心逻辑、存储、守护进程、eslogger 后端、CLI。
-> - 代码已写完，但还没在 Mac 上编译：SwiftUI 应用、原生 Endpoint Security 客户端、拦截功能。
+> - 全部代码已在 macOS 27 上编译，640 个测试通过（经过三轮安全审查）。
+> - 正在测试虚拟机里做真机验收；在普通 Mac 上拦截需要苹果批准 Endpoint Security 权限。
 >
 > 详见 [docs/STATUS.md](docs/STATUS.md)。
 
@@ -195,4 +195,4 @@ sudo whoread catalog resolve-owners
 
 ## 文档
 
-[架构](docs/ARCHITECTURE.md) · [威胁模型](docs/THREAT_MODEL.md) · [开发与虚拟机](docs/DEVELOPMENT.md) · [分发](docs/DISTRIBUTION.md) · [调研记录](docs/RESEARCH.md) · [计划](docs/STATUS.md) · [进度](docs/STATUS.md)
+[架构](docs/ARCHITECTURE.md) · [威胁模型](docs/THREAT_MODEL.md) · [开发与虚拟机](docs/DEVELOPMENT.md) · [分发](docs/DISTRIBUTION.md) · [调研记录](docs/RESEARCH.md) · [状态](docs/STATUS.md)
