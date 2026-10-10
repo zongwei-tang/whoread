@@ -303,12 +303,19 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/sh", "-c", "tool pwd:\(R) api_key:\(R) DB_PASSWORD:\(R)"])
         // `passwd=PW` was already redacted (key=value); kept here as coverage.
         assertRedacted(["tool", "passwd=Hunter2pw"], ["tool", "passwd=\(R)"])
+        // A list of pairs: from the secret on, the rest goes (a password may hold a comma).
+        assertRedacted(["tool", "user:bob,password:Hunter2pw"], ["tool", "user:bob,password:\(R)"])
+        assertRedacted(["tool", "-o", "a:1,password:Hun,ter2pw,b:2"], ["tool", "-o", "a:1,password:\(R)"], secrets: ["Hun", "ter2pw"])
+        assertRedacted(["tool", "user=bob,password:Hunter2pw"], ["tool", "user=bob,password:\(R)"])
+        assertRedacted(["/bin/sh", "-c", "tool --opt user:bob,token:Hunter2pw"], ["/bin/sh", "-c", "tool --opt user:bob,token:\(R)"])
         assertKept([
             ["tmux", "attach", "-t", "session:1"], ["tmux", "send-keys", "-t", "work:editor", "ls", "Enter"],
             ["git", "log", "--format=%an:%ae"], ["docker", "run", "-v", "/data:/data", "img"], ["ssh", "-L", "8080:localhost:80", "h"],
             ["gh", "auth", "refresh", "-s", "read:packages"], ["tool", "password:"], ["tool", "password:true"],
             ["tool", "secret_name:prod"], ["tool", "password_file:/Users/alice/WhoReadTestVault/pw"], ["tool", "pwd:/Users/alice/x"],
             ["kubectl", "get", "secret", "app:v1"], ["git", "show", "HEAD:password.txt"],
+            ["tool", "--opt", "a:1,b:2"], ["tool", "user:bob,role:admin"], ["docker", "run", "-p", "80:80,443:443", "img"],
+            ["mongosh", "mongodb://h1:27017,h2:27017/db"], ["tool", "user:bob,password_file:/Users/alice/x"],
         ])
     }
 
