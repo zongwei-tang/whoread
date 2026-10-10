@@ -318,6 +318,8 @@ public final class DaemonCore: @unchecked Sendable {
     private let normalizerBox: LockedBox<PathNormalizer>
     private var lastRetention = Date.distantPast
     private var lastRediscovery = Date()
+    /// Guarded by `lock`: the tree's agent generation last saved (`persistAgentAncestry`).
+    private var savedAgentGeneration: UInt64?
     /// Where an operation may change a followed link, for the current classifier (files-9).
     private let linkWatch: LockedBox<LinkWatch>
     private let linkSink: LinkWatchingSink
@@ -1570,6 +1572,62 @@ public final class DaemonCore: @unchecked Sendable {
             baseline.markDirty(dirty.map(\.0))
             Log.error("baseline save failed: \(error)")
         }
+    }
+
+    /// Store key of the AI agent ancestry of running processes, restored at the next start.
+    static let agentAncestryKey = "agentAncestry"
+
+    struct StoredAgentAncestry: Codable {
+        /// kern.boottime when saved: after a reboot none of these processes exist.
+        var bootTime: Date?
+        var records: [AgentAncestryRecord]
+    }
+
+    /// At most this much is saved (long executable paths): the oldest records are kept.
+    static let maxAgentAncestryBytes = 512 * 1024
+
+    /// Saves the AI agent ancestry of running processes (ProcessTree.agentAncestry) when it changed, so
+    /// a restart does not lose the agent of a job whose shell has exited. Called every few seconds and
+    /// at stop; never on the ES callback thread.
+    public func persistAgentAncestry(bootTime: Date? = DaemonCore.bootTime()) {
+        let generation = tree.agentAncestryGeneration
+        lock.lock(); let unchanged = savedAgentGeneration == generation; lock.unlock()
+        guard !unchanged else { return }
+        do {
+            var stored = StoredAgentAncestry(bootTime: bootTime, records: tree.agentAncestry())
+            var data = try JSONEncoder().encode(stored)
+            while data.count > DaemonCore.maxAgentAncestryBytes && !stored.records.isEmpty {
+                stored.records.removeLast((stored.records.count + 1) / 2)
+                data = try JSONEncoder().encode(stored)
+            }
+            try store.setValue(data, forKey: DaemonCore.agentAncestryKey)
+            lock.lock(); savedAgentGeneration = generation; lock.unlock()
+        } catch {
+            Log.error("saving the AI agent ancestry of running processes failed: \(error)")
+        }
+    }
+
+    /// Right after the tree is seeded at start: gives running processes the AI agents they had before.
+    /// Records saved before the last boot are ignored (should a pid and start time match by chance);
+    /// where either boot time is unknown, pid and start time alone decide.
+    public func restoreAgentAncestry(now: Date = Date(), bootTime: Date? = DaemonCore.bootTime()) {
+        guard let data = try? store.value(forKey: DaemonCore.agentAncestryKey),
+              let stored = try? JSONDecoder().decode(StoredAgentAncestry.self, from: data) else { return }
+        if let saved = stored.bootTime, let boot = bootTime, abs(saved.timeIntervalSince(boot)) > 1 { return }
+        tree.restoreAgentAncestry(stored.records, at: now)
+        Log.info("restored the AI agent ancestry of up to \(stored.records.count) running processes")
+    }
+
+    /// When the system booted (kern.boottime), nil if unknown (a sandbox may refuse the sysctl).
+    public static func bootTime() -> Date? {
+        #if canImport(Darwin)
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &tv, &size, nil, 0) == 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(tv.tv_sec) + TimeInterval(tv.tv_usec) / 1_000_000)
+        #else
+        return nil
+        #endif
     }
 
     /// Saves consumed "allow once" uses, and drops exceptions that can never match again. Only writes

@@ -81,8 +81,11 @@ public final class Daemon: @unchecked Sendable {
         if config.seedProcesses && core.source.kind != .replay {
             let snapshot = ProcessSnapshot.all()
             core.tree.seed(snapshot, at: Date())
+            // libproc has no fork-time parent: the agents running processes had before the restart.
+            core.restoreAgentAncestry()
             core.tree.parentResolver = { ProcessSnapshot.record(pid: $0) }
             Log.info("process tree seeded with \(snapshot.count) processes")
+            schedule(every: 5) { [core] in core.persistAgentAncestry() }
         }
         core.writer.start()
         killSwitch.start()
@@ -134,6 +137,7 @@ public final class Daemon: @unchecked Sendable {
         #endif
         core.writer.stop()
         core.persistBaseline()
+        if core.config.seedProcesses && core.source.kind != .replay { core.persistAgentAncestry() }
         // A used "allow once" must not work again after a restart.
         core.saveConsumableRules()
         // A clean stop: an earlier unclean one (DaemonStatus.uncleanStop) is no longer reported.

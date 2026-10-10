@@ -506,3 +506,162 @@ final class UnknownAncestryWordingTests: XCTestCase {
         XCTAssertEqual(en.headline(alert(known: nil)), en.headline(alert(known: true)), "older alerts read as before")
     }
 }
+
+// MARK: - The AI agents of running processes survive a daemon restart
+
+/// What libproc lists when the daemon starts (the seed): the current ppid only (launchd for an orphan),
+/// no fork-time parent, no code signing data.
+private func libproc(_ pid: Int32, _ path: String, ppid: Int32, start: TimeInterval, platform: Bool = false,
+                     argv: [String]? = nil) -> ProcessRecord {
+    ProcessRecord(pid: pid, ppid: ppid, executablePath: path, isPlatformBinary: platform, argv: argv, startTime: at(start))
+}
+
+final class AgentAncestryRestartTests: AncestryTestCase {
+    private let noTrust = AskPolicy(enabled: true, trustApplePrograms: false, benignChain: false)
+    private let nodePath = P.node(0, parent: 0, argv: []).executablePath
+
+    /// Terminal → zsh (500) → Claude Code (600) → zsh (601) → sh (700) → ssh (702), a long-running job.
+    /// sh has exited, so ssh is an orphan now (ppid 1). Returns what the daemon saves.
+    func agentJobBeforeRestart(siblings: Bool = false) -> [AgentAncestryRecord] {
+        let sh = h.spawn(agentShell(), proc(700, "/bin/sh", ppid: 601, start: 3, platform: true, signingID: "com.apple.sh"), 3)
+        let ssh = h.spawn(sh, proc(702, "/usr/bin/ssh", ppid: 700, start: 4, platform: true, signingID: "com.apple.openssh"), 4)
+        if siblings { h.spawn(sh, proc(703, "/usr/bin/ssh", ppid: 700, start: 4, platform: true, signingID: "com.apple.openssh"), 4) }
+        h.tree.exit(sh, at: at(5))
+        XCTAssertEqual(h.tree.chain(for: ssh, at: at(6)).nearestAgent, "claude-code")
+        return h.tree.agentAncestry()
+    }
+
+    /// What is still running when the daemon starts again.
+    func runningAfterRestart() -> [ProcessRecord] {
+        [libproc(1, "/sbin/launchd", ppid: 0, start: -1000, platform: true),
+         libproc(100, P.terminal.executablePath, ppid: 1, start: 0, platform: true),
+         libproc(500, "/bin/zsh", ppid: 100, start: 0, platform: true),
+         libproc(600, nodePath, ppid: 500, start: 0, argv: claudeNodeArgv),
+         libproc(601, "/bin/zsh", ppid: 600, start: 0, platform: true),
+         libproc(702, "/usr/bin/ssh", ppid: 1, start: 4, platform: true)]
+    }
+
+    /// A new daemon: a fresh tree seeded from libproc, then given the saved records.
+    func restart(seed: [ProcessRecord], records: [AgentAncestryRecord], at t: TimeInterval = 10) throws {
+        h = try Harness(rules: [enforcedRule(RuleTemplates.blockAgentsFromCritical())], learningDays: 0)
+        h.tree.seed(seed, at: at(t))
+        h.tree.restoreAgentAncestry(records, at: at(t))
+    }
+
+    /// The job's first event after the restart: original_ppid names the shell that is gone.
+    let ssh = proc(702, "/usr/bin/ssh", ppid: 1, start: 4, platform: true, signingID: "com.apple.openssh", originalPPID: 700)
+
+    /// Without the saved records the restarted daemon cannot tell who started the orphan: its ancestry
+    /// is unknown and Claude Code is gone from its chain. With them it keeps the agent (above the shell
+    /// as last seen, linked to the agent that is still running), and still never counts as a chain that
+    /// reaches launchd.
+    func testAnAgentsJobWhoseShellExitedKeepsTheAgentAcrossARestart() throws {
+        let records = agentJobBeforeRestart()
+        try restart(seed: runningAfterRestart(), records: [])
+        XCTAssertNil(h.tree.chain(for: ssh, at: at(11)).nearestAgent, "the loss this restores")
+
+        try restart(seed: runningAfterRestart(), records: records)
+        let chain = h.tree.chain(for: ssh, at: at(11))
+        XCTAssertEqual(names(chain), ["ssh", "sh", "node", "zsh", "Terminal"])
+        XCTAssertEqual(chain.nearestAgent, "claude-code")
+        XCTAssertNil(chain.first { $0.image.pid == 600 }?.exitedAt, "the agent still running is linked as itself")
+        XCTAssertNotNil(chain.first { $0.image.pid == 700 }?.exitedAt, "the shell is a placeholder")
+        XCTAssertFalse(chain.reachesLaunchd)
+        XCTAssertFalse(AskPolicy.isTrustableAppleProgram(ssh, chain: chain))
+        XCTAssertEqual(h.attributor.attribute(chain: chain).key, "agent:claude-code")
+        XCTAssertEqual(decide(ssh, 11).verdict, .deny, "the agent rule applies")
+        // ssh owns SSH keys, but not driven by an agent.
+        h.rules.replace(rules: [])
+        XCTAssertTrue(h.classifier.isOwner(ssh, of: "ssh"))
+        let asked = decide(ssh, 12, ask: noTrust)
+        XCTAssertEqual(asked.verdict, .ask)
+        XCTAssertEqual(asked.askKey?.chainAgents, ["claude-code"])
+        // Saved again from the restored tree, the records still carry the agent (a second restart).
+        XCTAssertEqual(h.tree.agentAncestry().first { $0.pid == 702 }?.agentsAbove.map(\.agentID), ["claude-code"])
+    }
+
+    /// The jobs of one shell share its placeholder.
+    func testSiblingsShareOnePlaceholder() throws {
+        let records = agentJobBeforeRestart(siblings: true)
+        try restart(seed: runningAfterRestart() + [libproc(703, "/usr/bin/ssh", ppid: 1, start: 4, platform: true)], records: records)
+        let a = h.tree.chain(for: ssh, at: at(11)), b = h.tree.chain(for: proc(703, "/usr/bin/ssh", ppid: 1, start: 4, platform: true,
+                                                                              signingID: "com.apple.openssh", originalPPID: 700), at: at(11))
+        XCTAssertEqual(b.nearestAgent, "claude-code")
+        XCTAssertEqual(a[1].id, b[1].id)
+    }
+
+    /// A placeholder is reachable only through what was restored below it. Here pid 700 (the shell that
+    /// is gone) belongs to an unrelated program now, which started cat just before the restore (too late
+    /// for the snapshot). cat's parent is that program, not the old shell with Claude Code above it.
+    func testAPlaceholderIsNotTakenForTheProcessThatHoldsItsPidNow() throws {
+        let records = agentJobBeforeRestart()
+        try restart(seed: runningAfterRestart() + [libproc(700, "/usr/bin/python3", ppid: 1, start: 8, platform: true)],
+                    records: records)
+        XCTAssertEqual(h.tree.node(pid: 700)?.image.name, "python3")
+        let cat = proc(710, "/bin/cat", ppid: 700, start: 9, platform: true, signingID: "com.apple.cat")
+        let chain = h.tree.chain(for: cat, at: at(11))
+        XCTAssertEqual(names(chain), ["cat", "python3"])
+        XCTAssertNil(chain.nearestAgent)
+        // The restored job still has its placeholder.
+        XCTAssertEqual(names(h.tree.chain(for: ssh, at: at(11))), ["ssh", "sh", "node", "zsh", "Terminal"])
+    }
+
+    /// Records name a process instance by pid and start time: a pid held by another process now gets
+    /// nothing from them.
+    func testARecordForAnotherInstanceOfThePidIsIgnored() throws {
+        let records = agentJobBeforeRestart()
+        try restart(seed: [libproc(1, "/sbin/launchd", ppid: 0, start: -1000, platform: true),
+                           libproc(100, P.terminal.executablePath, ppid: 1, start: 0, platform: true),
+                           libproc(500, "/bin/zsh", ppid: 100, start: 0, platform: true),
+                           libproc(600, "/usr/bin/vim", ppid: 500, start: 9),
+                           libproc(702, "/usr/bin/python3", ppid: 1, start: 9)], records: records)
+        XCTAssertNil(h.tree.node(pid: 600)?.agentID)
+        let chain = h.tree.chain(for: libproc(702, "/usr/bin/python3", ppid: 1, start: 9), at: at(11))
+        XCTAssertEqual(names(chain), ["python3"])
+        XCTAssertNil(chain.nearestAgent)
+    }
+
+    /// Claude Code (native, its team pinned by a "block from now on" rule) exec'd /bin/cat, which runs a
+    /// job. libproc shows only /bin/cat: nothing to recognise the agent by. The record gives the process
+    /// its agent and team back, and what it started (linked by the snapshot) has the agent above it.
+    func testAnAgentThatExecdAwayIsAnAgentAgainAfterARestart() throws {
+        let block = Rule(id: "block-claude", enabled: true, enforce: true, target: .category("ssh"),
+                         subject: .responsible(key: "agent:claude-code", teamID: claudeTeam), access: .any, action: .deny)
+        let zsh = h.spawn(P.terminal, P.zsh(500, parent: 100))
+        let claude = h.spawn(zsh, proc(600, "/Users/alice/.local/share/claude/versions/2.0.1", ppid: 500, start: 1,
+                                       signingID: "com.anthropic.claude-code", teamID: claudeTeam, argv: ["claude"]), 1)
+        var cat = P.cat(600, parent: 500)
+        cat.startTime = claude.startTime
+        cat.pidVersion = claude.pidVersion.map { $0 + 1 }
+        h.exec(claude, cat, 2)
+        let job = h.spawn(cat, proc(610, "/usr/bin/python3", ppid: 600, start: 3), 3)
+        let records = h.tree.agentAncestry()
+
+        let running = [libproc(1, "/sbin/launchd", ppid: 0, start: -1000, platform: true),
+                       libproc(100, P.terminal.executablePath, ppid: 1, start: 0, platform: true),
+                       libproc(500, "/bin/zsh", ppid: 100, start: 0, platform: true),
+                       libproc(600, "/bin/cat", ppid: 500, start: 1, platform: true),
+                       libproc(610, "/usr/bin/python3", ppid: 600, start: 3)]
+        try restart(seed: running, records: [])
+        XCTAssertNil(h.tree.chain(for: job, at: at(11)).nearestAgent, "the loss this restores")
+
+        try restart(seed: running, records: records)
+        h.rules.replace(rules: [block])
+        XCTAssertEqual(h.tree.node(pid: 600)?.agentID, "claude-code")
+        let chain = h.tree.chain(for: job, at: at(11))
+        XCTAssertEqual(names(chain), ["python3", "cat", "zsh", "Terminal"])
+        XCTAssertEqual(chain.nearestAgent, "claude-code")
+        let responsible = h.attributor.attribute(chain: chain)
+        XCTAssertEqual(responsible.key, "agent:claude-code")
+        XCTAssertEqual(responsible.teamID, claudeTeam)
+        XCTAssertEqual(decide(job, 11).ruleID, "block-claude")
+    }
+
+    /// Only running processes with an AI agent in their ancestry are saved, the oldest first when there
+    /// are more than the limit.
+    func testOnlyRunningProcessesWithAnAgentAreSavedOldestFirst() {
+        _ = agentJobBeforeRestart()
+        XCTAssertEqual(h.tree.agentAncestry().map(\.pid), [600, 601, 702], "Claude Code, its shell and the job, not sh (exited)")
+        XCTAssertEqual(h.tree.agentAncestry(limit: 1).map(\.pid), [600])
+    }
+}

@@ -129,6 +129,122 @@ final class AncestryScopedAnswerEngineTests: XCTestCase {
     }
 }
 
+/// The daemon saves the AI agent ancestry of running processes in its store and gives it back to the
+/// processes still running after a restart (libproc has no fork-time parent to find it again by).
+final class AgentAncestryPersistenceTests: XCTestCase {
+    private let start = Date().addingTimeInterval(-600)
+    private let claudeArgv = ["node", "/opt/homebrew/bin/claude"]
+
+    private func p(_ pid: Int32, _ path: String, ppid: Int32, _ offset: TimeInterval, platform: Bool = true,
+                   argv: [String]? = nil) -> ProcessRecord {
+        proc(pid, path, ppid: ppid, platform: platform, argv: argv, start: start.addingTimeInterval(offset))
+    }
+
+    /// libproc's view: current ppid only.
+    private func snapshot(_ r: ProcessRecord, ppid: Int32? = nil) -> ProcessRecord {
+        ProcessRecord(pid: r.pid, ppid: ppid ?? r.ppid, executablePath: r.executablePath, isPlatformBinary: r.isPlatformBinary,
+                      argv: r.argv, startTime: r.startTime)
+    }
+
+    /// Terminal → zsh → Claude Code (node) → sh → python3 (a job); sh has exited, python3 is an orphan.
+    private lazy var terminal = p(100, "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal", ppid: 1, 0)
+    private lazy var zsh = p(500, "/bin/zsh", ppid: 100, 1)
+    private lazy var claude = p(600, "/opt/homebrew/Cellar/node/22.9.0/bin/node", ppid: 500, 2, platform: false, argv: claudeArgv)
+    private lazy var sh = p(700, "/bin/sh", ppid: 600, 3)
+    private lazy var job = p(701, "/usr/bin/python3", ppid: 700, 4)
+
+    /// `parent` forks a copy of itself, which execs `child`.
+    private func spawn(_ tree: ProcessTree, _ parent: ProcessRecord, _ child: ProcessRecord) {
+        let now = start.addingTimeInterval(5)
+        var copy = parent
+        copy.pid = child.pid
+        copy.ppid = parent.pid
+        copy.originalPPID = parent.pid
+        copy.startTime = child.startTime
+        tree.fork(parent: parent, child: copy, at: now)
+        tree.exec(old: copy, new: child, at: now)
+    }
+
+    private func runAgentJob(_ tree: ProcessTree) {
+        for (parent, child) in [(terminal, zsh), (zsh, claude), (claude, sh), (sh, job)] { spawn(tree, parent, child) }
+        tree.exit(sh, at: start.addingTimeInterval(5))
+    }
+
+    private func seedAfterRestart(_ core: DaemonCore) {
+        core.tree.seed([snapshot(terminal), snapshot(zsh), snapshot(claude), snapshot(job, ppid: 1)], at: Date())
+    }
+
+    func testTheAgentOfAnOrphanedJobIsRestoredFromTheStore() throws {
+        let dir = TempDir()
+        do {
+            let core = try identityCore(dir)
+            runAgentJob(core.tree)
+            XCTAssertEqual(core.tree.chain(for: job, at: Date()).nearestAgent, "claude-code")
+            core.persistAgentAncestry()
+        }
+        let again = try identityCore(dir)
+        seedAfterRestart(again)
+        XCTAssertNil(again.tree.chain(nodeID: try XCTUnwrap(again.tree.node(pid: 701)?.id)).nearestAgent, "seeded alone: unknown")
+        again.restoreAgentAncestry()
+        let chain = again.tree.chain(nodeID: try XCTUnwrap(again.tree.node(pid: 701)?.id))
+        XCTAssertEqual(chain.map(\.image.name), ["python3", "sh", "node", "zsh", "Terminal"])
+        XCTAssertEqual(chain.nearestAgent, "claude-code")
+        XCTAssertFalse(chain.reachesLaunchd)
+    }
+
+    /// Saved before the last boot: none of those processes exist any more (pids and start times can
+    /// repeat after a reboot), so nothing is restored.
+    func testRecordsFromAnotherBootAreIgnored() throws {
+        let dir = TempDir()
+        let boot = Date().addingTimeInterval(-86_400)
+        do {
+            let core = try identityCore(dir)
+            runAgentJob(core.tree)
+            core.persistAgentAncestry(bootTime: boot.addingTimeInterval(-3_600))
+        }
+        let fresh = try identityCore(dir)
+        seedAfterRestart(fresh)
+        fresh.restoreAgentAncestry(bootTime: boot)
+        XCTAssertNil(fresh.tree.chain(nodeID: try XCTUnwrap(fresh.tree.node(pid: 701)?.id)).nearestAgent)
+        // Saved during this boot: restored.
+        do {
+            let core = try identityCore(dir)
+            runAgentJob(core.tree)
+            core.persistAgentAncestry(bootTime: boot)
+        }
+        let again = try identityCore(dir)
+        seedAfterRestart(again)
+        again.restoreAgentAncestry(bootTime: boot)
+        XCTAssertEqual(again.tree.chain(nodeID: try XCTUnwrap(again.tree.node(pid: 701)?.id)).nearestAgent, "claude-code")
+    }
+
+    /// Saved only when the agent ancestry changed, and never more than the byte budget (the oldest kept).
+    func testSavedWhenChangedAndBounded() throws {
+        let dir = TempDir()
+        let core = try identityCore(dir)
+        runAgentJob(core.tree)
+        core.persistAgentAncestry()
+        try core.store.setValue(nil, forKey: DaemonCore.agentAncestryKey)
+        core.persistAgentAncestry()
+        XCTAssertNil(try core.store.value(forKey: DaemonCore.agentAncestryKey), "unchanged: not written again")
+
+        // Many jobs, each below a program with a long path, all under the agent.
+        let deep = "/Users/alice/" + String(repeating: "d", count: 3000) + "/tool"
+        for i in Int32(0)..<250 {
+            let tool = p(1000 + 2 * i, deep, ppid: 600, 10 + TimeInterval(i), platform: false)
+            spawn(core.tree, claude, tool)
+            spawn(core.tree, tool, p(1001 + 2 * i, "/bin/sleep", ppid: tool.pid, 10 + TimeInterval(i)))
+        }
+        XCTAssertGreaterThan(try JSONEncoder().encode(core.tree.agentAncestry()).count, DaemonCore.maxAgentAncestryBytes)
+        core.persistAgentAncestry()
+        let data = try XCTUnwrap(try core.store.value(forKey: DaemonCore.agentAncestryKey))
+        XCTAssertLessThanOrEqual(data.count, DaemonCore.maxAgentAncestryBytes)
+        let stored = try JSONDecoder().decode(DaemonCore.StoredAgentAncestry.self, from: data)
+        XCTAssertFalse(stored.records.isEmpty)
+        XCTAssertEqual(stored.records.first?.pid, 600, "the oldest first")
+    }
+}
+
 #if canImport(EndpointSecurity)
 import EndpointSecurity
 

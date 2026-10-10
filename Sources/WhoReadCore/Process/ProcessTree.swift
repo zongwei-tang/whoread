@@ -89,6 +89,8 @@ public final class ProcessTree: @unchecked Sendable {
     private let normalizePath: @Sendable (String) -> String
     /// While seeding: links do not refresh descendants; everything is recomputed once at the end.
     private var deferAncestry = false
+    /// Bumped when a process with an AI agent in its ancestry appears, changes or exits.
+    private var agentGeneration: UInt64 = 0
 
     public var tombstoneTTL: TimeInterval
     /// How deep the parent resolver may recurse for one lookup.
@@ -201,6 +203,7 @@ public final class ProcessTree: @unchecked Sendable {
         guard let id = currentNodeID(for: p, at: time) else { return }
         nodes[id]?.exitedAt = time
         nodes[id]?.lastSeen = time
+        if let node = nodes[id], ProcessTree.hasAgents(node) { agentGeneration &+= 1 }
     }
 
     /// Ensures a node exists for an acting process and returns its ID.
@@ -284,7 +287,107 @@ public final class ProcessTree: @unchecked Sendable {
         return nodes[id]
     }
 
+    // MARK: - Agent ancestry across restarts
+
+    /// Changes whenever a process with an AI agent in its ancestry appears, changes or exits: callers
+    /// save `agentAncestry()` again only then.
+    public var agentAncestryGeneration: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return agentGeneration
+    }
+
+    /// The AI agent ancestry of live processes, to be restored after a daemon restart: libproc has no
+    /// fork-time parent, so a job an agent started whose shell has exited would come back with its
+    /// ancestry unknown and the agent gone. At most `limit` processes (the oldest first: long-running
+    /// jobs are the ones still there after a restart) and `AgentAncestryRecord.maxAgents` agents each.
+    public func agentAncestry(limit: Int = AgentAncestryRecord.maxRecords) -> [AgentAncestryRecord] {
+        lock.lock(); defer { lock.unlock() }
+        var out: [AgentAncestryRecord] = []
+        for node in nodes.values where node.exitedAt == nil && node.image.pid > 1 && ProcessTree.hasAgents(node) {
+            guard let start = node.image.startTime else { continue }
+            let parent = node.parentID.flatMap { nodes[$0] }.flatMap { $0.image.isSystemRoot ? nil : $0 }
+            var agents: [AgentAncestryRecord.Link] = []
+            for mark in node.ancestry.agents.prefix(AgentAncestryRecord.maxAgents) {
+                guard let n = nodes[mark.mark.id], !n.image.isSystemRoot else { continue }
+                agents.append(AgentAncestryRecord.Link(n, agentID: mark.agentID, agentTeamID: mark.teamID))
+            }
+            out.append(AgentAncestryRecord(
+                pid: node.image.pid, startTime: start, agentID: node.agentID, agentTeamID: node.agentID == nil ? nil : node.agentTeamID,
+                parent: parent.map { AgentAncestryRecord.Link($0, agentID: $0.agentID, agentTeamID: $0.agentID == nil ? nil : $0.agentTeamID) },
+                agentsAbove: agents))
+        }
+        out.sort { ($0.startTime, $0.pid) < ($1.startTime, $1.pid) }
+        return Array(out.prefix(max(0, limit)))
+    }
+
+    /// After `seed`: gives processes that are still running the AI agents they had before the restart.
+    /// A process that was an agent is one again (libproc has no code identity to recognise it by). A
+    /// process whose fork-time parent is gone, so it is left unlinked, gets placeholders above it: its
+    /// parent as last seen, then the agents above that, nearest first; an agent that is still running is
+    /// linked to as itself. Placeholders count as exited and never as a chain that reaches launchd, so
+    /// the restored chain carries the agents but no trust. They are reachable only through the processes
+    /// restored below them: not by pid, so a process that holds one of their pids now, or a child of it,
+    /// is never taken for them. Records that match no running process (by pid and start time) are ignored.
+    public func restoreAgentAncestry(_ records: [AgentAncestryRecord], at time: Date) {
+        lock.lock(); defer { lock.unlock() }
+        struct Instance: Hashable { var pid: Int32; var start: Date }
+        // One placeholder per process instance, however many records name it (the siblings of a job).
+        var placeholders: [Instance: UInt64] = [:]
+        for record in records.prefix(AgentAncestryRecord.maxRecords) {
+            guard let id = liveNode(pid: record.pid, startTime: record.startTime), var node = nodes[id] else { continue }
+            if node.agentID == nil, let agent = record.agentID {
+                node.agentID = agent
+                node.agentHeld = true
+                node.heldAgentTeamID = record.agentTeamID
+                nodes[id] = node
+                refreshAncestry(below: id)
+            }
+            guard node.parentID == nil else { continue }
+            var links = Array(record.agentsAbove.prefix(AgentAncestryRecord.maxAgents))
+            if let parent = record.parent, !(links.first.map { $0.pid == parent.pid && $0.startTime == parent.startTime } ?? false) {
+                links.insert(parent, at: 0)
+            }
+            guard !links.isEmpty else { continue }
+            // Top down: each placeholder is linked below the one farther up; a running process is used as is.
+            var above: UInt64?
+            for entry in links.reversed() {
+                let instance = entry.startTime.map { Instance(pid: entry.pid, start: $0) }
+                if let instance, let live = liveNode(pid: instance.pid, startTime: instance.start) {
+                    above = live
+                    continue
+                }
+                if let instance, let existing = placeholders[instance], nodes[existing] != nil {
+                    if let above, nodes[existing]?.parentID == nil { link(child: existing, to: above) }
+                    above = existing
+                    continue
+                }
+                let ghost = createNode(entry.record, at: time, fromSnapshot: true, indexed: false)
+                nodes[ghost]?.exitedAt = time
+                nodes[ghost]?.ancestorEvicted = true
+                nodes[ghost]?.agentID = entry.agentID
+                nodes[ghost]?.agentHeld = entry.agentID != nil
+                nodes[ghost]?.heldAgentTeamID = entry.agentTeamID
+                if let instance { placeholders[instance] = ghost }
+                if let above { link(child: ghost, to: above) }
+                above = ghost
+            }
+            if let above, above != id {
+                nodes[id]?.ancestorEvicted = true
+                link(child: id, to: above)
+            }
+        }
+        agentGeneration &+= 1
+    }
+
     // MARK: - Internals (lock held)
+
+    /// The live node for a process instance, by pid and start time.
+    private func liveNode(pid: Int32, startTime: Date) -> UInt64? {
+        byPID[pid]?.last { id in
+            guard let n = nodes[id], n.exitedAt == nil, let s = n.image.startTime else { return false }
+            return abs(s.timeIntervalSince(startTime)) <= ProcessTree.startTimeTolerance
+        }
+    }
 
     private func normalized(_ r: ProcessRecord) -> ProcessRecord {
         var r = r
@@ -460,7 +563,8 @@ public final class ProcessTree: @unchecked Sendable {
         }
     }
 
-    private func createNode(_ p: ProcessRecord, at time: Date, fromSnapshot: Bool) -> UInt64 {
+    /// `indexed`: found by pid (every node but the placeholders `restoreAgentAncestry` makes).
+    private func createNode(_ p: ProcessRecord, at time: Date, fromSnapshot: Bool, indexed: Bool = true) -> UInt64 {
         let id = nextID
         nextID += 1
         let agentID = detector.detect(p)
@@ -468,6 +572,7 @@ public final class ProcessTree: @unchecked Sendable {
             id: id, image: p, parentID: nil, agentID: agentID,
             exitedAt: nil, lastSeen: time, childCount: 0, fromSnapshot: fromSnapshot, ancestry: Ancestry(),
             everAgent: agentID != nil, pidVersions: p.pidVersion.map { [$0] } ?? [])
+        guard indexed else { return id }
         byPID[p.pid, default: []].append(id)
         if byPID[p.pid]!.count > 8 {
             // Keep only recent instances per pid in the index; older ones stay reachable via links.
@@ -627,7 +732,10 @@ public final class ProcessTree: @unchecked Sendable {
         let parent = node.parentID.flatMap { nodes[$0] }
         let a = parent.map(ancestry(below:)) ?? Ancestry()
         nodes[id]?.ancestry = a
+        if node.agentID != nil || !a.agents.isEmpty || !node.ancestry.agents.isEmpty { agentGeneration &+= 1 }
     }
+
+    static func hasAgents(_ node: ProcessNode) -> Bool { node.agentID != nil || !node.ancestry.agents.isEmpty }
 
     private func refreshAncestry(of ordered: [UInt64]) {
         for id in ordered { refreshAncestry(of: id) }
@@ -658,6 +766,75 @@ public final class ProcessTree: @unchecked Sendable {
             ids.removeAll { $0 == id }
             byPID[node.image.pid] = ids.isEmpty ? nil : ids
         }
+    }
+}
+
+/// What a running process had above it: kept across daemon restarts (`ProcessTree.agentAncestry`).
+public struct AgentAncestryRecord: Codable, Hashable, Sendable {
+    /// Bounds on what is kept and restored.
+    public static let maxAgents = 8
+    public static let maxRecords = 512
+
+    /// One process above it, as last seen (no argv).
+    public struct Link: Codable, Hashable, Sendable {
+        public var pid: Int32
+        public var startTime: Date?
+        public var executablePath: String
+        public var signingID: String?
+        public var teamID: String?
+        public var isPlatformBinary: Bool
+        public var agentID: String?
+        public var agentTeamID: String?
+
+        init(_ node: ProcessNode, agentID: String?, agentTeamID: String?) {
+            pid = node.image.pid
+            startTime = node.image.startTime
+            executablePath = node.image.executablePath
+            signingID = node.image.signingID
+            teamID = node.image.teamID
+            isPlatformBinary = node.image.isPlatformBinary
+            self.agentID = agentID
+            self.agentTeamID = agentTeamID
+        }
+
+        public init(pid: Int32, startTime: Date?, executablePath: String, signingID: String? = nil, teamID: String? = nil,
+                    isPlatformBinary: Bool = false, agentID: String? = nil, agentTeamID: String? = nil) {
+            self.pid = pid
+            self.startTime = startTime
+            self.executablePath = executablePath
+            self.signingID = signingID
+            self.teamID = teamID
+            self.isPlatformBinary = isPlatformBinary
+            self.agentID = agentID
+            self.agentTeamID = agentTeamID
+        }
+
+        /// A placeholder image: no fork-time parent, nothing about it is current.
+        var record: ProcessRecord {
+            ProcessRecord(pid: pid, ppid: 0, executablePath: executablePath, signingID: signingID, teamID: teamID,
+                          isPlatformBinary: isPlatformBinary, startTime: startTime)
+        }
+    }
+
+    /// The process: pid and fork time.
+    public var pid: Int32
+    public var startTime: Date
+    /// The AI agent it is itself, if any.
+    public var agentID: String?
+    public var agentTeamID: String?
+    /// Its fork-time parent.
+    public var parent: Link?
+    /// The AI agents above it, nearest first.
+    public var agentsAbove: [Link]
+
+    public init(pid: Int32, startTime: Date, agentID: String? = nil, agentTeamID: String? = nil, parent: Link? = nil,
+                agentsAbove: [Link] = []) {
+        self.pid = pid
+        self.startTime = startTime
+        self.agentID = agentID
+        self.agentTeamID = agentTeamID
+        self.parent = parent
+        self.agentsAbove = agentsAbove
     }
 }
 
