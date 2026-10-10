@@ -13,9 +13,11 @@
 #   test   build, then build and run the four test bundles (optional filter, e.g. WhoReadCoreTests
 #          or WhoReadCoreTests.AnalyzerTests/testX)
 #   app    build, then WhoRead.app (menu bar app, CLI helper, system extension) signed ad hoc and
-#          verified; [WHOREAD_ENTITLED=1] adds the restricted entitlements (SIP-disabled VM only).
-#          See scripts/dev/sc-app.sh.
-# Products: .build-sc/debug/{whoreadd,whoread,lib*.a,*.swiftmodule,*.xctest,WhoRead.app}
+#          verified; [WHOREAD_ENTITLED=1] builds a copy with the restricted entitlements in
+#          .build-sc/debug/entitled instead (SIP-disabled VM only). See scripts/dev/sc-app.sh.
+# Products: .build-sc/debug/{whoreadd,whoread,lib*.a,*.swiftmodule,*.xctest,WhoRead.app}, none of
+# them with an entitlement (AMFI kills an ad-hoc binary that claims a restricted one on a Mac with
+# SIP on); .build-sc/debug/entitled/{whoreadd,WhoRead.app} only from WHOREAD_ENTITLED=1 ... app.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MODE="${1:-build}"
@@ -98,6 +100,39 @@ EOF
   fi
 }
 
+# entitlements_of PATH : the entitlements PATH is signed with ("" when none, or when unsigned).
+entitlements_of() { codesign -d --entitlements - --xml "$1" 2>/dev/null || true; }
+
+# unentitled : no product in $OUT carries an entitlement. Earlier versions of the app mode signed
+# $OUT/whoreadd and $OUT/WhoRead.app themselves with WHOREAD_ENTITLED=1, and a later build that
+# had nothing to relink kept that signature. whoreadd is re-signed without its entitlements as a new
+# file (re-signing a Mach-O in place can get its next launch killed through the kernel's cached
+# signature); such a WhoRead.app is removed (`app` builds it again).
+unentitled() {
+  local d="$OUT/whoreadd" app="$OUT/WhoRead.app" f
+  if [ -e "$d" ] && [ -n "$(entitlements_of "$d")" ]; then
+    echo "== whoreadd: removing the restricted entitlements of an earlier WHOREAD_ENTITLED=1 build"
+    rm -f "$d.sc-tmp"
+    cp -X "$d" "$d.sc-tmp"
+    codesign --force --sign - --preserve-metadata=identifier,flags "$d.sc-tmp" 2>&1 \
+      | grep -v 'replacing existing signature' || true
+    if [ -n "$(entitlements_of "$d.sc-tmp")" ] || ! codesign --verify --strict "$d.sc-tmp"; then
+      rm -f "$d.sc-tmp"
+      echo "sc-build.sh: could not re-sign $d without entitlements; remove it and build again" >&2
+      exit 1
+    fi
+    mv -f "$d.sc-tmp" "$d"
+  fi
+  [ -d "$app" ] || return 0
+  for f in "$app" "$app"/Contents/Library/SystemExtensions/*.systemextension; do
+    [ -e "$f" ] && [ -n "$(entitlements_of "$f")" ] || continue
+    echo "== removing $app: an earlier WHOREAD_ENTITLED=1 build signed it with the restricted entitlements"
+    echo "   (such builds now go to $OUT/entitled; scripts/dev/sc-build.sh app builds it again)"
+    find "$app" -delete
+    break
+  done
+}
+
 build() {
   lib WhoReadCore
   lib WhoReadStore WhoReadCore
@@ -106,6 +141,7 @@ build() {
   lib WhoReadUIModel WhoReadCore WhoReadIPC
   exe whoreadd
   exe whoread
+  unentitled
 }
 
 runtests() {

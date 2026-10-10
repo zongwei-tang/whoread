@@ -2,9 +2,9 @@
 # Tests for scripts/dev/xcconfig.sh and `scripts/dev/sc-build.sh app` (scripts/dev/sc-app.sh).
 # Usage: scripts/dev/sc-app-test.sh [--unit]
 #   --unit  only the xcconfig resolver and the verification helpers (seconds); otherwise also
-#           builds, re-signs and inspects .build-sc/debug/WhoRead.app three times (default,
-#           WHOREAD_ENTITLED=1, default again), leaving the default (no entitlements) form behind.
-#           Never launches anything.
+#           builds, re-signs and inspects WhoRead.app three times (default, WHOREAD_ENTITLED=1 into
+#           .build-sc/debug/entitled, default again) and checks that a plain build after them leaves
+#           no entitlement in .build-sc/debug. Never launches anything.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 X="$ROOT/scripts/dev/xcconfig.sh"
@@ -131,6 +131,7 @@ fi
 
 OUT="$ROOT/.build-sc/debug"
 APP="$OUT/WhoRead.app"
+EAPP="$OUT/entitled/WhoRead.app"
 XC="$ROOT/Xcode/Shared.xcconfig"
 prefix="$("$X" "$XC" get BUNDLE_ID_PREFIX)"
 ext_id="$("$X" "$XC" get WHOREAD_EXTENSION_BUNDLE_ID)"
@@ -143,8 +144,8 @@ entitlements() {
   [ -z "$e" ] || printf '%s' "$e" | plutil -convert xml1 -o - -
 }
 xml() { plutil -convert xml1 -o - "$1"; }
-# layout : every path in the bundle, relative, sorted.
-layout() { (cd "$APP" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort); }
+# layout [BUNDLE] : every path in the bundle, relative, sorted.
+layout() { (cd "${1:-$APP}" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort); }
 
 echo "== sc-build.sh app (default)"
 "$ROOT/scripts/dev/sc-build.sh" app > "$T/build.log" 2>&1 || { tail -20 "$T/build.log"; echo "FAIL app mode"; exit 1; }
@@ -207,25 +208,56 @@ else
   echo "FAIL embedded CLI finds the bundled defaults"; sed 's/^/     /' "$T/replay.log" | head -5; FAILS=$((FAILS + 1))
 fi
 
-# Leftovers from an earlier run are removed and the result still verifies.
-mkdir -p "$APP/Contents/Resources/old.lproj" "$APP/$EXT/Contents/Resources/WhoReadData/sub"
-: > "$APP/Contents/Resources/old.lproj/InfoPlist.strings"
-: > "$APP/$EXT/Contents/Resources/WhoReadData/sub/removed.json"
-: > "$APP/Contents/MacOS/WhoRead.sc-tmp"
-echo "== sc-build.sh app (WHOREAD_ENTITLED=1, with leftovers in the bundle)"
+echo "== sc-build.sh app (WHOREAD_ENTITLED=1)"
 WHOREAD_ENTITLED=1 "$ROOT/scripts/dev/sc-build.sh" app > "$T/build.log" 2>&1 \
   || { tail -20 "$T/build.log"; echo "FAIL entitled app mode"; exit 1; }
 echo "ok   entitled app mode builds and verifies"
-check "leftovers removed" "$(cat "$T/expected-layout")" "$(layout)"
-check "entitlements: app" "$(xml "$ROOT/App/WhoRead.entitlements")" "$(entitlements "$APP")"
-check "entitlements: extension" "$(xml "$ROOT/Extension/WhoReadExtension.entitlements")" "$(entitlements "$APP/$EXT")"
-check "entitlements: whoreadd" "$(xml "$ROOT/Extension/whoreadd.entitlements")" "$(entitlements "$OUT/whoreadd")"
-check "entitlements: helper (none)" "" "$(entitlements "$APP/Contents/Helpers/whoread")"
+check "entitled bundle layout" "$(cat "$T/expected-layout")" "$(layout "$EAPP")"
+check "entitlements: app" "$(xml "$ROOT/App/WhoRead.entitlements")" "$(entitlements "$EAPP")"
+check "entitlements: extension" "$(xml "$ROOT/Extension/WhoReadExtension.entitlements")" "$(entitlements "$EAPP/$EXT")"
+check "entitlements: whoreadd" "$(xml "$ROOT/Extension/whoreadd.entitlements")" "$(entitlements "$OUT/entitled/whoreadd")"
+check "entitlements: helper (none)" "" "$(entitlements "$EAPP/Contents/Helpers/whoread")"
+check "entitled whoreadd signing identifier" "Identifier=$prefix.whoread.daemon" \
+  "$(codesign -dv "$OUT/entitled/whoreadd" 2>&1 | grep '^Identifier=')"
+# The entitled build is a separate copy: what sc-build.sh build and test leave in .build-sc/debug
+# (and what scripts/install-dev-daemon.sh and provision.sh pick up there) never claims a restricted
+# entitlement, which AMFI kills on a Mac with SIP on.
+for p in "$APP" "$APP/$EXT" "$OUT/whoreadd"; do
+  check "no entitlements after the entitled build: ${p#"$OUT"/}" "" "$(entitlements "$p")"
+done
 
-echo "== sc-build.sh app (default again)"
+echo "== sc-build.sh build after the entitled app"
+"$ROOT/scripts/dev/sc-build.sh" build > "$T/build.log" 2>&1 || { tail -20 "$T/build.log"; echo "FAIL build"; exit 1; }
+check "plain build: whoreadd has no entitlements" "" "$(entitlements "$OUT/whoreadd")"
+
+echo "== sc-build.sh build after an entitled build of the earlier layout"
+# Earlier versions signed .build-sc/debug itself in entitled mode; a build that has nothing to
+# relink must still not leave that behind.
+codesign --force --sign - --options runtime --identifier "$prefix.whoread.daemon" \
+  --entitlements "$ROOT/Extension/whoreadd.entitlements" "$OUT/whoreadd" 2>/dev/null
+codesign --force --sign - --options runtime --entitlements "$ROOT/Extension/WhoReadExtension.entitlements" "$APP/$EXT" 2>/dev/null
+codesign --force --sign - --options runtime --entitlements "$ROOT/App/WhoRead.entitlements" "$APP" 2>/dev/null
+check "setup: whoreadd entitled as the earlier layout left it" "$(xml "$ROOT/Extension/whoreadd.entitlements")" "$(entitlements "$OUT/whoreadd")"
+"$ROOT/scripts/dev/sc-build.sh" build > "$T/build.log" 2>&1 || { tail -20 "$T/build.log"; echo "FAIL build"; exit 1; }
+check "plain build: the earlier entitled whoreadd is re-signed without entitlements" "" "$(entitlements "$OUT/whoreadd")"
+check "plain build: whoreadd keeps its identifier" "Identifier=$prefix.whoread.daemon" \
+  "$(codesign -dv "$OUT/whoreadd" 2>&1 | grep '^Identifier=')"
+sc_app check_signature "$OUT/whoreadd" "" >/dev/null 2>&1 \
+  && echo "ok   plain build: whoreadd verifies, hardened runtime kept" \
+  || { echo "FAIL plain build: whoreadd does not verify, or lost the hardened runtime"; FAILS=$((FAILS + 1)); }
+[ ! -e "$APP" ] && echo "ok   plain build: the earlier entitled WhoRead.app is removed" \
+  || { echo "FAIL plain build: an entitled WhoRead.app is left in $OUT"; FAILS=$((FAILS + 1)); }
+check "plain build: the entitled copy is kept" "$(xml "$ROOT/Extension/whoreadd.entitlements")" "$(entitlements "$OUT/entitled/whoreadd")"
+
+echo "== sc-build.sh app (default again, with leftovers of an earlier run in the bundle)"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/old.lproj" "$APP/$EXT/Contents/Resources/WhoReadData/sub"
+: > "$APP/Contents/Resources/old.lproj/InfoPlist.strings"
+: > "$APP/$EXT/Contents/Resources/WhoReadData/sub/removed.json"
+: > "$APP/Contents/MacOS/WhoRead.sc-tmp"
 "$ROOT/scripts/dev/sc-build.sh" app > "$T/build.log" 2>&1 || { tail -20 "$T/build.log"; echo "FAIL app mode"; exit 1; }
+check "leftovers removed" "$(cat "$T/expected-layout")" "$(layout)"
 for p in "$APP" "$APP/$EXT" "$APP/Contents/Helpers/whoread" "$OUT/whoreadd"; do
-  check "entitlements dropped again: ${p#"$OUT"/}" "" "$(entitlements "$p")"
+  check "no entitlements: ${p#"$OUT"/}" "" "$(entitlements "$p")"
 done
 refuses "WHOREAD_ENTITLED other than 0/1" env WHOREAD_ENTITLED=yes "$ROOT/scripts/dev/sc-build.sh" app
 
