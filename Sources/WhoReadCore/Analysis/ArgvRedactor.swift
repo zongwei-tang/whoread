@@ -372,6 +372,8 @@ public enum ArgvRedactor {
                 // `key = value`, `key : value` (INI, YAML, a heredoc): the separator is not the value.
                 if quote.isEmpty && (t == "=" || t == ":") { continue }
                 pending = nil
+                // Already redacted by a rule that knew its syntax (`SET PASSWORD = PASSWORD('‹redacted›')`).
+                if t.contains(placeholder) { continue }
                 if !(t.hasPrefix("-") && t.count > 1) {
                     emit(apply(rule, to: t, depth: depth))
                     continue
@@ -425,7 +427,10 @@ public enum ArgvRedactor {
             }
             // `aws configure set aws_secret_access_key X`, `npm config set //host/:_authToken X`;
             // `password = X` (INI, a heredoc) when a lone "=" or ":" follows.
-            if isSecretKeyName(t) || (i + 1 < tokens.count && ["=", ":"].contains(tokens[i + 1]) && namesSecret(t)) {
+            // Not a MySQL authentication plugin (`IDENTIFIED WITH caching_sha2_password BY '…'`): the
+            // SQL rules redact that value.
+            let sqlPlugin = i + 1 < tokens.count && ["by", "as", "using"].contains(tokens[i + 1].lowercased())
+            if (isSecretKeyName(t) && !sqlPlugin) || (i + 1 < tokens.count && ["=", ":"].contains(tokens[i + 1]) && namesSecret(t)) {
                 pending = .unlessPath
             } else if ["password", "passwd"].contains(t.lowercased()), i >= commandStart + 2,
                       tokens[i - 2].lowercased() == "login",
@@ -597,6 +602,7 @@ public enum ArgvRedactor {
         if let header = redactWholeHeader(s) { return header }
         var s = replace(quotedHeader, in: s, with: "$1$2$3" + placeholder)
         s = redactQuotedPairs(s)
+        s = redactSQLCredentials(s)
         let pieces = tokenize(s)
         let words = pieces.filter { !$0.isSpace }.map(\.text)
         // One word that is the whole string (`print('a b')`: the quote starts mid-word): splitting
@@ -623,6 +629,285 @@ public enum ArgvRedactor {
             if piece.isSpace { out += piece.text } else { out += redacted.popFirst() ?? piece.text }
         }
         return out
+    }
+
+    // MARK: - SQL
+
+    /// SQL that sets a password, wherever the statement is (`psql -c`, `mysql -e`, `sqlcmd -Q`, a
+    /// heredoc fed to a client): `ALTER USER bob [WITH] PASSWORD 'x'`, `CREATE USER 'bob'@'%'
+    /// IDENTIFIED [WITH plugin] BY 'x'`, `SET PASSWORD [FOR u] = 'x'` or `= PASSWORD('x')`,
+    /// `ALTER LOGIN sa WITH PASSWORD = 'x' OLD_PASSWORD = 'y'`, `… REPLACE 'current'`, and
+    /// `CONNECT user/x@db` (sqlplus). A literal's contents go and its quotes stay. An unquoted value
+    /// counts only inside a statement that creates or changes a user (Oracle's `IDENTIFIED BY tiger`):
+    /// "password" in a sentence, a `SELECT` or a `CREATE TABLE` is left alone.
+    ///
+    /// The SQL may sit inside shell quoting: a double quote is only taken as a string delimiter where
+    /// a value is expected, so `psql -c "ALTER USER …"` is read through; a single-quoted shell word
+    /// is one literal here and read again when its own command line is redacted.
+    static func redactSQLCredentials(_ s: String) -> String {
+        let lower = s.lowercased()
+        guard lower.contains("password") || lower.contains("identified") || lower.contains("conn") else { return s }
+        var scanner = SQLScanner(Array(s.unicodeScalars))
+        scanner.run()
+        guard !scanner.secrets.isEmpty else { return s }
+        var out = scanner.text
+        for range in scanner.secrets.sorted(by: { $0.lowerBound > $1.lowerBound }) {
+            out.replaceSubrange(range, with: placeholder.unicodeScalars)
+        }
+        return String(String.UnicodeScalarView(out))
+    }
+
+    struct SQLScanner {
+        enum Token: Equatable {
+            case word(String, Range<Int>)
+            /// A string literal: its contents (without the quotes).
+            case literal(Range<Int>)
+            case punct(Unicode.Scalar)
+            case end
+        }
+        enum Statement { case none, user, setPassword, grant }
+
+        let text: [Unicode.Scalar]
+        var i = 0
+        /// Ranges of `text` to replace.
+        var secrets: [Range<Int>] = []
+
+        init(_ text: [Unicode.Scalar]) { self.text = text }
+
+        static func isWordScalar(_ c: Unicode.Scalar) -> Bool {
+            (c.isASCII && (c.properties.isAlphabetic || ("0"..."9").contains(c))) || c == "_" || c == "$" || c == "#"
+        }
+
+        func at(_ k: Int) -> Unicode.Scalar? { k < text.count ? text[k] : nil }
+
+        /// The next token. `value`: a value is expected here, so a double quote (or a shell-escaped
+        /// quote, `\"x\"`) opens a literal, and so does `$$` (PostgreSQL dollar quoting).
+        mutating func next(value: Bool = false) -> Token {
+            while let c = at(i), c.properties.isWhitespace { i += 1 }
+            guard let c = at(i) else { return .end }
+            if c == "'" { return quoted(from: i, delimiter: ["'"]) ?? punct() }
+            if value {
+                if c == "\\", let q = at(i + 1), q == "\"" || q == "'" { return quoted(from: i, delimiter: ["\\", q]) ?? punct() }
+                if c == "\"" { return quoted(from: i, delimiter: ["\""]) ?? punct() }
+                if c == "$", let lit = dollarQuoted() { return lit }
+            }
+            guard SQLScanner.isWordScalar(c) else { return punct() }
+            let start = i
+            while let d = at(i), SQLScanner.isWordScalar(d) { i += 1 }
+            let word = String(String.UnicodeScalarView(text[start..<i]))
+            // E'…', N'…', B'…', X'…': a prefixed literal (not `-e'…'`, a shell option with its value).
+            let before = start > 0 ? text[start - 1] : " "
+            if word.count == 1, "EeNnBbXx".unicodeScalars.contains(word.unicodeScalars.first!), at(i) == "'",
+               before.properties.isWhitespace || "(,=".unicodeScalars.contains(before),
+               let lit = quoted(from: i, delimiter: ["'"]) { return lit }
+            return .word(word, start..<i)
+        }
+
+        mutating func punct() -> Token {
+            defer { i += 1 }
+            return .punct(text[i])
+        }
+
+        /// A literal from `start` closed by the same delimiter. Inside, a backslash escapes the next
+        /// character and a doubled quote stands for one. Unterminated: not a literal.
+        mutating func quoted(from start: Int, delimiter: [Unicode.Scalar]) -> Token? {
+            let quote = delimiter.last!
+            var k = start + delimiter.count
+            let contents = k
+            while k < text.count {
+                if delimiter.count == 2 {
+                    // `\"x\"`: the closing quote is escaped like the opening one.
+                    if text[k] == "\\" && at(k + 1) == quote { i = k + 2; return .literal(contents..<k) }
+                    if text[k] == "\\" { k += 2; continue }
+                } else {
+                    if text[k] == "\\" { k += 2; continue }
+                    if text[k] == quote {
+                        if at(k + 1) == quote { k += 2; continue }
+                        i = k + 1
+                        return .literal(contents..<k)
+                    }
+                }
+                k += 1
+            }
+            return nil
+        }
+
+        /// `$$x$$`, `$tag$x$tag$`.
+        mutating func dollarQuoted() -> Token? {
+            var k = i + 1
+            while let c = at(k), c != "$" {
+                guard SQLScanner.isWordScalar(c) else { return nil }
+                k += 1
+            }
+            guard at(k) == "$" else { return nil }
+            let tag = Array(text[i...k])
+            let contents = k + 1
+            var j = contents
+            while j + tag.count <= text.count {
+                if Array(text[j..<(j + tag.count)]) == tag {
+                    i = j + tag.count
+                    return .literal(contents..<j)
+                }
+                j += 1
+            }
+            return nil
+        }
+
+        /// Looks at the next token without consuming it.
+        mutating func peek(value: Bool = false) -> Token {
+            let saved = i
+            defer { i = saved }
+            return next(value: value)
+        }
+
+        func upper(_ t: Token) -> String? {
+            if case .word(let w, _) = t { return w.uppercased() }
+            return nil
+        }
+
+        mutating func secret(_ range: Range<Int>) {
+            if !range.isEmpty { secrets.append(range) }
+        }
+
+        /// The value after PASSWORD, BY, AS, `=` or REPLACE: a literal, `PASSWORD('x')` when
+        /// `function`, a `0x…` hash, or (`bare`) an unquoted word.
+        mutating func value(equals: Bool = false, function: Bool = false, bare: Bool = false) {
+            var t = next(value: true)
+            if equals, t == .punct("=") { t = next(value: true) }
+            if function, let w = upper(t), w == "PASSWORD" || w == "OLD_PASSWORD", peek() == .punct("(") {
+                _ = next()
+                t = next(value: true)
+            }
+            switch t {
+            case .literal(let r):
+                secret(r)
+            case .word(let w, let r):
+                let k = w.uppercased()
+                if k.hasPrefix("0X") && k.count > 2 { secret(r); return }
+                // Keywords that may follow (PASSWORD EXPIRE, PASSWORD NULL, BY RANDOM PASSWORD).
+                let keywords: Set<String> = ["NULL", "RANDOM", "PASSWORD", "VALUES", "DEFAULT", "EXPIRE", "HISTORY", "REUSE",
+                                             "REQUIRE", "LOCK", "UNLOCK", "DISABLE", "VALID", "RETAIN", "CURRENT", "AND",
+                                             "WITH", "EXTERNALLY", "GLOBALLY"]
+                if bare && !keywords.contains(k) { secret(r) } else { i = r.lowerBound }
+            case .punct, .end:
+                // Not a value: let the main loop see it (`;` ends the statement).
+                if case .punct = t { i -= 1 }
+            }
+        }
+
+        /// `IDENTIFIED BY x`, `IDENTIFIED BY PASSWORD 'hash'`, `IDENTIFIED WITH plugin [BY|AS] x`,
+        /// `IDENTIFIED VIA plugin USING PASSWORD('x')`.
+        mutating func identified(bare: Bool) {
+            var t = next()
+            if let w = upper(t), w == "WITH" || w == "VIA" {
+                _ = next()  // the plugin (a word or a literal)
+                guard let k = upper(peek()), ["BY", "AS", "USING"].contains(k) else { return }
+                t = next()
+            }
+            guard case .word(let w, let r) = t else { if case .punct = t { i -= 1 }; return }
+            switch w.uppercased() {
+            case "BY":
+                if let next = upper(peek()), next == "PASSWORD" || next == "VALUES" {
+                    _ = self.next()
+                    value()
+                } else if upper(peek()) != "RANDOM" {
+                    value(bare: bare)
+                }
+            case "AS":
+                value()
+            case "USING":
+                value(function: true)
+            default:
+                i = r.lowerBound
+            }
+        }
+
+        /// `CONNECT user/x@db`: the logon is one word of the command line.
+        mutating func connect() {
+            while let c = at(i), c == " " || c == "\t" { i += 1 }
+            let start = i
+            var quote: Unicode.Scalar?
+            while let c = at(i) {
+                if let q = quote { if c == q { quote = nil } } else if c == "\"" { quote = c } else if c.properties.isWhitespace || c == ";" { break }
+                i += 1
+            }
+            let word = String(String.UnicodeScalarView(text[start..<i]))
+            if let range = ArgvRedactor.logonPasswordRange(word) {
+                let lower = word.unicodeScalars.distance(from: word.unicodeScalars.startIndex, to: range.lowerBound)
+                let upper = word.unicodeScalars.distance(from: word.unicodeScalars.startIndex, to: range.upperBound)
+                secret((start + lower)..<(start + upper))
+            }
+        }
+
+        mutating func run() {
+            var statement = Statement.none
+            // Words left in which USER/ROLE/LOGIN/GROUP makes an ALTER or CREATE a user statement
+            // (`CREATE OR REPLACE USER`).
+            var ddl = 0
+            var previous = ""
+            var setPasswordValueSeen = false
+            while true {
+                let t = next()
+                switch t {
+                case .end:
+                    return
+                case .punct(";"):
+                    statement = .none; ddl = 0; previous = ""
+                    continue
+                case .punct("="):
+                    if statement == .setPassword && !setPasswordValueSeen {
+                        setPasswordValueSeen = true
+                        value(function: true)
+                    }
+                    continue
+                case .punct, .literal:
+                    ddl = 0
+                    continue
+                case .word(let w, _):
+                    let k = w.uppercased()
+                    defer { previous = k }
+                    if ddl > 0 {
+                        if ["USER", "ROLE", "LOGIN", "GROUP"].contains(k) { statement = .user; ddl = 0; continue }
+                        ddl = ["OR", "REPLACE"].contains(k) ? ddl - 1 : 0
+                        if ddl > 0 { continue }
+                    }
+                    switch k {
+                    case "ALTER", "CREATE":
+                        ddl = 3
+                    case "GRANT":
+                        statement = .grant
+                    case "PASSWORD", "OLD_PASSWORD":
+                        if statement == .user || statement == .grant {
+                            value(equals: true)
+                        } else if previous == "SET" && k == "PASSWORD" {
+                            statement = .setPassword
+                            setPasswordValueSeen = false
+                        }
+                    case "IDENTIFIED":
+                        identified(bare: statement == .user || statement == .grant)
+                    case "REPLACE":
+                        if statement == .user || statement == .setPassword { value(bare: statement == .user) }
+                    case "CONNECT", "CONN":
+                        connect()
+                    default:
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    /// The password in an Oracle logon, `user/password@db` (`scott/tiger`, `sys/"p w"@//h:1521/s`):
+    /// nil for `/`, `/@db`, `user@db` and paths.
+    static func logonPasswordRange(_ s: String) -> Range<String.Index>? {
+        guard !looksLikePath(s), !s.hasPrefix("@"), let slash = s.firstIndex(of: "/"), slash != s.startIndex else { return nil }
+        let user = s[..<slash]
+        guard !user.contains("@"), !user.contains("="), !user.contains(":") else { return nil }
+        let start = s.index(after: slash)
+        guard start < s.endIndex, s[start] != "/" else { return nil }
+        var end = s[start...].firstIndex(of: "@") ?? s.endIndex
+        if s[start] == "\"", let close = s[s.index(after: start)...].firstIndex(of: "\"") { end = s.index(after: close) }
+        return start < end ? start..<end : nil
     }
 
     // MARK: - Tokens
