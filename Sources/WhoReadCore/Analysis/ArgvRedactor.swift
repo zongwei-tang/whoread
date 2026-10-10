@@ -858,7 +858,8 @@ public enum ArgvRedactor {
     struct Compound {
         /// Indices inside a group whose output goes to a file or a pipe: `{ echo pw; } > FILE`,
         /// `while …; do echo pw; done > FILE`, `if …; then printf …; fi | tee FILE`, `case … esac >
-        /// FILE`, `f() { echo pw; } > FILE`, `<(echo pw)` (a pipe), over several lines too.
+        /// FILE`, `f() { echo pw; } > FILE` or `f > FILE` after it, `<(echo pw)` (a pipe), over several
+        /// lines too.
         var redirected = Set<Int>()
         /// The words of a `for` loop whose body writes them there (`for l in 'pw'; do echo "$l"; done
         /// > FILE`).
@@ -883,21 +884,34 @@ public enum ArgvRedactor {
             /// `for NAME in WORDS`: 1 after `for`, 2 after the name, 3 in the words.
             var listState = 0
             var list: [Int] = []
+            /// The body of `NAME() { … }` or `function NAME { … }`.
+            var function: String?
         }
         var result = Compound()
         var stack: [Frame] = []
         var atCommand = true
         var pendingHeredoc: String?
         var body: String?
+        // Function bodies, and the commands that call a function by its name.
+        var pendingFunction: String?
+        var functions: [String: ClosedRange<Int>] = [:]
+        var calls: [(name: String, at: Int, ended: Bool)] = []
 
         func close(_ frame: Frame, at end: Int, tail: String) {
+            if let name = frame.function { functions[name] = frame.start...end }
             guard frame.kind != .capture else { return }
             guard frame.kind == .substitution || outputLeaves(tokens, after: end, tail: tail, lineStarts: lineStarts) else { return }
             result.redirected.formUnion(frame.start...end)
             if frame.writes { result.loopData.formUnion(frame.list) }
         }
-        func push(_ kind: Kind, at k: Int, listState: Int = 0) { stack.append(Frame(kind: kind, start: k, listState: listState)) }
+        func push(_ kind: Kind, at k: Int, listState: Int = 0) {
+            var frame = Frame(kind: kind, start: k, listState: listState)
+            if kind == .brace || kind == .paren { frame.function = pendingFunction }
+            pendingFunction = nil
+            stack.append(frame)
+        }
         func program(_ word: String) {
+            pendingFunction = nil
             if dataWriters.contains(basename(word)) { for j in stack.indices { stack[j].writes = true } }
         }
         /// `(`, `$(`, `$((`, `<(`, `>(` at the front of a word; returns the rest (a program name).
@@ -984,7 +998,12 @@ public enum ArgvRedactor {
                 case "case": push(.choice, at: k); atCommand = false; continue
                 case "do", "then", "else": continue
                 case "elif", "!": result.commandStarts.insert(k + 1); continue
-                case "function": if k + 1 < tokens.count { k += 1 }; continue
+                case "function":
+                    if k + 1 < tokens.count {
+                        k += 1
+                        pendingFunction = tokens[k].hasSuffix("()") ? String(tokens[k].dropLast(2)) : tokens[k]
+                    }
+                    continue
                 default: break
                 }
                 // `}`, `done`, `fi`, `esac`, with what follows attached (`done>FILE`, `fi;`, `})`).
@@ -1004,7 +1023,10 @@ public enum ArgvRedactor {
                 }
                 if closed { continue }
                 // `f() { …; }`: a function header, then its body.
-                if word.count > 2 && word.hasSuffix("()") { continue }
+                if word.count > 2 && word.hasSuffix("()") {
+                    pendingFunction = String(word.dropLast(2))
+                    continue
+                }
                 let rest = openParentheses(Substring(word), at: k)
                 if rest.contains("$(") {
                     // `x=$(echo …`: an assignment around a command.
@@ -1013,6 +1035,7 @@ public enum ArgvRedactor {
                     atCommand = false
                 } else if !rest.isEmpty && !(rest.contains("=") && !rest.hasPrefix("-")) && !wrappers.contains(String(rest)) {
                     program(String(rest))
+                    calls.append((String(rest), k, endsCommand))
                     atCommand = false
                 }
             } else if word.hasPrefix("<(") || word.hasPrefix(">(") || word.contains("$(") {
@@ -1021,6 +1044,17 @@ public enum ArgvRedactor {
                 program(String(openParentheses(word[start...], at: k)))
             }
             closeParentheses(closingParentheses(in: word), at: k)
+        }
+        // `f() { echo pw; }` then `f > FILE`: the body writes there. A call inside another redirected
+        // body counts too (one more pass).
+        for _ in 0..<2 where !functions.isEmpty {
+            for call in calls {
+                // `f;` ends its command at its own word: no redirect of its own follows.
+                guard let body = functions[call.name], body.upperBound < call.at,
+                      result.redirected.contains(call.at)
+                        || (!call.ended && writesOutput(tokens, after: call.at, lineStarts: lineStarts)) else { continue }
+                result.redirected.formUnion(body)
+            }
         }
         return result
     }

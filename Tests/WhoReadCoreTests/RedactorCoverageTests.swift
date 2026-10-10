@@ -412,6 +412,30 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "f() { echo \(R); } > ~/WhoReadTestVault/n; f"])
     }
 
+    /// A function writes where the command that calls it sends its output: `f() { echo pw; }` then
+    /// `f > FILE` writes pw to FILE, also through a pipe, a group or another function.
+    func testFunctionsCalledWithTheirOutputRedirected() {
+        assertRedacted(["/bin/bash", "-c", "f() { echo Hunter2pw; }\nf > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "f() { echo \(R); }\nf > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "creds() {\n  echo 'machine h'\n  echo 'password Hunter2pw'\n}\ncreds >> ~/WhoReadTestVault/netrc"],
+                       ["/bin/bash", "-c", "creds() {\n  echo '\(R)'\n  echo '\(R)'\n}\ncreds >> ~/WhoReadTestVault/netrc"])
+        assertRedacted(["/bin/bash", "-c", "function g { printf '%s' Hunter2pw; }; g | tee ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "function g { printf '\(R)' \(R); }; g | tee ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "function g() { echo Hunter2pw; }; g 1> ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "function g() { echo \(R); }; g 1> ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "f() ( echo Hunter2pw ); { f; } > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "f() ( echo \(R) ); { f; } > ~/WhoReadTestVault/n"])
+        // A function that calls another.
+        assertRedacted(["/bin/bash", "-c", "a() { echo Hunter2pw; }; b() { a; }; b > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "a() { echo \(R); }; b() { a; }; b > ~/WhoReadTestVault/n"])
+        assertKept([
+            ["/bin/bash", "-c", "f() { echo hello; }; f"], ["/bin/bash", "-c", "f() { echo hello; }; f 2>/dev/null"],
+            ["/bin/bash", "-c", "f() { echo hello; }; f; ls > out.txt"], ["/bin/bash", "-c", "f() { ls; }; f > out.txt"],
+            // Called before it is defined: not this body.
+            ["/bin/bash", "-c", "f > out.txt; f() { echo hello; }"],
+        ])
+    }
+
     func testExecRedirectAndProcessSubstitution() {
         // exec > FILE: everything the shell writes afterwards goes there, on later lines too.
         assertRedacted(["/bin/sh", "-c", "exec > ~/WhoReadTestVault/pgpass\necho \(pg)"],
