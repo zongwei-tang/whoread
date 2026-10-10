@@ -741,6 +741,18 @@ final class RedactorCoverageTests: XCTestCase {
         assertRedacted(["/bin/bash", "-c", "tool --token Hunter2pw|htpasswd -nb bob Hunter2pw"], ["/bin/bash", "-c", "tool --token \(R) -nb bob \(R)"])
         assertRedacted(["/bin/bash", "-c", "export PW=Hunter2pw&&echo Hunter2pw > ~/WhoReadTestVault/n"],
                        ["/bin/bash", "-c", "export PW=\(R) \(R) > ~/WhoReadTestVault/n"])
+        // A redirect attached to a word: the word keeps the rules it has there.
+        assertRedacted(["/bin/bash", "-c", "mysql -uroot -pHunter2pw>out.txt"], ["/bin/bash", "-c", "mysql -uroot -p\(R)>out.txt"])
+        assertRedacted(["/bin/bash", "-c", "htpasswd -nb bob Hunter2pw>>~/WhoReadTestVault/htpasswd"],
+                       ["/bin/bash", "-c", "htpasswd -nb bob \(R)>>~/WhoReadTestVault/htpasswd"])
+        assertRedacted(["/bin/bash", "-c", "ldapsearch -x -w Hunter2pw>out.ldif; security add-generic-password -a bob -s svc -w Hunter2pw>/dev/null"],
+                       ["/bin/bash", "-c", "ldapsearch -x -w \(R)>out.ldif; security add-generic-password -a bob -s svc -w \(R)>/dev/null"])
+        assertRedacted(["/bin/bash", "-c", "curl -u bob:Hunter2pw>out.html https://x"], ["/bin/bash", "-c", "curl -u bob:\(R)>out.html https://x"])
+        assertRedacted(["/bin/bash", "-c", "echo>~/WhoReadTestVault/n Hunter2pw"], ["/bin/bash", "-c", "echo>~/WhoReadTestVault/n \(R)"])
+        assertKept([
+            ["/bin/bash", "-c", "ls -la>out.txt"], ["/bin/bash", "-c", "make>build.log 2>&1"], ["/bin/bash", "-c", "tool --key ~/.ssh/id_ed25519>f"],
+            ["/bin/bash", "-c", "python3 run.py --token-file /etc/x>out"], ["/bin/bash", "-c", "sudo ls>out; time make>log"],
+        ])
         // In text that is not a command line (a connection string, YAML fed to a program), an operator
         // may be part of a value: what is glued to a redacted value goes with it.
         assertRedacted(["/bin/sh", "-c", "kubectl apply -f - <<EOF\nstringData:\n  password: Hun;ter&2pw|x\nEOF"],

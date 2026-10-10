@@ -456,7 +456,7 @@ public enum ArgvRedactor {
                     pending = nil; program = nil; expectProgram = false; dataMode = false; flags = ([:], [:]); positional = [:]
                 }
             }
-            let (quote, t) = unquote(word)
+            var (quote, t) = unquote(word)
             func emit(_ value: String) { out[i] = quote + value + quote + suffix }
             if shell && quote.isEmpty && (expectProgram || declarations.contains(program ?? "")), let name = assignedVariable(t) {
                 assignments[name, default: []].append((i, suffix))
@@ -513,17 +513,21 @@ public enum ArgvRedactor {
                 continue
             }
             if shellWord, let r = redirect(in: t) {
+                if r.target.isEmpty && !r.duplicatesDescriptor { keepNext = true }
+                // `>FILE echo …`, and `echo>FILE …` (the program's own word).
+                if program == nil && r.isStandardOutput && !r.duplicatesDescriptor { outputBeforeProgram = true }
+                if program == "exec" && expectProgram && r.isStandardOutput && r.data.isEmpty { execRedirect = true }
                 if dataMode && !r.data.isEmpty {
                     usedInData(r.data)
                     out[i] = (isExpansion(r.data) ? r.data : placeholder) + r.operatorAndTarget + suffix
                     dataAt = i
-                } else if !r.data.isEmpty {
-                    out[i] = redactToken(r.data) + r.operatorAndTarget + suffix
                 }
-                if r.target.isEmpty && !r.duplicatesDescriptor { keepNext = true }
-                if program == nil && r.isStandardOutput && !r.duplicatesDescriptor && r.data.isEmpty { outputBeforeProgram = true }
-                if program == "exec" && expectProgram && r.isStandardOutput && r.data.isEmpty { execRedirect = true }
-                continue
+                guard !dataMode && !r.data.isEmpty else { continue }
+                // `mysql -pPW>FILE`, `htpasswd -nb bob PW>>FILE`: the word before the redirect has the
+                // rules any word has there; the redirect is kept after it.
+                suffix = r.operatorAndTarget + suffix
+                word = r.data
+                (quote, t) = unquote(r.data)
             }
             if dataMode {
                 // `echo -n …`: echo's own options, before the first word of data.
