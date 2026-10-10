@@ -83,6 +83,8 @@ public enum ArgvRedactor {
     static let sudoValueOptions: Set<String> = ["-u", "-g", "-U", "-C", "-D", "-h", "-p", "-r", "-t", "-T"]
 
     static let httpClients: Set<String> = ["curl", "wget", "http", "https", "xh", "httpie", "curlie"]
+    /// Programs whose words are patterns and the files or directories to look in.
+    static let searchPrograms: Set<String> = ["grep", "egrep", "fgrep", "rg", "ag", "ack", "ugrep"]
     static let mysqlClients: Set<String> = ["mysql", "mysqldump", "mysqladmin", "mariadb", "mariadb-dump", "mysqlimport",
                                             "mysqlshow", "mysqlcheck", "mysqlsh"]
 
@@ -173,7 +175,8 @@ public enum ArgvRedactor {
     /// Also `http.extraHeader=Authorization: Basic …` (git -c). A closing quote at the end is kept.
     static let wholeHeader = regex(#"(?i)^(\s*["']?(?:[a-z0-9_.\-]+=["']?)?)("# + headerNames + #")(\s*:\s*)\S.*?(["']?\s*)$"#)
     /// A quoted header inside a command line: `-H "Authorization: Bearer xyz"`.
-    static let quotedHeader = regex(#"(?i)(["'])("# + headerNames + #")(\s*:\s*)[^"'\r\n]+"#)
+    /// The value starts with a character that is not a space (`rg 'secret: ' k8s/` has none).
+    static let quotedHeader = regex(#"(?i)(["'])("# + headerNames + #")(\s*:\s*)[^"'\s][^"'\r\n]*"#)
     /// `scheme://<long token>@host`.
     static let urlTokenUserinfo = regex(#"(?i)\b([a-z][a-z0-9+.\-]*://)([^/@\s:'"]{20,})@"#)
     /// Key names that hold a secret, in JSON, Python dicts, YAML and JavaScript objects.
@@ -636,8 +639,13 @@ public enum ArgvRedactor {
             // `password = X` (INI, a heredoc) when a lone "=" or ":" follows.
             // Not a MySQL authentication plugin (`IDENTIFIED WITH caching_sha2_password BY '…'`): the
             // SQL rules redact that value.
+            // Nor a pattern a search looks for (`rg "token:" .github/workflows`): the next word is where.
             let sqlPlugin = i + 1 < tokens.count && ["by", "as", "using"].contains(tokens[i + 1].lowercased())
-            if (isSecretKeyName(t) && !sqlPlugin) || (i + 1 < tokens.count && ["=", ":"].contains(tokens[i + 1]) && namesSecret(t)) {
+            let searching = searchPrograms.contains(program ?? "")
+                || (program == "git" && tokens[min(commandStart, i)..<i].contains("grep"))
+            if searching {
+                // No setting's value follows.
+            } else if (isSecretKeyName(t) && !sqlPlugin) || (i + 1 < tokens.count && ["=", ":"].contains(tokens[i + 1]) && namesSecret(t)) {
                 pending = .unlessPath
             } else if ["password", "passwd"].contains(t.lowercased()), i >= commandStart + 2,
                       tokens[i - 2].lowercased() == "login",
@@ -1924,6 +1932,11 @@ public enum ArgvRedactor {
             let value = NSRange(location: start, length: end - start)
             let text = ns.substring(with: value)
             if refersToSecret(ns.substring(with: m.key)) || looksLikePath(text) || switchValues.contains(text.lowercased()) { continue }
+            // Not closed on its line and starting with a space or a quote: a search for the key, where
+            // the "opening quote" ends the pattern's shell word (`rg '"password": "' src/`). A value
+            // cut short (a bounded command line) starts with its text.
+            let unterminated = end >= units.count || units[end] == 0x0A || units[end] == 0x0D
+            if unterminated, let first = text.unicodeScalars.first, first.properties.isWhitespace || first == "'" || first == "\"" { continue }
             values.append(value)
         }
         guard !values.isEmpty else { return s }

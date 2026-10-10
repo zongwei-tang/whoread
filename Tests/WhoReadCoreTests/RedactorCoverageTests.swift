@@ -353,6 +353,19 @@ final class RedactorCoverageTests: XCTestCase {
         ])
     }
 
+    /// A search for a secret's key is not the key with its value: the pattern and the files or
+    /// directories searched are kept. A value cut short still goes.
+    func testSearchesForSecretKeysKeepWhereTheyLook() {
+        assertKept([
+            ["/bin/sh", "-c", "rg '\"password\": \"' src/"], ["/bin/sh", "-c", "rg '\"password\":' src/ config/"],
+            ["/bin/sh", "-c", "grep -rn \"password:\" src/"], ["/bin/sh", "-c", "rg \"token:\" .github/workflows"],
+            ["/bin/sh", "-c", "rg 'secret: ' k8s/"], ["git", "grep", "-n", "api_key:", "--", "src"], ["grep", "-rn", "client_secret", "app/"],
+        ])
+        assertRedacted(["curl", "-d", "{\"password\":\"Hunter2pw and the rest …"], ["curl", "-d", "{\"password\":\"\(R)"])
+        assertRedacted(["/bin/sh", "-c", "curl -H 'X-Api-Key: Hunter2pw' https://x"], ["/bin/sh", "-c", "curl -H 'X-Api-Key: \(R)' https://x"])
+        assertRedacted(["/bin/sh", "-c", "tool \"token:\" Hunter2pw"], ["/bin/sh", "-c", "tool \"token:\" \(R)"])
+    }
+
     /// PowerShell and .NET options give a value after a colon: `-Password:PW`, `--password:PW`,
     /// `sqlpackage /TargetPassword:PW`. Before, `--password:PW` kept PW and redacted the next word.
     func testPasswordOptionsWithAColon() {
