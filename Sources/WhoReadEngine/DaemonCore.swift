@@ -1986,6 +1986,8 @@ final class LinkInventory: @unchecked Sendable {
     /// Links file events showed, oldest first, with their folded paths.
     private var reported: [(path: String, key: String)] = []
     private var reportedKeys = Set<String>()
+    /// Folded searched directories and their real paths: only links below one are kept from events.
+    private var roots = Set<String>()
     /// Bumped by every full walk: what a rebuild read before one is not written back over it.
     private var generation = 0
     private var _fullWalks = 0
@@ -2014,6 +2016,7 @@ final class LinkInventory: @unchecked Sendable {
         let foundKeys = Set(found.values.joined().map(PathNormalizer.fold))
         lock.lock()
         walked = found
+        self.roots = Set(roots)
         generation += 1
         // What the walk found itself, and what is no longer below a searched directory, is not kept.
         forgetReported { r in foundKeys.contains(r.key) || !roots.contains { r.key.hasPrefix($0 + "/") } }
@@ -2028,7 +2031,9 @@ final class LinkInventory: @unchecked Sendable {
         lock.lock()
         for p in links {
             let key = PathNormalizer.fold(p)
-            if reportedKeys.insert(key).inserted { reported.append((p, key)) }
+            // Elsewhere (a link at a catalog path or an ancestor) the rebuild resolves it anyway.
+            guard isBelowRoot(key), reportedKeys.insert(key).inserted else { continue }
+            reported.append((p, key))
         }
         let over = reported.count - LinkInventory.maxReported
         if over > 0 {
@@ -2037,6 +2042,16 @@ final class LinkInventory: @unchecked Sendable {
         }
         lock.unlock()
         if over > 0 { Log.warning("links: more than \(LinkInventory.maxReported) links reported since the last full walk; forgot the \(over) oldest") }
+    }
+
+    /// Under `lock`: strictly below a searched directory (folded key).
+    private func isBelowRoot(_ key: String) -> Bool {
+        var ancestor = ""
+        for component in PathNormalizer.components(key).dropLast() {
+            ancestor += "/" + component
+            if roots.contains(ancestor) { return true }
+        }
+        return false
     }
 
     /// Under `lock`.
@@ -2079,7 +2094,10 @@ final class LinkInventory: @unchecked Sendable {
             if seen.insert(PathNormalizer.fold(spelled)).inserted { candidates.append(spelled) }
         }
         lock.lock()
-        if generation == readGeneration { walked[key] = found }
+        if generation == readGeneration {
+            walked[key] = found
+            self.roots.formUnion(roots)
+        }
         forgetReported { gone.contains($0.key) }
         lock.unlock()
         if candidates.count > limit {

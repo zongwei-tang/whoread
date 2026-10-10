@@ -860,6 +860,24 @@ final class LinkRediscoveryTests: XCTestCase {
         XCTAssertEqual(core.linkInventory.fullWalks, walks + 1, "one search for both bursts")
     }
 
+    // Links reported outside every searched directory take no room among the remembered ones (they
+    // would push out deep links that only events found).
+    func testOnlyLinksBelowASearchedDirectoryAreRemembered() throws {
+        let home = try makeHome()
+        let inventory = LinkInventory()
+        inventory.walk([home + "/.azure"])
+        let target = home + "/dotfiles/azure/kept.json"
+        XCTAssertTrue(touch(target))
+        let deep = home + "/.azure/a/b/c/d/e/f/g/h/i"
+        try FileManager.default.createDirectory(atPath: deep, withIntermediateDirectories: true)
+        XCTAssertEqual(symlink(target, deep + "/kept.json"), 0)
+        inventory.report([deep + "/kept.json"])
+        inventory.report((0..<(LinkInventory.maxReported + 10)).map { home + "/elsewhere/\($0)" })
+        let found = inventory.links(under: home + "/.azure", maxDepth: 8, maxEntries: 100, limit: 10)
+        XCTAssertEqual(found.map(\.link), [deep + "/kept.json"])
+        XCTAssertEqual(found.map(\.target), [real(target)])
+    }
+
     // files-9-dangling-missing-dir: a link whose target lies below directories that do not exist yet
     // was followed only by the periodic rediscovery after they were made.
     func testALinkWhoseTargetDirectoryIsMissingIsMonitoredAtOnce() throws {
@@ -876,30 +894,37 @@ final class LinkRediscoveryTests: XCTestCase {
 
     // files-9-dangling-missing-dir variant: once the missing directory is made, the target's real
     // spelling is read at once. Made in another case, it is where the file goes on a case-insensitive
-    // volume (Endpoint Security selects events by the spelling on disk); made as a link, the target
-    // moves with it, or is dropped when it leads to system files.
-    func testMakingTheMissingDirectoryRereadsTheTarget() throws {
+    // volume, and Endpoint Security selects events by the spelling on disk.
+    func testMakingTheMissingDirectoryRereadsTheTargetsSpelling() throws {
         let home = try makeHome()
         let dotfiles = real(home + "/dotfiles")
         XCTAssertEqual(symlink("../dotfiles/Fresh/token.json", home + "/.azure/token.json"), 0)
+        let (core, _) = try linkCore(home: home)
+        XCTAssertTrue(core.analyzer.classifier.mutePaths.contains(dotfiles + "/Fresh/token.json"))
+        XCTAssertEqual(mkdir(home + "/dotfiles/fresh", 0o755), 0)
+        var st = stat()
+        guard lstat(home + "/dotfiles/FRESH", &st) == 0 else { throw XCTSkip("this volume is case-sensitive") }
+        operation(core, .create, OperationSemantics.create(path: home + "/dotfiles/fresh"))
+        XCTAssertNotNil(waitFor(5) { core.analyzer.classifier.mutePaths.contains(dotfiles + "/fresh/token.json") })
+        XCTAssertEqual(core.analyzer.classifier.classify(dotfiles + "/fresh/token.json")?.categoryID, "azure")
+    }
+
+    // files-9-dangling-missing-dir variant: the missing directory made as a link moves the target with
+    // it, or drops it when it leads to system files.
+    func testMissingDirectoryMadeAsALinkMovesOrDropsTheTarget() throws {
+        let home = try makeHome()
+        let dotfiles = real(home + "/dotfiles")
         XCTAssertEqual(symlink("../dotfiles/linked/sub/key.json", home + "/.azure/key.json"), 0)
         XCTAssertEqual(symlink("../dotfiles/system/sub/x.json", home + "/.azure/x.json"), 0)
         let (core, _) = try linkCore(home: home)
-        XCTAssertTrue(core.analyzer.classifier.mutePaths.contains(dotfiles + "/Fresh/token.json"))
+        XCTAssertTrue(core.analyzer.classifier.mutePaths.contains(dotfiles + "/linked/sub/key.json"))
         XCTAssertTrue(core.analyzer.classifier.mutePaths.contains(dotfiles + "/system/sub/x.json"))
-
-        XCTAssertEqual(mkdir(home + "/dotfiles/fresh", 0o755), 0)
-        var st = stat()
-        if lstat(home + "/dotfiles/FRESH", &st) == 0 {
-            operation(core, .create, OperationSemantics.create(path: home + "/dotfiles/fresh"))
-            XCTAssertNotNil(waitFor(5) { core.analyzer.classifier.mutePaths.contains(dotfiles + "/fresh/token.json") })
-            XCTAssertEqual(core.analyzer.classifier.classify(dotfiles + "/fresh/token.json")?.categoryID, "azure")
-        }
 
         try FileManager.default.createDirectory(atPath: home + "/elsewhere/sub", withIntermediateDirectories: true)
         XCTAssertEqual(symlink(home + "/elsewhere", home + "/dotfiles/linked"), 0)
         operation(core, .create, OperationSemantics.create(path: home + "/dotfiles/linked"))
         XCTAssertNotNil(waitFor(5) { core.analyzer.classifier.classify(self.real(home + "/elsewhere") + "/sub/key.json")?.categoryID == "azure" })
+        XCTAssertFalse(core.analyzer.classifier.mutePaths.contains(dotfiles + "/linked/sub/key.json"))
 
         XCTAssertEqual(symlink("/usr/share", home + "/dotfiles/system"), 0)
         operation(core, .create, OperationSemantics.create(path: home + "/dotfiles/system"))
