@@ -821,6 +821,11 @@ final class NativeEmptyDirectoryConversionTests: XCTestCase {
         let after = core.analyzer.classify(empty).filter(\.isSensitive)
         XCTAssertTrue(before.contains { $0.target.access.contains(.read) && $0.categories.contains { $0.id == "gh" } })
         XCTAssertFalse(after.contains { $0.target.access.contains(.read) }, "\(after.map { ($0.path, $0.target.access) })")
+        // Still a write to everything the replaced directory can hold: the new one brings it all in.
+        for id in ["gh", "gcloud"] {
+            XCTAssertTrue(after.contains { $0.target.access == .write && $0.categories.contains { $0.id == id } },
+                          "\(id): \(after.map { ($0.path, $0.target.access, $0.categories.map(\.id)) })")
+        }
     }
 }
 
