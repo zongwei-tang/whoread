@@ -524,6 +524,9 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "for l in '\(R)' '\(R)'; do echo \"$l\" | tee -a ~/WhoReadTestVault/netrc; done"])
         assertRedacted(["/bin/bash", "-c", "for l in Hunter2pw; do\n  if true; then printf '%s\\n' \"$l\" > ~/WhoReadTestVault/n; fi\ndone"],
                        ["/bin/bash", "-c", "for l in \(R); do\n  if true; then printf '\(R)' \"$l\" > ~/WhoReadTestVault/n; fi\ndone"])
+        // A loop cut short before its `done` (long command lines are bounded).
+        assertRedacted(["/bin/bash", "-c", "for l in 'Hunter2pw' x; do echo \"$l\" >> ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "for l in '\(R)' \(R); do echo \"$l\" >> ~/WhoReadTestVault/n"])
         assertKept([
             ["/bin/bash", "-c", "for f in *.log; do gzip \"$f\"; done"], ["/bin/bash", "-c", "for f in a.txt b.txt; do wc -l \"$f\" >> counts.txt; done"],
             ["/bin/bash", "-c", "for f in src/*.swift; do echo \"== $f\"; done"],

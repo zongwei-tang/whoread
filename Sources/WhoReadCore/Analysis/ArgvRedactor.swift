@@ -985,7 +985,6 @@ public enum ArgvRedactor {
 
         func close(_ frame: Frame, at end: Int, tail: String) {
             if let name = frame.function { functions[name] = frame.start...end }
-            if let name = frame.variable, !frame.list.isEmpty { result.loopVariables[name, default: []] += frame.list }
             guard frame.kind != .capture else { return }
             guard frame.kind == .substitution || outputLeaves(tokens, after: end, tail: tail, lineStarts: lineStarts) else { return }
             result.redirected.formUnion(frame.start...end)
@@ -1058,7 +1057,10 @@ public enum ArgvRedactor {
                 switch top.listState {
                 case 1: stack[stack.count - 1].listState = 2; stack[stack.count - 1].variable = word
                 case 2: stack[stack.count - 1].listState = word == "in" ? 3 : 0
-                default: stack[stack.count - 1].list.append(k)
+                default:
+                    stack[stack.count - 1].list.append(k)
+                    // As soon as it is seen: a loop cut short (a bounded command line) never closes.
+                    if let name = stack[stack.count - 1].variable { result.loopVariables[name, default: []].append(k) }
                 }
                 if endsCommand { stack[stack.count - 1].listState = 0 }
                 continue
