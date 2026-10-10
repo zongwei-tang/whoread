@@ -579,6 +579,28 @@ final class NestedPrefixMembershipTests: XCTestCase {
         XCTAssertEqual(out.alerts.map(\.alert.categoryID), ["codex-sessions"])
     }
 
+    // What that costs: a dotfile directory that is itself a link into a cloud folder (a plain folder
+    // stands in for the cloud-storage prefix here) is ssh only through that link, so ssh is asked about
+    // cloud-storage for its own key, once: the answer covers the next read.
+    func testADotfileDirectoryLinkedIntoACloudFolderAsksItsOwnerOnce() throws {
+        var cat = try catalog()
+        let i = try XCTUnwrap(cat.categories.firstIndex { $0.id == "cloud-storage" })
+        cat.categories[i].paths = ["~/Cloud/"]
+        let links = MapSymlinkResolver(["/Users/alice/.ssh": "/Users/alice/Cloud/dotfiles/ssh"])
+        let cloudKey = "/Users/alice/Cloud/dotfiles/ssh/id_ed25519"
+        let c = PathClassifier(catalog: cat, normalizer: PathNormalizer(homeDirectories: [home]), symlinks: links)
+        XCTAssertEqual(c.classifications(cloudKey).map(\.categoryID), ["ssh", "cloud-storage"])
+        XCTAssertEqual(c.classifications(cloudKey).map(\.viaLink), [true, false])
+
+        let h = try harness(catalog: cat, symlinks: links)
+        let ssh = userShell(h, proc(502, "/usr/bin/ssh", ppid: 500, platform: true, signingID: "com.apple.openssh"))
+        let d = authDecision(h, read(ssh, cloudKey), ask: ask)
+        XCTAssertEqual(d.verdict, .ask)
+        XCTAssertEqual(d.askKey?.categoryID, "cloud-storage")
+        h.rules.replace(rules: [answer("cloud-storage")])
+        XCTAssertEqual(authDecision(h, read(ssh, cloudKey), ask: ask).verdict, .allow)
+    }
+
     // An owner of the naming category also owns a category without owners of its own that holds the
     // path, whatever its severity: ssh reading its medium config in a home on an external volume is
     // not asked about the volume. (A plain folder stands in for the volumes prefix here.)
@@ -651,7 +673,8 @@ final class NestedPrefixCostTests: XCTestCase {
                      + "every category nested %.2f, outside every prefix %.2f; decision (500 answers) flat %.1f, nested %.1f [%d]",
                      oneFlat, allFlat, oneNested, allNested, allOutside, decideFlat, decideNested, sink))
         for t in [oneFlat, allFlat, oneNested, allNested, allOutside] { XCTAssertLessThan(t, 500) }
-        XCTAssertLessThan(decideNested, 10_000)
+        // One more pass over the rules for the second category, not more.
+        XCTAssertLessThan(decideNested, decideFlat * 4)
     }
 }
 
