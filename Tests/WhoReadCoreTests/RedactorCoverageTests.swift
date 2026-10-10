@@ -320,6 +320,10 @@ final class RedactorCoverageTests: XCTestCase {
         assertRedacted(["lftp", "-u", "bob,Hunter2pw", "sftp://files.example.com"], ["lftp", "-u", "bob,\(R)", "sftp://files.example.com"])
         assertRedacted(["/bin/sh", "-c", "docker exec web usermod -p '$6$salt$Hunter2pwHash' bob"],
                        ["/bin/sh", "-c", "docker exec web usermod -p '\(R)' bob"], secrets: ["Hunter2pwHash"])
+        // sysadminctl: the account whose password is reset stays, its new password goes.
+        assertRedacted(["sysadminctl", "-resetPasswordFor", "bob", "-newPassword", "Hunter2pw", "-adminUser", "admin", "-adminPassword", "Old2pwxx"],
+                       ["sysadminctl", "-resetPasswordFor", "bob", "-newPassword", R, "-adminUser", "admin", "-adminPassword", R],
+                       secrets: [secret, "Old2pwxx"])
         // SQL Server tools.
         assertRedacted(["sqlcmd", "-S", "db", "-U", "sa", "-P", "Hunter2pw", "-Q", "SELECT 1"], ["sqlcmd", "-S", "db", "-U", "sa", "-P", R, "-Q", "SELECT 1"])
         assertRedacted(["bcp", "t", "out", "f", "-S", "db", "-U", "sa", "-P", "Hunter2pw"], ["bcp", "t", "out", "f", "-S", "db", "-U", "sa", "-P", R])

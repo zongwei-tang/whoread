@@ -157,6 +157,9 @@ public enum ArgvRedactor {
             return (["-p": .secret], [:])
         case "cypher-shell":
             return (["-p": .secret], [:])
+        case "sysadminctl":
+            // `-resetPasswordFor USER -newPassword PW`: the account whose password is reset is evidence.
+            return (["-resetPasswordFor": .keep], [:])
         case "rabbitmqctl", "rabbitmq-diagnostics", "rabbitmq-plugins", "rabbitmq-queues", "rabbitmq-upgrade":
             return (["--erlang-cookie": .secret], [:])
         case "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport", "mongoimport":
