@@ -1,42 +1,42 @@
 #!/bin/bash
 # timeout: 600
-# M2 acceptance (monitor only); in the test VM with the native source it is the M4 check. Either
+# M2 acceptance (monitor only); in the test VM with the native source it is the M4 check. Run as
+# root, either way:
 #   sudo scripts/acceptance-m2.sh                            on your Mac (the probes run as you)
-#   scripts/vm/vmjob.sh run m2 scripts/acceptance-m2.sh      in the VM, as a runner job (root)
-# Reading the recorded accesses (whoread events/export) needs root or the signed app; run without
-# root, the script checks that first and stops with that hint if the daemon refuses.
+#   scripts/vm/vmjob.sh run m2 scripts/acceptance-m2.sh      in the VM, as a runner job
+# Reading the recorded accesses (whoread events/export) needs root or the signed app, so the script
+# queries the daemon as root and stops before any query when it is not root. The probes run as the
+# test user, whose home holds the vault: $WHOREAD_TEST_USER (set for VM jobs), else the user who ran
+# sudo.
 # Prerequisites:
 #   - dev LaunchDaemon installed and Full Disk Access granted (in the VM: scripts/vm/provision.sh)
 #   - scripts/create-test-vault.sh has been run (in the VM provision.sh does it for the test user)
 #   - jq (part of macOS 15 and later; on 14: brew install jq)
 # Only the test vault is read. Each probe runs in its own process group (set -m), separate from the
-# daemon's, so eslogger does not suppress it. Run as root (a VM job), the probes run as the test
-# user ($WHOREAD_TEST_USER, through sudo -u), whose home holds the vault; the daemon is queried as
-# root. No Python needed: the VM has no Command Line Tools, so perl stands in for the python3 probe.
+# daemon's, so eslogger does not suppress it. No Python needed: the VM has no Command Line Tools, so
+# perl stands in for the python3 probe.
 set -uo pipefail
 set -m
 WR="${WHOREAD:-whoread}"
 PASS=0; FAIL=0; INCOMPLETE=""
 ok()   { echo "PASS  $*"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL  $*"; FAIL=$((FAIL+1)); }
-command -v jq >/dev/null || { echo "jq is missing (part of macOS 15 and later; on 14: brew install jq)"; exit 1; }
-AS=()
-if [ "$(id -u)" -eq 0 ]; then
-  TEST_USER="${WHOREAD_TEST_USER:-${SUDO_USER:-}}"
-  case "$TEST_USER" in ''|root) echo "running as root: set WHOREAD_TEST_USER to the user whose test vault to probe"; exit 1 ;; esac
-  USER_HOME=$(dscl . -read "/Users/$TEST_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
-  [ -n "$USER_HOME" ] || { echo "no home directory for $TEST_USER"; exit 1; }
-  AS=(sudo -n -u "$TEST_USER" --)
-else
-  USER_HOME="$HOME"
+if [ "$(id -u)" -ne 0 ]; then
+  echo "run it as root: sudo $0 (the probes still run as $(id -un)). Reading the recorded accesses needs"
+  echo "root or the signed WhoRead app, and the daemon refuses everyone else."
+  exit 1
 fi
+command -v jq >/dev/null || { echo "jq is missing (part of macOS 15 and later; on 14: brew install jq)"; exit 1; }
+TEST_USER="${WHOREAD_TEST_USER:-${SUDO_USER:-}}"
+case "$TEST_USER" in ''|root) echo "running as root: set WHOREAD_TEST_USER to the user whose test vault to probe, or run it with sudo as that user"; exit 1 ;; esac
+USER_HOME=$(dscl . -read "/Users/$TEST_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+[ -n "$USER_HOME" ] || { echo "no home directory for $TEST_USER"; exit 1; }
 VAULT="$USER_HOME/WhoReadTestVault"
-as_user() { ${AS[@]+"${AS[@]}"} "$@"; }
+# Every access to the vault runs as the test user; every daemon query as root, the script itself.
+as_user() { sudo -n -u "$TEST_USER" -- "$@"; }
 # In the test user's login session (as root through launchctl asuser): Spotlight's importer is per
 # session, and the runner's jobs start outside every session.
-as_session_user() {
-  if [ ${#AS[@]} -gt 0 ]; then launchctl asuser "$(id -u "$TEST_USER")" "${AS[@]}" "$@"; else "$@"; fi
-}
+as_session_user() { launchctl asuser "$(id -u "$TEST_USER")" sudo -n -u "$TEST_USER" -- "$@"; }
 now() { jq -n 'now'; }
 node_bin="$(command -v node || true)"
 
@@ -45,7 +45,6 @@ node_bin="$(command -v node || true)"
 # Every check below reads the recorded accesses. A refusal must not turn into "not recorded".
 if ! err=$("$WR" events --since 1m --json 2>&1 >/dev/null); then
   echo "cannot read the recorded accesses: ${err:-whoread events failed}"
-  [ "$(id -u)" -eq 0 ] || echo "Reading them needs root (or the signed WhoRead app): run sudo $0 (the probes still run as $(id -un))."
   exit 1
 fi
 
@@ -93,7 +92,8 @@ fi
 if [ -n "$node_bin" ]; then
   probe "node reads fake private key"    node    "$node_bin" -e "require('fs').readFileSync('$VAULT/ssh/id_ed25519')"
 else
-  echo "SKIP  node not installed"
+  # sudo sets its own PATH, without Homebrew's folder.
+  echo "SKIP  node not found on PATH (by hand, to include it: sudo env PATH=\"\$PATH\" $0)"
 fi
 
 # Spotlight: modify a vault file and wait for mdworker to index it (folded by default).

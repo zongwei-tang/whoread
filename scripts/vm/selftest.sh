@@ -507,16 +507,29 @@ wait $UNINSTALLER; rc=$?
 echo "== acceptance-m2.sh against a fake daemon (JSON handling without Python)"
 # The fake whoread reports, for every probe leaf, an access whose chain is launchd → the acceptance
 # script (its pid is in $T/m2.pid) → the leaf; with FAKE_CHAIN=wrong the script is missing from it.
-mkdir -p "$T/m2home/WhoReadTestVault/ssh" "$T/m2home/WhoReadTestVault/aws" "$T/m2home/WhoReadTestVault/notes" "$T/m2bin"
+# It logs every call as "root ..." or, when it runs through the sudo stand-in, "user ...", and
+# refuses a history query from the test user as the daemon does.
+# Stand-ins in $T/m2root let the script run "as root" here: id -u says 0, dscl gives the test user
+# the fake home, sudo -n -u USER -- runs the command as this user (marked as the test user's), and
+# launchctl asuser runs it in place.
+mkdir -p "$T/m2home/WhoReadTestVault/ssh" "$T/m2home/WhoReadTestVault/aws" "$T/m2home/WhoReadTestVault/notes" "$T/m2bin" "$T/m2root"
 echo fake > "$T/m2home/WhoReadTestVault/ssh/id_ed25519"
 echo fake > "$T/m2home/WhoReadTestVault/aws/credentials"
 printf '#!/bin/sh\nexit 0\n' > "$T/m2bin/mdimport"
+printf '#!/bin/bash\nif [ "$#" -eq 1 ] && [ "$1" = -u ]; then echo 0; else exec /usr/bin/id "$@"; fi\n' > "$T/m2root/id"
+printf '#!/bin/bash\necho "NFSHomeDirectory: $FAKE_HOME"\n' > "$T/m2root/dscl"
+printf '#!/bin/bash\necho "sudo $*" >> "$FAKE_SUDO_LOG"\n[ "$1" = -n ] && [ "$2" = -u ] && [ "$4" = -- ] || exit 1\nshift 4\nFAKE_AS_USER=1 exec "$@"\n' > "$T/m2root/sudo"
+printf '#!/bin/bash\n[ "$1" = asuser ] || exit 1\nshift 2\nexec "$@"\n' > "$T/m2root/launchctl"
 cat > "$T/m2bin/whoread" <<'SH'
 #!/bin/bash
-if [ -n "${FAKE_REFUSE:-}" ] && [ "$1" = events ]; then
-  echo "whoread: reading recorded accesses, alerts and rules needs root: run it with sudo, or use the WhoRead app" >&2
-  exit 1
-fi
+if [ -n "${FAKE_AS_USER:-}" ]; then echo "user $*"; else echo "root $*"; fi >> "$FAKE_LOG"
+case "$1" in
+  events|export)
+    if [ -n "${FAKE_REFUSE:-}" ] || [ -n "${FAKE_AS_USER:-}" ]; then
+      echo "whoread: reading recorded accesses, alerts and rules needs root: run it with sudo, or use the WhoRead app" >&2
+      exit 1
+    fi ;;
+esac
 me=$(cat "$FAKE_PID_FILE")
 [ "${FAKE_CHAIN:-}" = wrong ] && me=4242
 ev() { printf '{"path":"%s/WhoReadTestVault/x","chain":[{"name":"launchd","pid":1},{"name":"bash","pid":%s},{"name":"%s","pid":999}]%s}' "$HOME" "$me" "$1" "${2:-}"; }
@@ -534,19 +547,47 @@ case "$1" in
   *) exit 1 ;;
 esac
 SH
-chmod +x "$T/m2bin/whoread" "$T/m2bin/mdimport"
-m2() { env HOME="$T/m2home" PATH="$T/m2bin:$PATH" WHOREAD="$T/m2bin/whoread" FAKE_PID_FILE="$T/m2.pid" "$@" \
-  bash -c 'echo $$ > "$FAKE_PID_FILE"; exec bash "$0"' "$ROOT/scripts/acceptance-m2.sh"; }
-out=$(m2); rc=$?
-[ $rc -eq 0 ] && grep -q ' 0 failed' <<< "$out" && grep -q '^PASS  cat reads fake private key recorded in' <<< "$out" \
-  && grep -q '^PASS  Spotlight read recorded and folded' <<< "$out" && grep -q '^PASS  export CSV' <<< "$out" \
-  && ok "acceptance-m2 passes against a matching fake" || bad "acceptance-m2 (fake, matching): rc $rc: $out"
-out=$(m2 FAKE_CHAIN=wrong); rc=$?
+chmod +x "$T/m2bin/whoread" "$T/m2bin/mdimport" "$T/m2root/"*
+ME=$(id -un)
+# m2 STANDINS_DIR|"" VAR=VALUE... : acceptance-m2.sh with the fake daemon (and the root stand-ins);
+# neither SUDO_USER nor WHOREAD_TEST_USER unless given.
+m2() {
+  local root="$1"; shift
+  : > "$T/m2.calls"; : > "$T/m2.sudo"
+  env -u SUDO_USER -u WHOREAD_TEST_USER HOME="$T/m2home" PATH="${root:+$root:}$T/m2bin:$PATH" WHOREAD="$T/m2bin/whoread" \
+    FAKE_PID_FILE="$T/m2.pid" FAKE_HOME="$T/m2home" FAKE_LOG="$T/m2.calls" FAKE_SUDO_LOG="$T/m2.sudo" "$@" \
+    bash -c 'echo $$ > "$FAKE_PID_FILE"; exec bash "$0"' "$ROOT/scripts/acceptance-m2.sh"
+}
+# m2_root_queries : every history query ran, as root, and none as the test user.
+m2_root_queries() {
+  grep -q '^root events ' "$T/m2.calls" && grep -q '^root export --format json ' "$T/m2.calls" \
+    && grep -q '^root export --format csv ' "$T/m2.calls" && ! grep -q '^user ' "$T/m2.calls"
+}
+# m2_user_probes : every vault access went through sudo -n -u <test user>.
+m2_user_probes() {
+  grep -q "^sudo -n -u $ME -- /bin/cat " "$T/m2.sudo" && grep -q "^sudo -n -u $ME -- /bin/sh -c " "$T/m2.sudo" \
+    && grep -q "^sudo -n -u $ME -- mdimport " "$T/m2.sudo"
+}
+for how in "SUDO_USER=$ME" "WHOREAD_TEST_USER=$ME"; do
+  out=$(m2 "$T/m2root" "$how"); rc=$?
+  [ $rc -eq 0 ] && grep -q ' 0 failed' <<< "$out" && grep -q '^PASS  cat reads fake private key recorded in' <<< "$out" \
+    && grep -q '^PASS  Spotlight read recorded and folded' <<< "$out" && grep -q '^PASS  export CSV' <<< "$out" \
+    && ok "acceptance-m2 as root ($how) passes against a matching fake" || bad "acceptance-m2 (root, $how): rc $rc: $out"
+  m2_root_queries && ok "  every history query as root ($how)" || bad "history queries ($how): $(cat "$T/m2.calls")"
+  m2_user_probes && ok "  every vault access as the test user ($how)" || bad "vault accesses ($how): $(cat "$T/m2.sudo")"
+done
+out=$(m2 ""); rc=$?
+[ $rc -ne 0 ] && grep -q "^run it as root: sudo .*acceptance-m2.sh (the probes still run as $ME)" <<< "$out" && [ ! -s "$T/m2.calls" ] \
+  && ok "acceptance-m2 without root stops before asking the daemon anything" || bad "acceptance-m2 (not root): rc $rc: $out; calls: $(cat "$T/m2.calls")"
+out=$(m2 "$T/m2root"); rc=$?
+[ $rc -ne 0 ] && grep -q '^running as root: set WHOREAD_TEST_USER' <<< "$out" && [ ! -s "$T/m2.calls" ] && [ ! -s "$T/m2.sudo" ] \
+  && ok "acceptance-m2 as root without a test user stops before anything" || bad "acceptance-m2 (root, no user): rc $rc: $out"
+out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_CHAIN=wrong); rc=$?
 [ $rc -ne 0 ] && grep -q '^FAIL  cat reads fake private key recorded with a wrong parent chain' <<< "$out" \
   && ok "acceptance-m2 reports a chain without the script" || bad "acceptance-m2 (fake, wrong chain): rc $rc: $out"
-out=$(m2 FAKE_REFUSE=1); rc=$?
+out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_REFUSE=1); rc=$?
 [ $rc -ne 0 ] && grep -q '^cannot read the recorded accesses: whoread: reading recorded accesses' <<< "$out" \
-  && grep -q 'needs root (or the signed WhoRead app): run sudo ' <<< "$out" && ! grep -q 'not recorded' <<< "$out" \
+  && ! grep -q 'not recorded' <<< "$out" && [ ! -s "$T/m2.sudo" ] \
   && ok "acceptance-m2 stops with the daemon's refusal instead of reporting accesses as not recorded" \
   || bad "acceptance-m2 (history refused): rc $rc: $out"
 
