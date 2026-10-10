@@ -639,6 +639,18 @@ final class RedactorCoverageTests: XCTestCase {
         assertRedacted(["/bin/bash", "-c", "echo $1Hunter2pw > ~/WhoReadTestVault/n"], ["/bin/bash", "-c", "echo \(R) > ~/WhoReadTestVault/n"])
     }
 
+    /// Loops whose words name each other's variables: each variable is followed once. Following every
+    /// path instead took minutes for ten such loops (the analyzer would stall on one command line).
+    func testLoopsNamingEachOtherAreFollowedOnce() {
+        let names = "abcdefghij".map(String.init)
+        let loops = names.map { n in
+            "for \(n) in " + (names.filter { $0 != n } + ["z"]).map { "$" + $0 }.joined() + "; do echo $\(n) >> f; done; "
+        }.joined()
+        let start = Date()
+        assertRedacted(["/bin/bash", "-c", "z=Hunter2pw; " + loops], ["/bin/bash", "-c", "z=\(R); " + loops])
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+    }
+
     /// The command after `if`, `while`, `until`, `elif` and `!` is a program with its own rules.
     func testCommandsInConditionsKeepTheirFlagRules() {
         assertRedacted(["/bin/sh", "-c", "if curl -u admin:Hunter2pw https://x; then echo ok; fi"],

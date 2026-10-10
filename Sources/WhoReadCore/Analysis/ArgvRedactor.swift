@@ -299,23 +299,28 @@ public enum ArgvRedactor {
         // Shell variables set to a literal (`PW='x'`, `export PW=x`), by name: data that uses one
         // (`echo "$PW" > FILE`, a heredoc body) is what the value is, so the value goes too.
         var assignments: [String: [(index: Int, end: String)]] = [:]
-        func usedInData(_ word: String, seen: Set<String> = []) {
-            guard shell, !(assignments.isEmpty && groups.loopVariables.isEmpty), word.contains("$"),
-                  !(isQuoted(word) && word.first == "'") else { return }
-            for name in variableReferences(in: word) where !seen.contains(name) {
-                for a in assignments[name] ?? [] { out[a.index] = name + "=" + placeholder + a.end }
-                // `for l in 'pw'; do echo "$l" >> FILE; done`: the loop's words. One that is a variable
-                // itself (`for l in "$PW"`) passes the use on.
-                for k in groups.loopVariables[name] ?? [] {
-                    var core = tokens[k], end = ""
-                    while core.count > 1 && core.hasSuffix(";") && !core.hasSuffix("\\;") && !isQuoted(core) {
-                        core.removeLast()
-                        end += ";"
+        func usedInData(_ word: String) {
+            guard shell, !(assignments.isEmpty && groups.loopVariables.isEmpty) else { return }
+            // Each variable once: loops whose words name each other's variables are a graph, not a tree.
+            var seen = Set<String>()
+            func use(_ word: String) {
+                guard word.contains("$"), !(isQuoted(word) && word.first == "'") else { return }
+                for name in variableReferences(in: word) where seen.insert(name).inserted {
+                    for a in assignments[name] ?? [] { out[a.index] = name + "=" + placeholder + a.end }
+                    // `for l in 'pw'; do echo "$l" >> FILE; done`: the loop's words. One that is a
+                    // variable itself (`for l in "$PW"`) passes the use on.
+                    for k in groups.loopVariables[name] ?? [] {
+                        var core = tokens[k], end = ""
+                        while core.count > 1 && core.hasSuffix(";") && !core.hasSuffix("\\;") && !isQuoted(core) {
+                            core.removeLast()
+                            end += ";"
+                        }
+                        use(core)
+                        if !isExpansion(core) { out[k] = redactedData(core) + end }
                     }
-                    usedInData(core, seen: seen.union([name]))
-                    if !isExpansion(core) { out[k] = redactedData(core) + end }
                 }
             }
+            use(word)
         }
         func resetCommand(at i: Int) {
             pending = nil; program = nil; expectProgram = true; skipNext = false
