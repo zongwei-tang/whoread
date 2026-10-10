@@ -396,6 +396,27 @@ final class SigningCategoryTrustTests: AncestryTestCase {
         XCTAssertFalse(h.classifier.isOwner(ssh(nil, flags: CodeSigningFlag.getTaskAllow), of: "ssh"))
     }
 
+    /// A signed process that is no longer valid has run a page that did not match its signature (changed
+    /// on disk, or written through a task port another process holds) and was not killed for it (no
+    /// hardened runtime). Its code identity says nothing about what it runs: not an owner, not an Apple
+    /// program. Without the signature flag (unsigned code) nothing changes.
+    func testASignedProcessThatIsNoLongerValidIsNotTrusted() {
+        let signedValid = CodeSigningFlag.signed | CodeSigningFlag.valid
+        let c = dockerOwnedClassifier()
+        XCTAssertTrue(c.isOwner(docker(.developerID, flags: signedValid), of: "kube"))
+        XCTAssertFalse(c.isOwner(docker(.developerID, flags: CodeSigningFlag.signed), of: "kube"))
+        func ssh(_ flags: UInt32) -> ProcessRecord {
+            signed(proc(920, "/opt/homebrew/Cellar/openssh/9.9p1/bin/ssh", ppid: 1, start: 0, originalPPID: 1), .localSigning, flags: flags)
+        }
+        XCTAssertTrue(h.classifier.isOwner(ssh(signedValid | 0x2_0002), of: "ssh"))
+        XCTAssertFalse(h.classifier.isOwner(ssh(CodeSigningFlag.signed | 0x2_0002), of: "ssh"))
+        XCTAssertTrue(h.classifier.isOwner(ssh(0x2_0002), of: "ssh"), "no signature flag: as before")
+
+        let shell = h.spawn(P.terminal, P.zsh(500, parent: 100))
+        XCTAssertEqual(decide(h.spawn(shell, signed(P.cat(630, parent: 500), .platform, flags: signedValid), 1), 2).reason, .trustedApple)
+        XCTAssertEqual(decide(h.spawn(shell, signed(P.cat(631, parent: 500), .platform, flags: CodeSigningFlag.signed), 1), 2).verdict, .ask)
+    }
+
     /// The same on the AUTH path: a development build reading the category is asked, not passed as owner.
     func testADevelopmentBuildOfAnOwnerIsAskedNotPassed() {
         let engine = RuleEngine(rules: [], classifier: dockerOwnedClassifier(), attributor: h.attributor)

@@ -153,13 +153,22 @@ public enum CodeSigningFlag {
     public static let getTaskAllow: UInt32 = 0x0000_0004
     /// CS_DEBUGGED: the process is, or has been, debugged and allowed to run with invalid pages.
     public static let debugged: UInt32 = 0x1000_0000
+    /// CS_VALID: every page the kernel validated so far matched the signature. ESMessageCore.h: a page
+    /// that was tampered with clears it once it is paged in, and the process runs on unless CS_KILL is
+    /// set (platform binaries and hardened runtime).
+    public static let valid: UInt32 = 0x0000_0001
+    /// CS_SIGNED: the process has a signature (which may have gone invalid).
+    public static let signed: UInt32 = 0x2000_0000
 }
 
 extension ProcessRecord {
-    /// Other processes of the user may control this one (get-task-allow, or it has been debugged), so
-    /// its code identity says nothing about what it does. False when the source gives no flags.
+    /// Other processes of the user may control this one (get-task-allow, or it has been debugged), or it
+    /// runs code its signature does not cover (signed, but no longer valid), so its code identity says
+    /// nothing about what it does. False when the source gives no flags.
     public var isControllable: Bool {
-        codeSigningFlags.map { $0 & (CodeSigningFlag.getTaskAllow | CodeSigningFlag.debugged) != 0 } ?? false
+        guard let flags = codeSigningFlags else { return false }
+        if flags & (CodeSigningFlag.getTaskAllow | CodeSigningFlag.debugged) != 0 { return true }
+        return flags & CodeSigningFlag.signed != 0 && flags & CodeSigningFlag.valid == 0
     }
 
     /// The platform flag, where the kernel's signing category confirms it: Apple trust (Apple programs,
