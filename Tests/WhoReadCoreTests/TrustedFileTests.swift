@@ -172,3 +172,132 @@ final class TrustedFileTests: XCTestCase {
         assertUntrusted(data, mentioning: "access control list")
     }
 }
+
+/// daemonfs-4: a root daemon took its catalog, agent and benign lists from any directory, even one
+/// others could change: whoever could write it could drop sensitive categories or make every program
+/// a benign service.
+final class TrustedDefaultDataTests: XCTestCase {
+    private var dir = ""
+    private let me = geteuid()
+    private var someoneElse: uid_t { me == 0 ? 1 : 0 }
+
+    override func setUpWithError() throws {
+        let base = ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory()
+        dir = (base as NSString).appendingPathComponent("whoread-defaults-\(UUID().uuidString.prefix(8))")
+        XCTAssertEqual(mkdir(dir, 0o755), 0)
+        XCTAssertEqual(chmod(dir, 0o755), 0)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(atPath: dir)
+    }
+
+    private func path(_ name: String) -> String { (dir as NSString).appendingPathComponent(name) }
+
+    /// A copy of Data/ at `name`, made the way the install script does (0755 directory, 0644 files).
+    @discardableResult
+    private func copyOfDefaults(_ name: String = "defaults") throws -> String {
+        let d = path(name)
+        let up = (d as NSString).deletingLastPathComponent
+        if !FileManager.default.fileExists(atPath: up) { XCTAssertEqual(mkdir(up, 0o755), 0) }
+        XCTAssertEqual(mkdir(d, 0o755), 0)
+        XCTAssertEqual(chmod(d, 0o755), 0)
+        for file in [DefaultData.catalogFile, DefaultData.agentsFile, DefaultData.benignFile] {
+            let data = try Data(contentsOf: repoRoot.appendingPathComponent("Data").appendingPathComponent(file))
+            try SafeFile.replace(d + "/" + file, with: data, mode: 0o644)
+        }
+        return d
+    }
+
+    private func assertRefused(_ explicit: String, owner: uid_t? = nil, mentioning text: String,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try DefaultData.locate(explicit: explicit, executablePath: nil, trustedOwner: owner ?? me),
+                             file: file, line: line) { error in
+            XCTAssertTrue("\(error)".contains(text), "\(error)", file: file, line: line)
+        }
+    }
+
+    func testTrustedDefaultsLoad() throws {
+        let d = try copyOfDefaults()
+        let (data, from) = try DefaultData.locate(explicit: d, executablePath: nil, trustedOwner: me)
+        XCTAssertEqual(from.path, d)
+        XCTAssertEqual(data.catalog, try defaultData().catalog)
+    }
+
+    func testWithoutAnOwnerNothingIsChecked() throws {
+        let d = try copyOfDefaults()
+        XCTAssertEqual(chmod(d, 0o777), 0)
+        XCTAssertNoThrow(try DefaultData.locate(explicit: d, executablePath: nil, trustedOwner: nil))
+    }
+
+    func testDefaultsDirectoryOthersCanWriteIsRefused() throws {
+        let d = try copyOfDefaults()
+        XCTAssertEqual(chmod(d, 0o777), 0)
+        assertRefused(d, mentioning: "writable by group or others")
+    }
+
+    func testDefaultsDirectoryOfAnotherUserIsRefused() throws {
+        let d = try copyOfDefaults()
+        assertRefused(d, owner: someoneElse, mentioning: "is owned by uid \(me)")
+    }
+
+    func testDefaultsDirectoryThatIsALinkIsRefused() throws {
+        let d = try copyOfDefaults()
+        XCTAssertEqual(symlink(d, path("link")), 0)
+        assertRefused(path("link"), mentioning: "symbolic link or not a directory")
+    }
+
+    func testDirectoryOnTheWayOthersCanWriteIsRefused() throws {
+        XCTAssertEqual(mkdir(path("shared"), 0o755), 0)
+        let d = try copyOfDefaults("shared/defaults")
+        XCTAssertEqual(chmod(path("shared"), 0o777), 0)
+        assertRefused(d, mentioning: path("shared"))
+    }
+
+    func testDefaultsFileOthersCanWriteIsRefused() throws {
+        for file in [DefaultData.catalogFile, DefaultData.agentsFile, DefaultData.benignFile] {
+            try? FileManager.default.removeItem(atPath: path("defaults"))
+            let d = try copyOfDefaults()
+            XCTAssertEqual(chmod(d + "/" + file, 0o666), 0)
+            assertRefused(d, mentioning: file)
+        }
+    }
+
+    func testDefaultsFileThatIsALinkIsRefused() throws {
+        let d = try copyOfDefaults()
+        let elsewhere = try copyOfDefaults("elsewhere")
+        XCTAssertEqual(unlink(d + "/" + DefaultData.agentsFile), 0)
+        XCTAssertEqual(symlink(elsewhere + "/" + DefaultData.agentsFile, d + "/" + DefaultData.agentsFile), 0)
+        assertRefused(d, mentioning: "symbolic link")
+    }
+
+    // An explicit directory that fails the check stops the start: the other candidates are not what
+    // was asked for.
+    func testUntrustedExplicitDirectoryDoesNotFallBackToAnotherCandidate() throws {
+        let d = try copyOfDefaults()
+        XCTAssertEqual(chmod(d, 0o777), 0)
+        let next = try copyOfDefaults("bin/WhoReadData")
+        XCTAssertEqual(try DefaultData.locate(explicit: nil, executablePath: path("bin/whoreadd"), trustedOwner: me).1.path, next)
+        XCTAssertThrowsError(try DefaultData.locate(explicit: d, executablePath: path("bin/whoreadd"), trustedOwner: me)) { error in
+            XCTAssertTrue("\(error)".contains("writable by group or others"), "\(error)")
+            XCTAssertTrue("\(error)".contains(d), "\(error)")
+        }
+    }
+
+    // daemonfs-4-variant: the other candidates (in a bundle's Resources, next to the executable,
+    // WHOREAD_DATA_DIR) are checked too; one that fails is skipped, never read.
+    func testUntrustedSearchCandidateIsSkipped() throws {
+        let first = try copyOfDefaults("Resources")
+        XCTAssertEqual(chmod(first + "/" + DefaultData.catalogFile, 0o666), 0)
+        let second = try copyOfDefaults("bin/WhoReadData")
+        XCTAssertEqual(try DefaultData.locate(explicit: nil, executablePath: path("bin/whoreadd"), trustedOwner: me).1.path, second)
+        // A daemon running as a user reads the first one as before.
+        XCTAssertEqual(try DefaultData.locate(explicit: nil, executablePath: path("bin/whoreadd"), trustedOwner: nil).1.path, first)
+        // Nothing trusted at all: the error names why each candidate was refused.
+        XCTAssertEqual(chmod(second, 0o777), 0)
+        XCTAssertThrowsError(try DefaultData.locate(explicit: nil, executablePath: path("bin/whoreadd"), trustedOwner: me)) { error in
+            XCTAssertTrue("\(error)".contains(first), "\(error)")
+            XCTAssertTrue("\(error)".contains(second), "\(error)")
+        }
+    }
+}

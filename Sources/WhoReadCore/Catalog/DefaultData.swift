@@ -16,10 +16,17 @@ public struct DefaultData: Sendable {
         self.benign = benign
     }
 
-    /// Loads all three files from a directory.
-    public static func load(directory: URL) throws -> DefaultData {
+    /// Far above the shipped files (the catalog is about 100 KB).
+    static let maxFileSize = 16 << 20
+
+    /// Loads all three files from a directory. With `trustedOwner` (a daemon running as root), each
+    /// file is read only when no one but that user and root could have changed it, its directory or a
+    /// directory on the way (`TrustedFile`); otherwise this throws `TrustedFile.Untrusted`.
+    public static func load(directory: URL, trustedOwner: uid_t? = nil) throws -> DefaultData {
         func read(_ name: String) throws -> Data {
-            try Data(contentsOf: directory.appendingPathComponent(name))
+            let url = directory.appendingPathComponent(name)
+            guard let owner = trustedOwner else { return try Data(contentsOf: url) }
+            return try TrustedFile.read(url.path, owner: owner, limit: maxFileSize)
         }
         return DefaultData(
             catalog: try Catalog.load(from: read(catalogFile)),
@@ -43,13 +50,23 @@ public struct DefaultData: Sendable {
         return out
     }
 
-    public static func locate(explicit: String?, executablePath: String?) throws -> (DefaultData, URL) {
+    /// The default data and the directory it came from: the first candidate holding catalog.json.
+    ///
+    /// With `trustedOwner` (a daemon running as root, daemonfs-4), a candidate is used only when no one
+    /// but that user and root could have changed its files, the directory or a directory on the way
+    /// (`TrustedFile`): whoever could write them could drop sensitive categories, or make any program a
+    /// benign service or hide an AI agent. An explicit directory that fails the check stops the start,
+    /// since the other candidates are not what was asked for; any other candidate that fails it is
+    /// skipped, never read, and named in the error when nothing else is found.
+    public static func locate(explicit: String?, executablePath: String?, trustedOwner: uid_t? = nil) throws -> (DefaultData, URL) {
         var errors: [String] = []
-        for dir in searchDirectories(explicit: explicit, executablePath: executablePath) {
+        for (index, dir) in searchDirectories(explicit: explicit, executablePath: executablePath).enumerated() {
             let probe = dir.appendingPathComponent(catalogFile)
             guard FileManager.default.fileExists(atPath: probe.path) else { continue }
             do {
-                return (try load(directory: dir), dir)
+                return (try load(directory: dir, trustedOwner: trustedOwner), dir)
+            } catch let problem as TrustedFile.Untrusted where explicit != nil && index == 0 {
+                throw DefaultDataError.untrusted(directory: dir.path, problem: problem)
             } catch {
                 errors.append("\(dir.path): \(error)")
             }
@@ -60,10 +77,14 @@ public struct DefaultData: Sendable {
 
 public enum DefaultDataError: Error, CustomStringConvertible {
     case notFound([String])
+    case untrusted(directory: String, problem: TrustedFile.Untrusted)
     public var description: String {
         switch self {
         case .notFound(let errors):
             return "default data (catalog.json, agents.json, benign.json) not found" + (errors.isEmpty ? "" : ": " + errors.joined(separator: "; "))
+        case .untrusted(let directory, let problem):
+            return "refusing the default data in \(directory): \(problem). Only root may be able to change these files, "
+                + "their directory and every directory above it: install them again into such a directory"
         }
     }
 }
