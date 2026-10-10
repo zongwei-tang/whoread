@@ -18,6 +18,7 @@ public enum L: String, CaseIterable, Sendable {
     case askAllowNotPermittedFormat, askGone, askAgentsFormat, askPathHidden, asksCannotReadFormat
     case askCoversFormat, alertCoversFormat
     case answerRuleLimit, answerNotSavedFormat, answerNoReply, alertNotPermittedFormat
+    case answerAlertsNotUpdatedFormat, answerReplyUnreadable
     // What cannot be read (limited view)
     case limitedViewFormat, limitedAskPaths, notShownFormat, cannotReadFormat
     case partAlerts, partLive, partSummaries, partRules, partSettings, partCatalog, partAgents
@@ -129,6 +130,10 @@ public enum L10n {
                                 "你的回答已经生效，但 WhoRead 无法保存它（%@）。WhoRead 监控程序重启后可能会再次询问你。"),
         .answerNoReply: ("No reply from the WhoRead daemon: your answer may not have been taken. If the question is still listed, answer it again.",
                          "WhoRead 守护进程没有回应：你的回答可能没有生效。如果问题仍在列表中，请再回答一次。"),
+        .answerAlertsNotUpdatedFormat: ("Your answer applies now, but WhoRead could not mark its alerts as handled (%@). They may still be listed as open.",
+                                        "你的回答已经生效，但 WhoRead 无法把相关告警标记为已处理（%@）。它们可能仍显示为未处理。"),
+        .answerReplyUnreadable: ("The WhoRead daemon's reply could not be read (it runs another version): your answer may or may not have been taken. Update WhoRead or restart the daemon, then look at the question again.",
+                                 "无法读取 WhoRead 守护进程的回复（它运行的是另一个版本）：你的回答可能已经生效，也可能没有。请更新 WhoRead 或重启守护进程，然后再查看这个问题。"),
         .alertNotPermittedFormat: ("Not permitted: the WhoRead monitor does not recognise this app as the signed WhoRead app, and this needs that app or an administrator. In Terminal: %@",
                                    "没有权限：WhoRead 监控程序没有把这个应用识别为已签名的 WhoRead 应用，这项操作需要该应用或管理员。请在终端运行：%@"),
         .askAgentsFormat: ("AI agent in the chain: %@", "调用链中有 AI agent：%@"),
@@ -556,16 +561,22 @@ public enum L10n {
     }
 
     /// Outcomes of an answer that a plain "refused" would misreport: the rule limit (nothing changed),
-    /// a rule or setting applied but not saved (it took effect), no reply (it may or may not have).
-    /// The daemon's messages are matched as DaemonCore words them (pinned by tests).
+    /// a rule or setting applied but not saved (it took effect), its alerts not marked handled (it took
+    /// effect), no reply or a reply this app cannot read (it may or may not have). The daemon's
+    /// messages are matched as DaemonCore words them (pinned by tests).
     static func answerOutcome(_ e: IPCError, _ language: Language) -> String? {
         switch e.code {
         case .invalid where e.message.hasPrefix("too many rules"):
             return t(.answerRuleLimit, language)
         case .internalError where e.message.contains("applied but not saved"):
             return f(.answerNotSavedFormat, DisplayText.escaped(e.message, limit: 300), language: language)
+        case .internalError where e.message.hasPrefix("answer applied, but its alerts could not be updated"):
+            return f(.answerAlertsNotUpdatedFormat, DisplayText.escaped(e.message, limit: 300), language: language)
         case .unavailable:
             return t(.answerNoReply, language)
+        // The daemon never answers a change with this code: the reply did not decode.
+        case .versionMismatch:
+            return t(.answerReplyUnreadable, language)
         default:
             return nil
         }

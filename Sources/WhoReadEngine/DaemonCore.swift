@@ -633,8 +633,17 @@ public final class DaemonCore: @unchecked Sendable {
             try answer(scope, action: action, peer: peer, privileged: privileged)
         }
         // An unprivileged answer (deny, block from now on) leaves the alerts open, as `apply` does.
-        if privileged { try resolveAskAlerts(answering: scope, action: action) }
+        if privileged {
+            do { try resolveAskAlerts(answering: scope, action: action) } catch { throw DaemonCore.alertsNotUpdated(error) }
+        }
         Log.info("question #\(id): \(action.rawValue) by pid \(peer.pid.map(String.init) ?? "?") (uid \(peer.euid.map(String.init) ?? "?"))")
+    }
+
+    /// The answer took effect (rule, setting, held accesses), but marking its alerts handled failed:
+    /// said as such, since a plain error reads as if the answer had been refused.
+    static func alertsNotUpdated(_ error: Error) -> IPCError {
+        Log.error("answer applied, but its alerts could not be updated: \(error)")
+        return IPCError(.internalError, "answer applied, but its alerts could not be updated: \(error)")
     }
 
     /// What an answer applies to: from a question, or from an alert (Alerts tab, monitor-only mode).
@@ -985,11 +994,17 @@ public final class DaemonCore: @unchecked Sendable {
         if privileged {
             alert.status = .resolved
             alert.resolution = action
-            try store.upsert([alert])
-            // Replaces a stale snapshot the writer may have re-queued after a failed flush.
-            writer.enqueue(alerts: [alert])
-            coalescer.updateStatus(alertID: id, status: .resolved, resolution: action)
-            if answered { try resolveAskAlerts(answering: scope, action: action, except: id) }
+            do {
+                try store.upsert([alert])
+                // Replaces a stale snapshot the writer may have re-queued after a failed flush.
+                writer.enqueue(alerts: [alert])
+                coalescer.updateStatus(alertID: id, status: .resolved, resolution: action)
+                if answered { try resolveAskAlerts(answering: scope, action: action, except: id) }
+            } catch {
+                // "Ignore" (and "keep blocking" on a block) change nothing else: then nothing changed.
+                guard action == .ignore || (action == .keepBlocking && !answered) else { throw DaemonCore.alertsNotUpdated(error) }
+                throw error
+            }
         }
         Log.info("alert #\(id): \(action.rawValue) by pid \(peer.pid.map(String.init) ?? "?") (uid \(peer.euid.map(String.init) ?? "?"))")
     }

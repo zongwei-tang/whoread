@@ -659,6 +659,65 @@ final class QuestionsUIModelTests: XCTestCase {
             .hasSuffix("sudo whoread alert 5 keep-blocking"))
     }
 
+    /// Alerts can be read but no longer written (the disk refuses writes to them).
+    private func makeAlertsReadOnly() {
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(core.config.databasePath, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "CREATE TRIGGER alerts_read_only BEFORE INSERT ON alerts BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+                                    nil, nil, nil), SQLITE_OK)
+    }
+
+    func testTask3VariantAnswerAppliedButAlertsNotMarkedIsNotReportedAsRefused() throws {
+        let id = try openQuestion()
+        // The question's alert, as the daemon raises one with every question.
+        var alert = try XCTUnwrap(try core.store.alerts(AlertQuery(limit: 10)).first)
+        alert.kind = .ask
+        alert.status = .unread
+        alert.responsible = Self.terminal
+        alert.categoryID = "ssh"
+        alert.accesses = .read
+        alert.chain = []
+        try core.store.upsert([alert])
+        makeAlertsReadOnly()
+
+        // A question denied: the access is denied and the question closed; only its alerts stay open.
+        let e = try XCTUnwrap(failure(.answerAsk(id: id, action: .keepBlocking), signed))
+        XCTAssertNil(core.askBroker.request(id: id), "the answer took effect")
+        for language in [Language.en, .zhHans] {
+            let text = L10n.answerError(e, askID: id, action: .keepBlocking, language)
+            XCTAssertTrue(text.hasPrefix(language == .en ? "Your answer applies now, but WhoRead could not mark its alerts as handled ("
+                                                         : "你的回答已经生效，但 WhoRead 无法把相关告警标记为已处理（"), text)
+            XCTAssertFalse(text.contains("refused") || text.contains("拒绝了"), text)
+        }
+
+        // "Always allow" on an alert: the answer rule is saved; the alert cannot be marked.
+        let allowed = try XCTUnwrap(failure(.alertAction(alertID: alert.id, action: .alwaysAllow), signed))
+        XCTAssertTrue(core.rules.rules.contains { $0.template == DaemonCore.askAnswerTemplate && $0.action == .allow })
+        XCTAssertTrue(L10n.alertActionError(allowed, alertID: alert.id, action: .alwaysAllow, kind: alert.kind, .en)
+            .hasPrefix("Your answer applies now, but WhoRead could not mark its alerts as handled ("))
+        // "Ignore" changes nothing else: that one did not happen at all.
+        let ignored = try XCTUnwrap(failure(.alertAction(alertID: alert.id, action: .ignore), signed))
+        XCTAssertTrue(L10n.alertActionError(ignored, alertID: alert.id, action: .ignore, kind: alert.kind, .en).hasPrefix("The daemon refused: "))
+    }
+
+    func testTask3VariantAnswerWithAReplyThisAppCannotRead() throws {
+        let id = try openQuestion()
+        // A daemon of another version takes the answer; its reply does not decode here.
+        let inner = signed!
+        let newer = FixedClient { request in
+            _ = try inner.send(request)
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "new field"))
+        }
+        let e = SnapshotFetcher.ipcError(try XCTUnwrap({ () -> Error? in
+            do { _ = try newer.call(.answerAsk(id: id, action: .keepBlocking)); return nil } catch { return error }
+        }()))
+        XCTAssertNil(core.askBroker.request(id: id), "it was taken")
+        // Not "the versions differ" alone, as if nothing had happened: the outcome is not known.
+        XCTAssertEqual(L10n.answerError(e, askID: id, action: .keepBlocking, .en), L10n.t(.answerReplyUnreadable, .en))
+        XCTAssertEqual(L10n.alertActionError(e, alertID: 1, action: .alwaysAllow, .zhHans), L10n.t(.answerReplyUnreadable, .zhHans))
+    }
+
     // MARK: - task-2-variant: a banner does not keep saying the path is hidden
 
     func testTask2VariantBannerShowsThePathOnceTheAppIsRecognised() throws {
