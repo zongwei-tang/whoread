@@ -189,6 +189,9 @@ final class SourceAuthCountsStatusTests: XCTestCase {
         XCTAssertEqual(c.warningLines.count, 3)
         XCTAssertTrue(c.warningLines[0].contains("1 access allowed too late"), c.warningLines[0])
         XCTAssertTrue(c.warningLines[0].contains("kernel denied it"), c.warningLines[0])
+        // Every AUTH access under a monitored folder is counted, but only one to a sensitive file becomes an
+        // event (a source file in a project root does not).
+        XCTAssertTrue(c.warningLines[0].contains("an access to a sensitive file is recorded as blocked"), c.warningLines[0])
         XCTAssertTrue(c.warningLines[1].contains("4 AUTH accesses dropped by the kernel"), c.warningLines[1])
         XCTAssertTrue(c.warningLines[1].contains("denied (fail-closed)"), c.warningLines[1])
         XCTAssertTrue(c.warningLines[2].contains("allowed (kill mode)"), c.warningLines[2])

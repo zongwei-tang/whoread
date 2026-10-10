@@ -259,7 +259,8 @@ public struct SourceAuthCounts: Codable, Sendable, Equatable {
         var out: [String] = []
         if lateDenied > 0 {
             out.append("  WARNING: \(lateDenied) access\(lateDenied == 1 ? "" : "es") allowed too late: the answer missed the AUTH "
-                       + "deadline and the kernel denied \(lateDenied == 1 ? "it" : "them") (recorded as blocked, by no rule)")
+                       + "deadline and the kernel denied \(lateDenied == 1 ? "it" : "them") (an access to a sensitive file is "
+                       + "recorded as blocked, by no rule)")
         }
         if droppedDenied > 0 {
             out.append("  WARNING: \(droppedDenied) AUTH access\(droppedDenied == 1 ? "" : "es") dropped by the kernel from a full "
