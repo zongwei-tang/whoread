@@ -145,10 +145,6 @@ public enum ArgvRedactor {
     static let wholeHeader = regex(#"(?i)^(\s*["']?(?:[a-z0-9_.\-]+=["']?)?)("# + headerNames + #")(\s*:\s*)\S.*?(["']?\s*)$"#)
     /// A quoted header inside a command line: `-H "Authorization: Bearer xyz"`.
     static let quotedHeader = regex(#"(?i)(["'])("# + headerNames + #")(\s*:\s*)[^"'\r\n]+"#)
-    /// `scheme://user:password@host`.
-    static let urlUserinfo = regex(#"(?i)\b([a-z][a-z0-9+.\-]*://[^/@\s:'"]*):([^/@\s'"]+)@"#)
-    /// `//user:password@host` with no scheme (`mount -t smbfs //bob:pw@nas/share`).
-    static let bareUserinfo = regex(#"(^|[\s='"(])(//[^/@\s:'"]+):([^/@\s'"]+)@"#)
     /// `scheme://<long token>@host`.
     static let urlTokenUserinfo = regex(#"(?i)\b([a-z][a-z0-9+.\-]*://)([^/@\s:'"]{20,})@"#)
     /// Key names that hold a secret, in JSON, Python dicts, YAML and JavaScript objects.
@@ -1137,8 +1133,7 @@ public enum ArgvRedactor {
                 return key + "=" + redactToken(value, depth: 1)
             }
         }
-        var s = replace(urlUserinfo, in: t, with: "$1:" + placeholder + "@")
-        s = replace(bareUserinfo, in: s, with: "$1$2:" + placeholder + "@")
+        var s = redactUserinfo(t)
         s = redactTokenUserinfo(s)
         s = replace(queryParam, in: s, with: "$1" + placeholder)
         s = replace(knownTokens, in: s, with: placeholder)
@@ -1221,6 +1216,64 @@ public enum ArgvRedactor {
               key[key.index(before: cap)].isLowercase else { return false }
         let word = key[cap...].lowercased()
         return referenceSuffixes.contains { $0.dropFirst() == word }
+    }
+
+    /// `scheme://user:password@host`, and `//user:password@host` with no scheme (`mount -t smbfs
+    /// //bob:pw@nas/share`): the password goes. Userinfo ends at the last "@" of the authority, so an
+    /// "@" in the password or an e-mail address as the user name is covered. A "/" in the password
+    /// ends the authority early (`bob:pa/ss@host`): when the authority is `user:x` with no "@" and x
+    /// is not a port, the password runs to the last "@" before the host's path.
+    static func redactUserinfo(_ s: String) -> String {
+        guard s.contains("//"), s.contains("@") else { return s }
+        let u = Array(s.unicodeScalars)
+        var secrets: [Range<Int>] = []
+        var k = 0
+        while k + 1 < u.count {
+            guard u[k] == "/", u[k + 1] == "/" else { k += 1; continue }
+            defer { k += 2 }
+            let bare = k == 0 || " \t\n='\"(".unicodeScalars.contains(u[k - 1])
+            guard bare || hasScheme(u, colon: k - 1) else { continue }
+            var end = k + 2
+            while end < u.count && !u[end].properties.isWhitespace && u[end] != "'" && u[end] != "\"" { end += 1 }
+            if let r = userinfoPassword(u, from: k + 2, to: end), secrets.last.map({ $0.upperBound <= r.lowerBound }) ?? true {
+                secrets.append(r)
+            }
+        }
+        guard !secrets.isEmpty else { return s }
+        var out = u
+        for r in secrets.reversed() { out.replaceSubrange(r, with: placeholder.unicodeScalars) }
+        return String(String.UnicodeScalarView(out))
+    }
+
+    /// `https:` ends at `colon`: a letter, then letters, digits, `+`, `-` or `.`.
+    static func hasScheme(_ u: [Unicode.Scalar], colon: Int) -> Bool {
+        guard colon > 0, u[colon] == ":" else { return false }
+        var j = colon
+        while j > 0, u[j - 1].isASCII, u[j - 1].properties.isAlphabetic || ("0"..."9").contains(u[j - 1]) || "+-.".unicodeScalars.contains(u[j - 1]) {
+            j -= 1
+        }
+        return j < colon && u[j].properties.isAlphabetic
+    }
+
+    /// The password of the URL whose authority starts at `start` (after `//`) and that ends at `end`.
+    static func userinfoPassword(_ u: [Unicode.Scalar], from start: Int, to end: Int) -> Range<Int>? {
+        func pathStart(_ from: Int) -> Int {
+            var j = from
+            while j < end && !"/?#".unicodeScalars.contains(u[j]) { j += 1 }
+            return j
+        }
+        let authority = pathStart(start)
+        if let at = (start..<authority).last(where: { u[$0] == "@" }) {
+            guard let colon = (start..<at).first(where: { u[$0] == ":" }), colon + 1 < at else { return nil }
+            return (colon + 1)..<at
+        }
+        // No "@" before the first "/": `user:pa/ss@host`, unless that is `host:port/…@…` or IPv6.
+        guard start < authority, u[start] != "[", let colon = (start..<authority).first(where: { u[$0] == ":" }) else { return nil }
+        let port = u[(colon + 1)..<authority]
+        guard !port.isEmpty, !port.allSatisfy({ ("0"..."9").contains($0) }) else { return nil }
+        guard let firstAt = (authority..<end).first(where: { u[$0] == "@" }),
+              let at = (firstAt..<pathStart(firstAt)).last(where: { u[$0] == "@" }) else { return nil }
+        return (colon + 1)..<at
     }
 
     static func redactTokenUserinfo(_ s: String) -> String {

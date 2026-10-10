@@ -230,4 +230,31 @@ final class RedactorCoverageTests: XCTestCase {
         // A backslash at the end of the value: the quote after it closes it.
         assertRedacted(["tool", "{\"password\":\"Hunter2pw\\\\\",\"user\":\"bob\"}"], ["tool", "{\"password\":\"\(R)\",\"user\":\"bob\"}"])
     }
+
+    // MARK: - URL userinfo
+
+    func testURLPasswordsContainingSlashOrAt() {
+        assertRedacted(["git", "clone", "https://bob:Hun/ter2pw@host/o/r.git"], ["git", "clone", "https://bob:\(R)@host/o/r.git"],
+                       secrets: ["ter2pw", "Hun/"])
+        assertRedacted(["git", "clone", "https://bob:Hun@ter2pw@host/o/r.git"], ["git", "clone", "https://bob:\(R)@host/o/r.git"],
+                       secrets: ["ter2pw"])
+        assertRedacted(["psql", "postgresql://app:Hun/ter@2pw@db.example.com:5432/prod"],
+                       ["psql", "postgresql://app:\(R)@db.example.com:5432/prod"], secrets: ["ter", "2pw"])
+        assertRedacted(["/bin/sh", "-c", "git clone 'https://bob:Hun@ter2pw@host/x' && ls"],
+                       ["/bin/sh", "-c", "git clone 'https://bob:\(R)@host/x' && ls"], secrets: ["ter2pw"])
+        assertRedacted(["redis-cli", "-u", "redis://:Hun@ter2pw@cache:6379/0"], ["redis-cli", "-u", "redis://:\(R)@cache:6379/0"],
+                       secrets: ["ter2pw"])
+        // A user name that is an e-mail address.
+        assertRedacted(["curl", "ftp://bob@example.com:Hunter2pw@ftp.example.com/f"], ["curl", "ftp://bob@example.com:\(R)@ftp.example.com/f"])
+        // No scheme (`mount -t smbfs //user:pw@host/share`).
+        assertRedacted(["mount", "-t", "smbfs", "//bob:Hun/ter2pw@nas/share", "/mnt/share"],
+                       ["mount", "-t", "smbfs", "//bob:\(R)@nas/share", "/mnt/share"], secrets: ["ter2pw"])
+        assertKept([
+            ["git", "clone", "ssh://git@github.com/o/r.git"], ["git", "clone", "git@github.com:o/r.git"],
+            ["npm", "view", "http://localhost:4873/@scope/pkg"], ["curl", "https://user@host:8443/x@y"],
+            ["curl", "https://medium.com/@user/post"], ["curl", "http://[::1]:8080/@x"], ["ls", "//server/share"],
+            ["curl", "https://host/path?next=a:b@c"], ["curl", "http://localhost:3000/users/@me"],
+            ["open", "https://example.com/search?q=a&page=2"], ["echo", "see // comment@here"],
+        ])
+    }
 }
