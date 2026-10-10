@@ -493,11 +493,24 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "{\n  echo '\(R)'\n} > ~/WhoReadTestVault/pgpass"])
         assertRedacted(["/bin/bash", "-c", "while true; do\n  python3 - <<EOF\ndone\nEOF\n  echo Hunter2pw\n  break\ndone > ~/WhoReadTestVault/n"],
                        ["/bin/bash", "-c", "while true; do\n  python3 - <<EOF\ndone\nEOF\n  echo \(R)\n  break\ndone > ~/WhoReadTestVault/n"])
-        // The list of a for loop is what its body writes.
+        // The list of a for loop is what its body writes. `"$l"` holds no text of its own and stays.
         assertRedacted(["/bin/sh", "-c", "for l in \(pg) 'x'; do echo \"$l\"; done >> ~/WhoReadTestVault/pgpass"],
-                       ["/bin/sh", "-c", "for l in '\(R)' '\(R)'; do echo \"\(R)\"; done >> ~/WhoReadTestVault/pgpass"])
+                       ["/bin/sh", "-c", "for l in '\(R)' '\(R)'; do echo \"$l\"; done >> ~/WhoReadTestVault/pgpass"])
         assertRedacted(["/bin/bash", "-c", "for l in \(pg)\ndo\n  echo \"$l\"\ndone > ~/WhoReadTestVault/pgpass"],
-                       ["/bin/bash", "-c", "for l in '\(R)'\ndo\n  echo \"\(R)\"\ndone > ~/WhoReadTestVault/pgpass"])
+                       ["/bin/bash", "-c", "for l in '\(R)'\ndo\n  echo \"$l\"\ndone > ~/WhoReadTestVault/pgpass"])
+        assertRedacted(["/bin/bash", "-c", "yes Hunter2pw | head -1 > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "yes \(R) | head -1 > ~/WhoReadTestVault/n"])
+        // The body writes the loop's variable itself (`echo "$l" >> FILE`, through a pipe, inside an `if`).
+        assertRedacted(["/bin/bash", "-c", "for l in 'db:5432:*:bob:Hunter2pw'; do echo \"$l\" >> ~/WhoReadTestVault/pgpass; done"],
+                       ["/bin/bash", "-c", "for l in '\(R)'; do echo \"$l\" >> ~/WhoReadTestVault/pgpass; done"])
+        assertRedacted(["/bin/bash", "-c", "for l in 'machine h' 'password Hunter2pw'; do echo \"$l\" | tee -a ~/WhoReadTestVault/netrc; done"],
+                       ["/bin/bash", "-c", "for l in '\(R)' '\(R)'; do echo \"$l\" | tee -a ~/WhoReadTestVault/netrc; done"])
+        assertRedacted(["/bin/bash", "-c", "for l in Hunter2pw; do\n  if true; then printf '%s\\n' \"$l\" > ~/WhoReadTestVault/n; fi\ndone"],
+                       ["/bin/bash", "-c", "for l in \(R); do\n  if true; then printf '\(R)' \"$l\" > ~/WhoReadTestVault/n; fi\ndone"])
+        assertKept([
+            ["/bin/bash", "-c", "for f in *.log; do gzip \"$f\"; done"], ["/bin/bash", "-c", "for f in a.txt b.txt; do wc -l \"$f\" >> counts.txt; done"],
+            ["/bin/bash", "-c", "for f in src/*.swift; do echo \"== $f\"; done"],
+        ])
         // A function body's redirect.
         assertRedacted(["/bin/bash", "-c", "f() { echo Hunter2pw; } > ~/WhoReadTestVault/n; f"],
                        ["/bin/bash", "-c", "f() { echo \(R); } > ~/WhoReadTestVault/n; f"])
@@ -543,7 +556,7 @@ final class RedactorCoverageTests: XCTestCase {
         assertRedacted(["/bin/bash", "-c", "cat <(echo \(pg)) > ~/WhoReadTestVault/pgpass"],
                        ["/bin/bash", "-c", "cat <(echo '\(R)') > ~/WhoReadTestVault/pgpass"])
         assertRedacted(["/bin/bash", "-c", "while read l; do echo \"$l\"; done < <(echo \(pg)) > ~/WhoReadTestVault/pgpass"],
-                       ["/bin/bash", "-c", "while read l; do echo \"\(R)\"; done < <(echo '\(R)') > ~/WhoReadTestVault/pgpass"])
+                       ["/bin/bash", "-c", "while read l; do echo \"$l\"; done < <(echo '\(R)') > ~/WhoReadTestVault/pgpass"])
         assertRedacted(["/bin/bash", "-c", "diff <(echo Hunter2pw) ~/WhoReadTestVault/n && curl -u admin:Hunter2pw https://x"],
                        ["/bin/bash", "-c", "diff <(echo \(R)) ~/WhoReadTestVault/n && curl -u admin:\(R) https://x"])
     }
@@ -575,25 +588,34 @@ final class RedactorCoverageTests: XCTestCase {
     }
 
     /// A variable set to a literal and then written (`PW='…'; echo "$PW" > FILE`, a heredoc body, a
-    /// here-string) holds what the file gets: its value is redacted with the data.
+    /// here-string) holds what the file gets: its value is redacted where it is set. The expansion
+    /// itself (`"$PW"`, `${PW}`) holds no text of its own and stays.
     func testVariablesWrittenAsData() {
         assertRedacted(["/bin/bash", "-c", "PW=\(pg)\necho \"machine h login bob password $PW\" >> ~/WhoReadTestVault/netrc"],
                        ["/bin/bash", "-c", "PW=\(R)\necho \"\(R)\" >> ~/WhoReadTestVault/netrc"])
         assertRedacted(["/bin/bash", "-c", "x=Hunter2pw; printf '%s\\n' \"$x\" | sudo tee ~/WhoReadTestVault/n"],
-                       ["/bin/bash", "-c", "x=\(R); printf '\(R)' \"\(R)\" | sudo tee ~/WhoReadTestVault/n"])
+                       ["/bin/bash", "-c", "x=\(R); printf '\(R)' \"$x\" | sudo tee ~/WhoReadTestVault/n"])
         assertRedacted(["/bin/bash", "-c", "export PW=Hunter2pw\ncat > ~/WhoReadTestVault/n <<EOF\npassword ${PW}\nEOF"],
-                       ["/bin/bash", "-c", "export PW=\(R)\ncat > ~/WhoReadTestVault/n <<EOF\n\(R) \(R)\nEOF"])
+                       ["/bin/bash", "-c", "export PW=\(R)\ncat > ~/WhoReadTestVault/n <<EOF\n\(R) ${PW}\nEOF"])
         assertRedacted(["/bin/bash", "-c", "v=Hunter2pw; tee ~/WhoReadTestVault/n <<< \"$v\""],
-                       ["/bin/bash", "-c", "v=\(R); tee ~/WhoReadTestVault/n <<< \"\(R)\""])
+                       ["/bin/bash", "-c", "v=\(R); tee ~/WhoReadTestVault/n <<< \"$v\""])
+        assertRedacted(["/bin/bash", "-c", "v=Hunter2pw; tee ~/WhoReadTestVault/n <<<$v"], ["/bin/bash", "-c", "v=\(R); tee ~/WhoReadTestVault/n <<<$v"])
         assertRedacted(["/bin/bash", "-c", "local v=Hunter2pw; echo $v>~/WhoReadTestVault/n"],
-                       ["/bin/bash", "-c", "local v=\(R); echo \(R)>~/WhoReadTestVault/n"])
+                       ["/bin/bash", "-c", "local v=\(R); echo $v>~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "v=Hunter2pw; for l in \"$v\"; do echo $l|tee ~/WhoReadTestVault/n; done"],
+                       ["/bin/bash", "-c", "v=\(R); for l in \"$v\"; do echo $l|tee ~/WhoReadTestVault/n; done"])
         assertKept([
             ["/bin/bash", "-c", "DIR=/tmp/x; ls \"$DIR\" > out.txt"], ["/bin/bash", "-c", "NAME=world; echo \"hello $NAME\""],
             ["/bin/bash", "-c", "v=Hunter2pw; cat \"$v\" > out.txt"],
+            // Another variable is another value, set outside the command line.
+            ["/bin/bash", "-c", "X=keep1; echo $Y > f"], ["/bin/bash", "-c", "while read l; do echo \"$l\"; done < a.txt > b.txt"],
+            ["/bin/bash", "-c", "echo \"$@\" > args.txt"], ["/bin/bash", "-c", "echo \"${HOME}\" \"$1\" | tee out.txt"],
         ])
-        // Single quotes do not expand; another variable is another value.
+        // Single quotes do not expand: '$X' is text. So are a default value and text next to the name.
         assertRedacted(["/bin/bash", "-c", "X=keep1; echo '$X' > f"], ["/bin/bash", "-c", "X=keep1; echo '\(R)' > f"], secrets: [])
-        assertRedacted(["/bin/bash", "-c", "X=keep1; echo $Y > f"], ["/bin/bash", "-c", "X=keep1; echo \(R) > f"], secrets: [])
+        assertRedacted(["/bin/bash", "-c", "echo \"${PW:-Hunter2pw}\" > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "echo \"\(R)\" > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "echo $1Hunter2pw > ~/WhoReadTestVault/n"], ["/bin/bash", "-c", "echo \(R) > ~/WhoReadTestVault/n"])
     }
 
     /// The command after `if`, `while`, `until`, `elif` and `!` is a program with its own rules.

@@ -299,10 +299,22 @@ public enum ArgvRedactor {
         // Shell variables set to a literal (`PW='x'`, `export PW=x`), by name: data that uses one
         // (`echo "$PW" > FILE`, a heredoc body) is what the value is, so the value goes too.
         var assignments: [String: [(index: Int, end: String)]] = [:]
-        func usedInData(_ word: String) {
-            guard shell, !assignments.isEmpty, word.contains("$"), !(isQuoted(word) && word.first == "'") else { return }
-            for name in variableReferences(in: word) {
+        func usedInData(_ word: String, seen: Set<String> = []) {
+            guard shell, !(assignments.isEmpty && groups.loopVariables.isEmpty), word.contains("$"),
+                  !(isQuoted(word) && word.first == "'") else { return }
+            for name in variableReferences(in: word) where !seen.contains(name) {
                 for a in assignments[name] ?? [] { out[a.index] = name + "=" + placeholder + a.end }
+                // `for l in 'pw'; do echo "$l" >> FILE; done`: the loop's words. One that is a variable
+                // itself (`for l in "$PW"`) passes the use on.
+                for k in groups.loopVariables[name] ?? [] {
+                    var core = tokens[k], end = ""
+                    while core.count > 1 && core.hasSuffix(";") && !core.hasSuffix("\\;") && !isQuoted(core) {
+                        core.removeLast()
+                        end += ";"
+                    }
+                    usedInData(core, seen: seen.union([name]))
+                    if !isExpansion(core) { out[k] = redactedData(core) + end }
+                }
             }
         }
         func resetCommand(at i: Int) {
@@ -347,7 +359,7 @@ public enum ArgvRedactor {
                     }
                     if h.redactBody {
                         usedInData(raw)
-                        out[i] = placeholder
+                        if !isExpansion(raw) { out[i] = placeholder }
                         continue
                     }
                     // A script read from the heredoc (`python3 - <<EOF`): its lines are words with no
@@ -404,7 +416,7 @@ public enum ArgvRedactor {
             // `for l in 'pw'; do echo "$l"; done > FILE`: the loop's words are what it writes.
             if groups.loopData.contains(i) {
                 usedInData(word)
-                emit(placeholder)
+                if !isExpansion(word) { emit(placeholder) }
                 continue
             }
 
@@ -416,9 +428,15 @@ public enum ArgvRedactor {
                 continue
             }
             // A here-string is data, whatever it holds: `<<<'machine … password x'` is one word with
-            // spaces in it.
+            // spaces in it. Only a variable's expansion (`<<< "$PW"`) is kept, as everywhere data is.
             if shell && quote.isEmpty && t.hasPrefix("<<<") {
-                if t.count > 3 { usedInData(String(t.dropFirst(3))); emit("<<<" + placeholder) } else { hereString = true }
+                let data = String(t.dropFirst(3))
+                if data.isEmpty {
+                    hereString = true
+                } else {
+                    usedInData(data)
+                    if !isExpansion(data) { emit("<<<" + placeholder) }
+                }
                 continue
             }
             let shellWord = shell && quote.isEmpty && !t.contains(where: \.isWhitespace)
@@ -431,7 +449,7 @@ public enum ArgvRedactor {
             if hereString {
                 hereString = false
                 usedInData(word)
-                emit(placeholder)
+                if !isExpansion(word) { emit(placeholder) }
                 continue
             }
             // `cat <(echo pw)`: a command of its own whose output goes into a pipe.
@@ -444,7 +462,7 @@ public enum ArgvRedactor {
             if shellWord, let r = redirect(in: t) {
                 if dataMode && !r.data.isEmpty {
                     usedInData(r.data)
-                    out[i] = placeholder + r.operatorAndTarget + suffix
+                    out[i] = (isExpansion(r.data) ? r.data : placeholder) + r.operatorAndTarget + suffix
                 } else if !r.data.isEmpty {
                     out[i] = redactToken(r.data) + r.operatorAndTarget + suffix
                 }
@@ -464,15 +482,17 @@ public enum ArgvRedactor {
                 if quote.isEmpty, let pipe = unquotedPipe(in: t) {
                     let before = String(t[..<pipe.lowerBound]), after = String(t[pipe.upperBound...])
                     usedInData(before)
-                    out[i] = (before.isEmpty ? "" : redactedData(before)) + String(t[pipe]) + redactToken(after) + suffix
+                    out[i] = (before.isEmpty || isExpansion(before) ? before : redactedData(before)) + String(t[pipe]) + redactToken(after) + suffix
                     resetCommand(at: i + 1)
                     if !after.isEmpty && !after.contains("=") { startProgram(basename(after), at: i) }
                     continue
                 }
-                // `(echo pw) > FILE`: the subshell's closing parenthesis is not data.
+                // `(echo pw) > FILE`: the subshell's closing parenthesis is not data. A variable's
+                // expansion (`echo "$l"`) holds no text of its own.
                 usedInData(word)
                 let parens = quote.isEmpty ? closingParentheses(in: t) : 0
-                emit(parens == t.count ? t : redactedData(String(t.dropLast(parens))) + String(repeating: ")", count: parens))
+                let data = String(t.dropLast(parens))
+                emit(parens == t.count || isExpansion(quote + data + quote) ? t : redactedData(data) + String(repeating: ")", count: parens))
                 continue
             }
 
@@ -827,8 +847,35 @@ public enum ArgvRedactor {
         return quote + placeholder + quote
     }
 
-    /// Programs whose words are data (`echo pw > FILE`, `printf … | git credential approve`).
-    static let dataWriters: Set<String> = ["echo", "printf", "print"]
+    /// Programs whose words are data (`echo pw > FILE`, `printf … | git credential approve`, `yes pw |
+    /// head -1 > FILE`).
+    static let dataWriters: Set<String> = ["echo", "printf", "print", "yes"]
+
+    /// A word that only expands variables (`$x`, `"${PW}"`, `"$a$b"`, `"$@"`): it holds no text of its
+    /// own, so it is kept where data is redacted. A variable set to a literal is redacted where it is
+    /// set (`usedInData`); `${PW:-x}`, `'$PW'` and `$PW.bak` hold text and are not this.
+    static func isExpansion(_ word: String) -> Bool {
+        var rest = Substring(word.filter { $0 != "\"" })
+        guard !rest.isEmpty else { return false }
+        func isNameCharacter(_ c: Character) -> Bool { c.isASCII && (c.isLetter || c.isNumber || c == "_") }
+        while let first = rest.first {
+            guard first == "$" else { return false }
+            rest = rest.dropFirst()
+            let braced = rest.first == "{"
+            if braced { rest = rest.dropFirst() }
+            var name = rest.prefix(while: isNameCharacter)
+            // `$1x` is `$1` and the text `x`; `$@`, `$#` and the other special parameters are one character.
+            if let digit = name.first, digit.isNumber { name = name.prefix(1) }
+            if name.isEmpty, let c = rest.first, "@*#?$!-".contains(c) { name = rest.prefix(1) }
+            guard !name.isEmpty else { return false }
+            rest = rest.dropFirst(name.count)
+            if braced {
+                guard rest.first == "}" else { return false }
+                rest = rest.dropFirst()
+            }
+        }
+        return true
+    }
     /// Builtins that set shell variables (`export PW=x`).
     static let declarations: Set<String> = ["export", "local", "declare", "typeset", "readonly"]
 
@@ -896,6 +943,9 @@ public enum ArgvRedactor {
         var commandStarts = Set<Int>()
         /// Words that end a process substitution (`pw)` in `cat <(echo pw) FILE`).
         var substitutionEnds = Set<Int>()
+        /// The words a `for` loop's variable takes, by its name: data that uses the variable (`for l in
+        /// 'pw'; do echo "$l" >> FILE; done`) is what they are.
+        var loopVariables: [String: [Int]] = [:]
     }
 
     /// Finds the compound commands of a command line: `{ … }`, `( … )`, `$( … )`, `<( … )`, loops,
@@ -911,6 +961,8 @@ public enum ArgvRedactor {
             /// `for NAME in WORDS`: 1 after `for`, 2 after the name, 3 in the words.
             var listState = 0
             var list: [Int] = []
+            /// NAME in `for NAME in WORDS`.
+            var variable: String?
             /// The body of `NAME() { … }` or `function NAME { … }`.
             var function: String?
         }
@@ -928,6 +980,7 @@ public enum ArgvRedactor {
 
         func close(_ frame: Frame, at end: Int, tail: String) {
             if let name = frame.function { functions[name] = frame.start...end }
+            if let name = frame.variable, !frame.list.isEmpty { result.loopVariables[name, default: []] += frame.list }
             guard frame.kind != .capture else { return }
             guard frame.kind == .substitution || outputLeaves(tokens, after: end, tail: tail, lineStarts: lineStarts) else { return }
             result.redirected.formUnion(frame.start...end)
@@ -998,7 +1051,7 @@ public enum ArgvRedactor {
             // The words of `for NAME in WORDS`.
             if let top = stack.last, top.kind == .loop, top.listState > 0 && !atCommand {
                 switch top.listState {
-                case 1: stack[stack.count - 1].listState = 2
+                case 1: stack[stack.count - 1].listState = 2; stack[stack.count - 1].variable = word
                 case 2: stack[stack.count - 1].listState = word == "in" ? 3 : 0
                 default: stack[stack.count - 1].list.append(k)
                 }
