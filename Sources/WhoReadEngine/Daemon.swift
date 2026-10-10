@@ -46,13 +46,21 @@ public final class Daemon: @unchecked Sendable {
         ServiceHandler(daemon: core, policy: .permissive)
     }
 
-    /// flock on `daemon.lock` in the data directory; -1 for in-memory stores.
+    /// flock on `daemon.lock` in the data directory; -1 for in-memory stores. The directory is checked
+    /// first (DaemonCore.prepareDataDirectory): a lock in a directory someone else controls proves nothing.
     static func acquireLock(_ config: DaemonConfiguration) throws -> Int32 {
         guard !config.inMemoryStore else { return -1 }
-        try FileManager.default.createDirectory(atPath: config.dataDirectory, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o755])
-        let fd = open(config.lockPath, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { throw IPCError(.internalError, "cannot open \(config.lockPath)") }
+        try DaemonCore.prepareDataDirectory(config)
+        let fd = open(config.lockPath, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            throw IPCError(.internalError, "cannot open \(config.lockPath): \(String(cString: strerror(errno)))")
+        }
+        var st = stat()
+        guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG, st.st_uid == config.dataDirectoryOwner else {
+            close(fd)
+            throw IPCError(.unavailable, "\(config.lockPath) is not a regular file owned by "
+                           + "\(TrustedDirectory.ownerName(config.dataDirectoryOwner)); remove it")
+        }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             close(fd)
             throw IPCError(.unavailable, "another WhoRead daemon already uses \(config.dataDirectory) "
@@ -98,18 +106,25 @@ public final class Daemon: @unchecked Sendable {
             xpcServer = server
             // Lets the CLI find the service without flags (world-readable, not secret).
             let marker = (config.dataDirectory as NSString).appendingPathComponent("mach-service")
-            do { try SafeFile.replace(marker, with: Data((name + "\n").utf8), mode: 0o644) } catch { Log.warning("\(error)") }
+            do {
+                try SafeFile.replace(marker, with: Data((name + "\n").utf8), mode: 0o644,
+                                     trustedDirectoryOwner: config.dataDirectoryOwner)
+            } catch {
+                Log.warning("\(error)")
+            }
             Log.info("XPC listener on \(name)")
         }
         #endif
 
         let classifier = core.analyzer.classifier
         Log.info("WhoRead \(WhoReadVersion.string) starting: source=\(core.source.kind.rawValue), homes=\(core.homes), \(classifier.prefixes.count) monitored prefixes, \(core.rules.rules.filter(\.enabled).count) enabled rules")
-        try core.source.start(sink: core.pipeline)
+        // The pipeline, plus a prompt link rediscovery after operations that may change a followed link.
+        try core.source.start(sink: core.eventSink)
     }
 
     public func stop() {
         core.source.stop()
+        core.cancelPendingLinkRediscovery()
         timers.forEach { $0.cancel() }
         timers.removeAll()
         killSwitch.stop()

@@ -5,6 +5,10 @@ import WhoReadStore
 
 public struct DaemonConfiguration: Sendable {
     public var dataDirectory: String = WhoReadPaths.dataDirectory
+    /// The only user who may be able to change the data directory and the kill switch's directory
+    /// (and every directory on the way to them): the daemon's own user, so root for the system
+    /// extension and the LaunchDaemon. Tests running as a user get theirs.
+    public var dataDirectoryOwner: uid_t = geteuid()
     /// Directory with catalog.json / agents.json / benign.json defaults. nil = search.
     public var defaultsDirectory: String?
     public var source: SourceKind = .eslogger
@@ -31,6 +35,10 @@ public struct DaemonConfiguration: Sendable {
     public var resolveOwners = true
     /// How often home directories and symlinked prefixes are re-discovered.
     public var rediscoveryInterval: TimeInterval = 300
+    /// How long after an operation that may have added, replaced or removed a followed link (a create,
+    /// rename or unlink in a monitored dotfile directory) the links are re-discovered (files-9). Also
+    /// the shortest interval between two such runs.
+    public var linkRediscoveryDelay: TimeInterval = 1.5
 
     public init() {}
 
@@ -47,6 +55,214 @@ public struct DaemonConfiguration: Sendable {
     /// reported (`DaemonStatus.uncleanStop`); enforcement stays as the user set it.
     public var authArmedMarkerPath: String { (dataDirectory as NSString).appendingPathComponent("auth-armed") }
     public var lockPath: String { (dataDirectory as NSString).appendingPathComponent("daemon.lock") }
+}
+
+/// Why a directory the daemon keeps its state in (or one on the way to it) may be changed by someone
+/// other than the daemon's user, and what to do about it.
+struct UntrustedDirectory: Error, CustomStringConvertible {
+    let path: String
+    let reason: String
+    let fix: String
+    var description: String { "\(path) \(reason)" }
+}
+
+/// Directory checks for the daemon's own state (macos-4). A directory is trusted when only its owner
+/// (the daemon's user, root in production) and root can add, rename or remove its entries, and every
+/// directory on the way to it is trusted in the same way, or is sticky like /private/tmp (others may
+/// add entries there, but not move ours).
+enum TrustedDirectory {
+    /// Creates `dir` with `mode` if needed (missing parents with 0755, like `mkdir -p`), then checks it:
+    /// a real directory (never a link), owned by `owner`, not writable by group or others, and reached
+    /// only through trusted directories. An existing directory is never adopted by changing its owner
+    /// or mode: it is refused. `confidential` (the data directory: every user's history): no ACL entry
+    /// may grant anyone anything either, e.g. `allow read,file_inherit`, which new 0600 files inherit.
+    static func ensure(_ path: String, owner: uid_t, mode: mode_t, confidential: Bool = false) throws {
+        // A trailing slash would make open(2) follow a link at the last component despite O_NOFOLLOW.
+        let dir = PathClassifier.stripTrailingSlash(path)
+        let parent = TrustedDirectory.parent(of: dir)
+        try createMissing(parent)
+        if let problem = untrustedAncestor(of: dir, owner: owner) { throw problem }
+        var created = false
+        if mkdir(dir, mode) == 0 {
+            created = true
+        } else if errno != EEXIST {
+            throw UntrustedDirectory(path: dir, reason: "cannot be created: \(String(cString: strerror(errno)))", fix: "")
+        }
+        // O_NOFOLLOW|O_DIRECTORY: the checks below are about this very directory, not a link's target.
+        let fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            let e = errno
+            if e == ELOOP || e == ENOTDIR {
+                throw UntrustedDirectory(path: dir, reason: "is a symbolic link or not a directory",
+                                         fix: "remove '\(dir)' (sudo rm '\(dir)')")
+            }
+            throw UntrustedDirectory(path: dir, reason: "cannot be opened: \(String(cString: strerror(e)))", fix: "")
+        }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else {
+            throw UntrustedDirectory(path: dir, reason: "cannot be inspected: \(String(cString: strerror(errno)))", fix: "")
+        }
+        guard st.st_uid == owner else {
+            throw UntrustedDirectory(path: dir, reason: "is owned by uid \(st.st_uid), not \(ownerName(owner))",
+                                     fix: chownFix(dir, owner: owner))
+        }
+        // Created just now: the umask may have narrowed it (the CLI and the app read `mach-service` here).
+        if created && (st.st_mode & 0o7777) != mode && fchmod(fd, mode) == 0 { st.st_mode = (st.st_mode & ~0o7777) | mode }
+        guard st.st_mode & 0o022 == 0 else {
+            throw UntrustedDirectory(path: dir, reason: "is writable by group or others (mode \(String(st.st_mode & 0o7777, radix: 8)))",
+                                     fix: "check its contents, then sudo chmod go-w '\(dir)'")
+        }
+        // Mode bits do not show an ACL: `chmod +a "everyone allow add_file,delete_child"` on a 0755 directory.
+        guard !SafeFile.aclAllows(fd: fd, changing: true) else {
+            throw UntrustedDirectory(path: dir, reason: aclReason, fix: aclFix(dir))
+        }
+        guard !confidential || !SafeFile.aclAllows(fd: fd, changing: false) else {
+            throw UntrustedDirectory(path: dir, reason: "has an access control list that lets others in", fix: aclFix(dir))
+        }
+    }
+
+    /// The first directory on the way to `path` (`path` itself excluded) that someone other than `owner`
+    /// or root could rename or replace entries in. Links on the way are followed (at most 32): the
+    /// directory holding a link and every directory its target goes through are checked.
+    static func untrustedAncestor(of path: String, owner: uid_t) -> UntrustedDirectory? {
+        // Components still to walk, last one first (a link's target is pushed in front of the rest).
+        var pending = Array(DaemonCore.absolutePath(TrustedDirectory.parent(of: path)).split(separator: "/").map(String.init).reversed())
+        var current = "/"
+        var links = 0
+        var st = stat()
+        guard lstat("/", &st) == 0 else { return UntrustedDirectory(path: "/", reason: "cannot be inspected", fix: "") }
+        if let reason = ancestorProblem("/", st, owner: owner) { return UntrustedDirectory(path: "/", reason: reason, fix: "") }
+        while let name = pending.popLast() {
+            if name.isEmpty || name == "." { continue }
+            if name == ".." {
+                current = TrustedDirectory.parent(of: current)
+                continue
+            }
+            let next = current == "/" ? "/" + name : current + "/" + name
+            guard lstat(next, &st) == 0 else {
+                return UntrustedDirectory(path: next, reason: "cannot be inspected: \(String(cString: strerror(errno)))", fix: "")
+            }
+            switch st.st_mode & S_IFMT {
+            case S_IFLNK:
+                links += 1
+                guard links <= 32, let target = readLink(next) else {
+                    return UntrustedDirectory(path: next, reason: "is a link that cannot be followed", fix: "")
+                }
+                if target.hasPrefix("/") { current = "/" }
+                pending.append(contentsOf: target.split(separator: "/").map(String.init).reversed())
+            case S_IFDIR:
+                if let reason = ancestorProblem(next, st, owner: owner) {
+                    return UntrustedDirectory(path: next, reason: reason, fix: reason == aclReason ? aclFix(next)
+                                              : "make it writable by root only (sudo chown root '\(next)' && sudo chmod go-w '\(next)')")
+                }
+                current = next
+            default:
+                return UntrustedDirectory(path: next, reason: "is not a directory", fix: "")
+            }
+        }
+        return nil
+    }
+
+    /// Why a directory on the way lets others than `owner` and root move its entries, or nil.
+    static func ancestorProblem(_ path: String, _ st: stat, owner: uid_t) -> String? {
+        if st.st_uid != 0 && st.st_uid != owner { return "is owned by uid \(st.st_uid), not \(ownerName(owner)) or root" }
+        if st.st_mode & 0o022 != 0 && st.st_mode & S_ISVTX == 0 {
+            return "is writable by group or others (mode \(String(st.st_mode & 0o7777, radix: 8)))"
+        }
+        // Also when sticky: an ACL's delete_child is not limited by the sticky bit.
+        if SafeFile.aclAllows(path: path, changing: true) { return aclReason }
+        return nil
+    }
+
+    static let aclReason = "has an access control list that lets others add, remove or rename its entries"
+
+    private static func aclFix(_ dir: String) -> String {
+        "check its contents and ls -led '\(dir)', then remove those entries (sudo chmod -N '\(dir)' removes the whole list)"
+    }
+
+    static func ownerName(_ owner: uid_t) -> String { owner == 0 ? "root" : "uid \(owner)" }
+
+    /// Not `chown -R`: that would adopt whatever its owner left in it (rules, a catalog, links), which
+    /// then looks like the daemon's own.
+    private static func chownFix(_ dir: String, owner: uid_t) -> String {
+        "move it aside (sudo mv '\(dir)' '\(dir).untrusted') so a fresh one is created; whoever made it may have left "
+            + "rules, a catalog or links in it"
+    }
+
+    /// The first entry in `dir`, or in a directory below it (`defaults/` holds catalog defaults), that
+    /// someone other than `owner` may have put there or may still change: a link (state files are
+    /// opened by path, so a link would take them elsewhere), another user's entry, a file with more
+    /// than one name, an entry others can write (mode or ACL), or one an ACL lets others read. `dir`
+    /// itself must already be trusted. A directory that someone else controlled before an
+    /// administrator fixed its owner or mode (`chmod go-w`, `chmod -N`) may still hold what they left
+    /// (macos-4).
+    static func untrustedEntry(in dir: String, owner: uid_t, maxEntries: Int = 4096) -> UntrustedDirectory? {
+        var seen = 0
+        func check(_ d: String, _ depth: Int) -> UntrustedDirectory? {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: d) else {
+                return UntrustedDirectory(path: d, reason: "cannot be listed", fix: "")
+            }
+            for name in names.sorted() {
+                seen += 1
+                let p = d + "/" + name
+                guard seen <= maxEntries, depth <= 4 else {
+                    return UntrustedDirectory(path: dir, reason: "holds more (or deeper) entries than the daemon ever creates",
+                                              fix: chownFix(dir, owner: owner))
+                }
+                var st = stat()
+                guard lstat(p, &st) == 0 else { return UntrustedDirectory(path: p, reason: "cannot be inspected", fix: "") }
+                let type = st.st_mode & S_IFMT
+                let reason: String?
+                if type == S_IFLNK {
+                    reason = "is a symbolic link"
+                } else if st.st_uid != owner {
+                    reason = "is owned by uid \(st.st_uid), not \(ownerName(owner))"
+                } else if type == S_IFREG && st.st_nlink != 1 {
+                    reason = "has \(st.st_nlink) hard links"
+                } else if st.st_mode & 0o022 != 0 {
+                    reason = "is writable by group or others (mode \(String(st.st_mode & 0o7777, radix: 8)))"
+                } else if SafeFile.aclAllows(path: p, changing: false) {
+                    // Read too: the database and the catalog copy are 0600 for a reason.
+                    reason = "has an access control list that lets others in"
+                } else {
+                    reason = nil
+                }
+                if let reason {
+                    return UntrustedDirectory(path: p, reason: reason, fix: "check it and remove it, or "
+                                              + "move the whole directory aside (sudo mv '\(dir)' '\(dir).untrusted')")
+                }
+                if type == S_IFDIR, let problem = check(p, depth + 1) { return problem }
+            }
+            return nil
+        }
+        return check(PathClassifier.stripTrailingSlash(dir), 1)
+    }
+
+    /// `mkdir -p` for the directories above the one being checked (the check then covers them).
+    private static func createMissing(_ dir: String) throws {
+        var st = stat()
+        if stat(dir, &st) == 0 { return }
+        let up = TrustedDirectory.parent(of: dir)
+        if up != dir { try createMissing(up) }
+        if mkdir(dir, 0o755) != 0 && errno != EEXIST {
+            throw UntrustedDirectory(path: dir, reason: "cannot be created: \(String(cString: strerror(errno)))", fix: "")
+        }
+    }
+
+    /// `dirname` for absolute or relative paths ("." for a bare name).
+    static func parent(of path: String) -> String {
+        let p = (path as NSString).deletingLastPathComponent
+        return p.isEmpty ? "." : p
+    }
+
+    static func readLink(_ path: String) -> String? {
+        var buf = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        let n = readlink(path, &buf, buf.count - 1)
+        guard n > 0 else { return nil }
+        buf[n] = 0
+        return String(cString: buf)
+    }
 }
 
 /// A value shared with closures created before `self` exists (the process tree's normalizer).
@@ -102,6 +318,16 @@ public final class DaemonCore: @unchecked Sendable {
     private let normalizerBox: LockedBox<PathNormalizer>
     private var lastRetention = Date.distantPast
     private var lastRediscovery = Date()
+    /// Where an operation may change a followed link, for the current classifier (files-9).
+    private let linkWatch: LockedBox<LinkWatch>
+    private let linkSink: LinkWatchingSink
+    private let linkQueue = DispatchQueue(label: "whoread.links")
+    /// Guarded by `lock`: a run is scheduled; the generation drops runs scheduled before a cancel.
+    private var linkRediscoveryPending = false
+    private var linkRediscoveryGeneration = 0
+    private var pendingLinkChanges: [LinkChange] = []
+    private var pendingLinkOverflow = false
+    private var _linkRediscoveryRuns = 0
     private var rulesLoadError: String?
     /// The previous instance stopped while enforcing; kept (and stored) until the next clean stop.
     private var uncleanStopNote: String?
@@ -125,6 +351,10 @@ public final class DaemonCore: @unchecked Sendable {
     /// Tests only: runs in `rediscover` between building the new classifier and installing it.
     var rediscoveryHook: (() -> Void)?
 
+    /// What the event source delivers to: the pipeline, plus a look at operations that may add, replace
+    /// or remove a link the classifier follows (files-9).
+    public var eventSink: EventSink { linkSink }
+
     /// Rules or enforcement changed: the native source clears the ES cache.
     public var onPolicyChanged: (@Sendable () -> Void)?
     /// New or escalated alert (after it was queued for storage).
@@ -146,10 +376,7 @@ public final class DaemonCore: @unchecked Sendable {
         self.config = config
         let now = Date()
 
-        if !config.inMemoryStore {
-            try FileManager.default.createDirectory(atPath: config.dataDirectory, withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o755])
-        }
+        try DaemonCore.prepareDataDirectory(config)
         store = config.inMemoryStore ? InMemoryEventStore() : try SQLiteEventStore(path: config.databasePath)
 
         let (defaults, dir) = try DefaultData.locate(explicit: config.defaultsDirectory,
@@ -228,8 +455,10 @@ public final class DaemonCore: @unchecked Sendable {
         // deadline, it crashed, or the Mac lost power. Enforcement is never switched off automatically
         // (ask mode): it stays as the user set it, and the stop is reported until the next clean stop.
         var unclean = (try? store.value(forKey: DaemonCore.uncleanStopKey))?.flatMap { String(data: $0, encoding: .utf8) }
-        if !config.inMemoryStore, FileManager.default.fileExists(atPath: config.authArmedMarkerPath) {
-            try? FileManager.default.removeItem(atPath: config.authArmedMarkerPath)
+        var marker = stat()
+        if !config.inMemoryStore, lstat(config.authArmedMarkerPath, &marker) == 0 {
+            // unlink, not removeItem: never a recursive delete, and a link goes, not its target.
+            unlink(config.authArmedMarkerPath)
             let note = "the previous daemon stopped while enforcing (killed for a missed AUTH deadline, a crash or a power loss); "
                 + "found at start \(ISO8601DateFormatter().string(from: now))"
             unclean = note
@@ -249,6 +478,8 @@ public final class DaemonCore: @unchecked Sendable {
         writer = EventWriter(store: store)
         live = LiveBuffer()
         pipeline = EventPipeline(analyzer: analyzer, writer: writer, live: live)
+        linkSink = LinkWatchingSink(pipeline: pipeline)
+        linkWatch = LockedBox(LinkWatch(classifier))
         // Question ids never repeat across daemon instances: an answer meant for a question of the
         // previous instance (an old banner, a typed id) must not land on a new question.
         askBroker = AskBroker(firstID: Int64(Date().timeIntervalSince1970 * 1000))
@@ -262,6 +493,7 @@ public final class DaemonCore: @unchecked Sendable {
             if let e = state.error { Log.warning("source: \(e)" + (state.hint.map { " — \($0)" } ?? "")) }
         }
         writer.onError = { Log.error("store write failed: \($0)") }
+        linkSink.core = self
 
         source = try (makeSource ?? DaemonCore.defaultSource)(self)
         enforcement.setSourceCanEnforce(source.canEnforce)
@@ -289,6 +521,31 @@ public final class DaemonCore: @unchecked Sendable {
         return FileManager.default.currentDirectoryPath + "/" + p
     }
 
+    /// Creates the data directory (0755: the CLI and the app read `mach-service` there) and the kill
+    /// switch's directory if needed, and refuses to start unless only the daemon's user can change them
+    /// (macos-4). They hold the rules database, the catalog copy, the auth-armed marker and the kill
+    /// switch: whoever can write there can switch enforcement off or rewrite the rules. A directory made
+    /// by someone else is refused, never adopted or moved aside (that would drop the user's rules).
+    static func prepareDataDirectory(_ config: DaemonConfiguration) throws {
+        guard !config.inMemoryStore else { return }
+        let owner = config.dataDirectoryOwner
+        let places = [("data directory", config.dataDirectory),
+                      ("kill switch directory", TrustedDirectory.parent(of: config.resolvedKillSwitchPath))]
+        for (what, dir) in places {
+            do {
+                try TrustedDirectory.ensure(dir, owner: owner, mode: 0o755, confidential: what == "data directory")
+                // Its state files are opened by path: what is in it must be the daemon's own too.
+                if what == "data directory", let problem = TrustedDirectory.untrustedEntry(in: dir, owner: owner) {
+                    throw problem
+                }
+            } catch let problem as UntrustedDirectory {
+                throw IPCError(.unavailable, "refusing to use the \(what) \(dir): \(problem). Only "
+                               + "\(TrustedDirectory.ownerName(owner)) may be able to change it (it holds the rules, the "
+                               + "kill switch and the auth-armed marker)" + (problem.fix.isEmpty ? "" : "; \(problem.fix)"))
+            }
+        }
+    }
+
     static func defaultSource(_ core: DaemonCore) throws -> EventSource {
         // Every byte-distinct spelling: ES compares VFS paths, the eslogger prefilter compares bytes.
         let prefixes = core.analyzer.classifier.mutePaths
@@ -309,7 +566,7 @@ public final class DaemonCore: @unchecked Sendable {
 
     static func makeClassifier(catalog: Catalog, normalizer: PathNormalizer, settings: Settings, resolveSymlinks: Bool) -> PathClassifier {
         PathClassifier(catalog: catalog, normalizer: normalizer, projectRoots: settings.projectRoots,
-                       symlinks: resolveSymlinks ? RealpathSymlinkResolver() : NoSymlinkResolver())
+                       symlinks: resolveSymlinks ? LinkFollowingResolver() : NoSymlinkResolver())
     }
 
     /// Owner team / signing IDs from `codesign -dv` of the apps installed here (brief §3). Third-party
@@ -634,8 +891,10 @@ public final class DaemonCore: @unchecked Sendable {
 
     static func writeUserCatalog(_ catalog: Catalog, base: Catalog, config: DaemonConfiguration) {
         do {
-            try SafeFile.replace(config.userCatalogPath, with: catalog.encoded(), mode: 0o600)
-            try SafeFile.replace(config.userCatalogBasePath, with: base.encoded(), mode: 0o600)
+            try SafeFile.replace(config.userCatalogPath, with: catalog.encoded(), mode: 0o600,
+                                 trustedDirectoryOwner: config.dataDirectoryOwner)
+            try SafeFile.replace(config.userCatalogBasePath, with: base.encoded(), mode: 0o600,
+                                 trustedDirectoryOwner: config.dataDirectoryOwner)
         } catch {
             Log.error("could not write the user catalog: \(error)")
         }
@@ -1089,8 +1348,10 @@ public final class DaemonCore: @unchecked Sendable {
                 try? FileManager.default.removeItem(atPath: config.userCatalogPath)
                 try? FileManager.default.removeItem(atPath: config.userCatalogBasePath)
             } else {
-                try SafeFile.replace(config.userCatalogPath, with: c.encoded(), mode: 0o600)
-                try SafeFile.replace(config.userCatalogBasePath, with: defaultCatalog.encoded(), mode: 0o600)
+                try SafeFile.replace(config.userCatalogPath, with: c.encoded(), mode: 0o600,
+                                     trustedDirectoryOwner: config.dataDirectoryOwner)
+                try SafeFile.replace(config.userCatalogBasePath, with: defaultCatalog.encoded(), mode: 0o600,
+                                     trustedDirectoryOwner: config.dataDirectoryOwner)
             }
         }
         lock.lock()
@@ -1114,6 +1375,7 @@ public final class DaemonCore: @unchecked Sendable {
     }
 
     private func install(classifier c: PathClassifier, readdir: Bool) {
+        linkWatch.value = LinkWatch(c)
         analyzer.replace(classifier: c)
         source?.updateMonitoring(prefixes: c.mutePaths, ancestors: c.ancestors, readdir: readdir)
         policyChanged()
@@ -1121,11 +1383,12 @@ public final class DaemonCore: @unchecked Sendable {
 
     /// Homes come and go (new users, network homes) and symlinks inside monitored directories change
     /// (dotfile managers). Rebuilds the classifier only when the monitored set actually changed.
-    func rediscover() {
+    /// `includingHomes: false` (a link may have changed, files-9) skips the user database.
+    func rediscover(includingHomes: Bool = true) {
         // Discovery reads the user database without any lock; the rebuild runs under the mutation
         // lock so it cannot install a classifier built from a catalog or settings that a concurrent
         // update(catalog:) / update(settings:) has just replaced.
-        let found = config.homeDirectories == nil ? HomeDirectories.discover() : nil
+        let found = includingHomes && config.homeDirectories == nil ? HomeDirectories.discover() : nil
         mutation.lock(); defer { mutation.unlock() }
         if let found {
             lock.lock()
@@ -1149,6 +1412,91 @@ public final class DaemonCore: @unchecked Sendable {
             Log.info("monitored paths changed: \(current.mutePaths.count) → \(candidate.mutePaths.count) spellings")
             install(classifier: candidate, readdir: s.readdirEnabled)
         }
+    }
+
+    // MARK: - Link changes (files-9)
+
+    /// A path a file operation touched where a followed link may have changed.
+    struct LinkChange: Equatable {
+        var operation: FileOperation
+        var role: TargetRole
+        /// Normalized.
+        var path: String
+    }
+
+    /// A file operation the source reported (any thread, possibly right after the ES callback: memory
+    /// only). A create, rename, clone, copy, link or unlink at a monitored prefix or ancestor, or inside
+    /// a directory searched for links, may have added, replaced or removed a link the classifier
+    /// follows: ES then reports accesses at a target that is not monitored until links are
+    /// re-discovered. Instead of waiting up to `rediscoveryInterval`, the paths are looked at
+    /// `linkRediscoveryDelay` later, off the event path, and links are re-discovered when one of them
+    /// is a link now or was a followed one (coalesced: one look per delay at most, which bounds the
+    /// cost of a flood).
+    func noteFileOperation(_ activity: FileActivity) {
+        switch activity.operation {
+        case .create, .rename, .clone, .copyfile, .link, .unlink: break
+        default: return
+        }
+        let watch = linkWatch.value
+        let changes = activity.targets.compactMap { t -> LinkChange? in
+            let path = watch.normalizer.normalize(t.path)
+            return watch.covers(path) ? LinkChange(operation: activity.operation, role: t.role, path: path) : nil
+        }
+        guard !changes.isEmpty else { return }
+        lock.lock()
+        // Bounded: past that, links are re-discovered without looking at each path.
+        if pendingLinkChanges.count + changes.count > 64 { pendingLinkOverflow = true } else { pendingLinkChanges += changes }
+        guard !linkRediscoveryPending else { lock.unlock(); return }
+        linkRediscoveryPending = true
+        let generation = linkRediscoveryGeneration
+        lock.unlock()
+        linkQueue.asyncAfter(deadline: .now() + config.linkRediscoveryDelay) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            guard generation == self.linkRediscoveryGeneration else { self.lock.unlock(); return }
+            // Taken before the walk: a link that changes during it schedules another look. The next one
+            // starts a delay after this one at least (the queue is serial, so runs never overlap).
+            self.linkRediscoveryPending = false
+            let changes = self.pendingLinkChanges
+            let overflow = self.pendingLinkOverflow
+            self.pendingLinkChanges.removeAll()
+            self.pendingLinkOverflow = false
+            self.lock.unlock()
+            let classifier = self.analyzer.classifier
+            guard overflow || changes.contains(where: { DaemonCore.mayChangeLinks($0, classifier: classifier) }) else { return }
+            self.rediscover(includingHomes: false)
+            self.lock.lock()
+            self._linkRediscoveryRuns += 1
+            self.lock.unlock()
+        }
+    }
+
+    /// Whether `change` may have changed what the classifier follows: the path was a followed link (or
+    /// held one) and was removed, replaced or moved away; or what is there now is a link, or a directory
+    /// moved or copied in (it may hold links). A regular file saved by rename, or a new directory, is not.
+    static func mayChangeLinks(_ change: LinkChange, classifier: PathClassifier) -> Bool {
+        if !classifier.linkAliases(of: change.path, limit: 1).isEmpty { return true }
+        if change.role == .source || change.operation == .unlink { return false }
+        var st = stat()
+        guard lstat(change.path, &st) == 0 else { return false }
+        let type = st.st_mode & S_IFMT
+        return type == S_IFLNK || (type == S_IFDIR && change.operation != .create)
+    }
+
+    /// Drops a scheduled link rediscovery (the daemon is stopping).
+    public func cancelPendingLinkRediscovery() {
+        lock.lock()
+        linkRediscoveryGeneration += 1
+        linkRediscoveryPending = false
+        pendingLinkChanges.removeAll()
+        pendingLinkOverflow = false
+        lock.unlock()
+    }
+
+    /// Tests: how many link rediscoveries have finished (looks that found nothing are not counted).
+    var linkRediscoveryRuns: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _linkRediscoveryRuns
     }
 
     /// Why a catalog path is too broad to monitor, or nil.
@@ -1316,5 +1664,115 @@ public final class DaemonCore: @unchecked Sendable {
             writerDropped: writer.droppedCount, monitoredPrefixes: analyzer.classifier.prefixes.count,
             homeDirectories: homes, rulesLoadError: rulesError, sourceDroppedEvents: source.droppedEvents,
             sourceKernelDrops: source.kernelDroppedEvents, pendingAsks: askBroker.openRequests, uncleanStop: unclean)
+    }
+}
+
+// MARK: - Links (files-9)
+
+/// Where a file operation may add, replace or remove a link the classifier follows, for one classifier.
+struct LinkWatch {
+    let normalizer: PathNormalizer
+    /// Folded prefixes and ancestors: the path itself may have become, or stopped being, a link.
+    private var exact = Set<String>()
+    /// Folded prefixes whose contents the classifier searches for links (dot-directories directly under
+    /// a home, as in PathClassifier.walksForLinks) or that a followed link leads to.
+    private var walked: [String] = []
+
+    init(_ c: PathClassifier) {
+        normalizer = c.normalizer
+        let homes = c.normalizer.homeDirectories.map { PathNormalizer.fold(PathClassifier.stripTrailingSlash($0)) + "/." }
+        for p in c.prefixes {
+            let key = PathNormalizer.fold(p.path)
+            exact.insert(key)
+            if p.viaSymlink || homes.contains(where: { key.hasPrefix($0) }) { walked.append(key) }
+        }
+        for a in c.ancestors { exact.insert(PathNormalizer.fold(a)) }
+    }
+
+    func covers(_ normalizedPath: String) -> Bool {
+        let key = PathNormalizer.fold(PathClassifier.stripTrailingSlash(normalizedPath))
+        return exact.contains(key) || walked.contains { key.hasPrefix($0 + "/") }
+    }
+}
+
+/// The pipeline, plus DaemonCore.noteFileOperation for every file event.
+final class LinkWatchingSink: EventSink, @unchecked Sendable {
+    let pipeline: EventPipeline
+    weak var core: DaemonCore?
+
+    init(pipeline: EventPipeline) { self.pipeline = pipeline }
+
+    func receive(_ event: SourceEvent, context: RuleContext) {
+        pipeline.receive(event, context: context)
+        if case .file(let activity) = event { core?.noteFileOperation(activity) }
+    }
+
+    func sourceStateChanged(_ state: SourceState) { pipeline.sourceStateChanged(state) }
+}
+
+/// realpath(3), plus links whose target does not exist yet (files-9). A dotfile manager may link
+/// `~/.azure/x` to a file it creates later, and a tool writing through a dangling link creates the file
+/// at the link's target, where ES reports it: that path must be monitored from the start, not from the
+/// first rediscovery after it exists. For the classifier only (elsewhere a missing path stays nil).
+struct LinkFollowingResolver: SymlinkResolver {
+    private let real = RealpathSymlinkResolver()
+
+    func resolve(_ path: String) -> String? {
+        real.resolve(path) ?? LinkFollowingResolver.danglingTarget(path)
+    }
+
+    /// Where writing through the link at `path` creates its file: the link text (relative to the
+    /// link's directory) followed through at most 8 links to a name that does not exist, in a directory
+    /// that does (its real path). nil when `path` is not a link, for a loop, or when the target's
+    /// directory is missing too.
+    static func danglingTarget(_ path: String) -> String? {
+        var link = path
+        for _ in 0..<8 {
+            var st = stat()
+            guard lstat(link, &st) == 0, (st.st_mode & S_IFMT) == S_IFLNK, let text = TrustedDirectory.readLink(link) else {
+                return nil
+            }
+            let next = text.hasPrefix("/") ? text : TrustedDirectory.parent(of: link) + "/" + text
+            if lstat(next, &st) == 0 {
+                // Another link: follow it. Anything else exists, and realpath would have resolved it.
+                guard (st.st_mode & S_IFMT) == S_IFLNK else { return nil }
+                link = next
+                continue
+            }
+            // Read before any Foundation call can change it.
+            let missing = errno == ENOENT
+            let name = (next as NSString).lastPathComponent
+            guard missing, !name.isEmpty, name != ".", name != "..",
+                  let dir = RealpathSymlinkResolver().resolve(TrustedDirectory.parent(of: next)) else { return nil }
+            return dir == "/" ? "/" + name : dir + "/" + name
+        }
+        return nil
+    }
+
+    /// RealpathSymlinkResolver's bounded walk (links to directories are reported, not entered), with
+    /// dangling links included.
+    func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] {
+        var out: [(String, String)] = []
+        var visited = 0
+        func walk(_ d: String, _ depth: Int) {
+            guard depth <= maxDepth, let entries = try? FileManager.default.contentsOfDirectory(atPath: d) else { return }
+            for name in entries {
+                visited += 1
+                if visited > maxEntries { return }
+                let p = d.hasSuffix("/") ? d + name : d + "/" + name
+                var st = stat()
+                guard lstat(p, &st) == 0 else { continue }
+                switch st.st_mode & S_IFMT {
+                case S_IFLNK:
+                    if let target = resolve(p), !target.hasPrefix(dir + "/") && target != dir { out.append((p, target)) }
+                case S_IFDIR:
+                    walk(p, depth + 1)
+                default:
+                    break
+                }
+            }
+        }
+        walk(dir, 1)
+        return out
     }
 }

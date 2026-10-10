@@ -1,21 +1,29 @@
 // Endpoint Security system extension entry point: the release form of whoreadd.
 // NOT YET COMPILED (written on Linux; see docs/RESEARCH.md).
 import Foundation
+import os
 import WhoReadCore
 import WhoReadEngine
 
 // launchd discards a system extension's stderr, where Log writes, so send it to a root-only file
-// (alert headlines and chains of every user end up there).
+// (alert headlines and chains of every user end up there). Set up first, so a refusal to start
+// below (an unsafe data directory) is logged there. A link, someone else's directory or file, or a
+// hard-linked file at either path is moved aside, never followed or appended to (macos-3).
 let logDirectory = "/Library/Logs/WhoRead"
-try? FileManager.default.createDirectory(atPath: logDirectory, withIntermediateDirectories: true)
-chmod(logDirectory, 0o700)
-let logFD = open(logDirectory + "/extension.log", O_WRONLY | O_APPEND | O_CREAT, 0o600)
-if logFD >= 0 {
-    dup2(logFD, STDERR_FILENO)
-    close(logFD)
+do {
+    let log = try Log.openPrivateLogFile(directory: logDirectory, name: "extension.log", owner: 0)
+    dup2(log.descriptor, STDERR_FILENO)
+    close(log.descriptor)
+    log.movedAside.forEach { Log.error("log: \($0)") }
+} catch {
+    // No log file: the unified log is the only place left to say why (Console, `log show`).
+    Logger(subsystem: "com.whoread.extension", category: "log")
+        .error("WhoRead: no log file, refusing an unsafe one: \(String(describing: error), privacy: .public)")
 }
 
 var config = DaemonConfiguration()
+// Root (the extension's user) must be the only one able to change the data directory (macos-4).
+config.dataDirectoryOwner = 0
 config.source = .native
 let info = Bundle.main.infoDictionary ?? [:]
 config.machServiceName = info["NSEndpointSecurityMachServiceName"] as? String

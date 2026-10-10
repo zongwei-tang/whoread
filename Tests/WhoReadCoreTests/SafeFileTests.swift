@@ -74,6 +74,38 @@ final class SafeFileTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: (real as NSString).appendingPathComponent("x")))
     }
 
+    // An ACL lets others add, remove or rename entries of a 0755 directory: mode bits do not show it.
+    func testReplaceRefusesADirectoryAnACLOpensUp() throws {
+        #if canImport(Darwin)
+        func chmodACL(_ arguments: [String]) throws {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            p.arguments = arguments
+            try p.run()
+            p.waitUntilExit()
+            XCTAssertEqual(p.terminationStatus, 0, "chmod \(arguments)")
+        }
+        let me = geteuid()
+        try chmodACL(["+a", "everyone allow add_file,delete_child", dir])
+        XCTAssertTrue(SafeFile.aclAllows(path: dir, changing: true))
+        XCTAssertThrowsError(try SafeFile.replace(path("x"), with: Data(), trustedDirectoryOwner: me)) {
+            XCTAssertTrue("\($0)".contains("access control list"), "\($0)")
+        }
+        XCTAssertEqual(entries(), [])
+        try chmodACL(["-N", dir])
+        // Read-only and deny entries do not let anyone change the directory.
+        try chmodACL(["+a", "everyone allow list,search", dir])
+        try chmodACL(["+a", "everyone deny delete", dir])
+        XCTAssertFalse(SafeFile.aclAllows(path: dir, changing: true))
+        XCTAssertTrue(SafeFile.aclAllows(path: dir, changing: false), "but it does let others in")
+        XCTAssertNoThrow(try SafeFile.replace(path("ok"), with: Data(), trustedDirectoryOwner: me))
+        try chmodACL(["-N", dir])
+        XCTAssertFalse(SafeFile.aclAllows(path: dir, changing: false))
+        #else
+        throw XCTSkip("no extended ACLs here")
+        #endif
+    }
+
     func testCreateNewNeverOpensAnExistingFileOrSymlink() throws {
         try SafeFile.replace(path("taken"), with: Data("x".utf8))
         XCTAssertThrowsError(try SafeFile.createNew(path("taken")))

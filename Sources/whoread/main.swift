@@ -511,18 +511,20 @@ func cmdDaily(_ c: IPCClient) throws {
 /// export never leaves a truncated file. Buffered, so a small export goes out in one write.
 final class ExportWriter {
     private let handle: FileHandle
-    private let path: String?
+    private let staged: StagedFile?
     private var buffer = Data()
 
     init(path: String?) throws {
-        self.path = path
         if let path {
-            // Owner-only from the first byte (history can name protected files), and never through a
-            // symlink or into a file someone else created.
-            do { handle = try SafeFile.createNew(path + ".partial", mode: 0o600) } catch {
-                throw CLIError("cannot write \(path).partial: \(error) (remove a leftover file first)")
+            // Owner-only (0600) from the first byte whatever the umask (history names every user's
+            // protected files), never through a link or into a file someone else created, and renamed
+            // inside the directory opened at the start (privacy-4).
+            do { staged = try StagedFile(path: path, mode: 0o600) } catch {
+                throw CLIError("cannot write \(path): \(error)")
             }
+            handle = staged!.handle
         } else {
+            staged = nil
             handle = FileHandle.standardOutput
         }
     }
@@ -542,17 +544,12 @@ final class ExportWriter {
 
     func finish() throws {
         try flush()
-        guard let path else { return }
-        try handle.close()
-        guard rename(path + ".partial", path) == 0 else {
-            throw CLIError("cannot rename \(path).partial: \(String(cString: strerror(errno)))")
-        }
+        guard let staged else { return }
+        do { try staged.commit() } catch let e as StagedFile.Failure { throw CLIError(e.description) }
     }
 
     func abandon() {
-        guard let path else { return }
-        try? handle.close()
-        unlink(path + ".partial")
+        staged?.abandon()
     }
 }
 

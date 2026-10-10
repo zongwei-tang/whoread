@@ -110,7 +110,75 @@ public enum SafeFile {
         guard st.st_mode & 0o022 == 0 else {
             throw Failure(message: "\(dir) is writable by group or others (mode \(String(st.st_mode & 0o7777, radix: 8))); refusing to use it")
         }
+        guard !aclAllows(path: dir, changing: true) else {
+            throw Failure(message: "\(dir) has an access control list that lets others change it (ls -le); refusing to use it")
+        }
     }
+
+    /// Whether the extended ACL (`chmod +a`, shown by `ls -le`) of the object at `path` (a link at
+    /// the last component is not followed) or behind `fd` has an ALLOW entry. Mode bits show none of
+    /// these rights, so a 0755 directory may still let others add, remove or rename its entries.
+    /// With `changing`, only entries that let someone add, remove or rename entries (write or append
+    /// data, for a file), delete the object or change its permissions or owner count; otherwise any
+    /// ALLOW entry does (e.g. read). DENY entries only take rights away. An ACL that cannot be read
+    /// counts as allowing. Always false without ACLs (Linux, file systems without them).
+    public static func aclAllows(path: String, changing: Bool) -> Bool {
+        #if canImport(Darwin)
+        errno = 0
+        let acl = acl_get_link_np(path, ACL_TYPE_EXTENDED)
+        return aclAllows(acl, error: errno, changing: changing)
+        #else
+        return false
+        #endif
+    }
+
+    public static func aclAllows(fd: Int32, changing: Bool) -> Bool {
+        #if canImport(Darwin)
+        errno = 0
+        let acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED)
+        return aclAllows(acl, error: errno, changing: changing)
+        #else
+        return false
+        #endif
+    }
+
+    /// Removes the extended ACL of the file behind `fd` when it has ALLOW entries, e.g. ones a new file
+    /// inherited from its directory (`allow read,file_inherit`), which its mode does not show. True
+    /// when no ALLOW entry is left (nothing is changed when there was none).
+    @discardableResult
+    public static func removeACL(fd: Int32) -> Bool {
+        #if canImport(Darwin)
+        guard aclAllows(fd: fd, changing: false) else { return true }
+        if let empty = acl_init(0) {
+            _ = acl_set_fd_np(fd, empty, ACL_TYPE_EXTENDED)
+            acl_free(UnsafeMutableRawPointer(empty))
+        }
+        return !aclAllows(fd: fd, changing: false)
+        #else
+        return true
+        #endif
+    }
+
+    #if canImport(Darwin)
+    private static func aclAllows(_ acl: acl_t?, error: Int32, changing: Bool) -> Bool {
+        // No extended ACL: NULL with ENOENT (ENOTSUP/EOPNOTSUPP where the file system has none).
+        guard let acl else { return !(error == ENOENT || error == ENOTSUP || error == EOPNOTSUPP) }
+        defer { acl_free(UnsafeMutableRawPointer(acl)) }
+        let changes = [ACL_ADD_FILE, ACL_ADD_SUBDIRECTORY, ACL_DELETE_CHILD, ACL_DELETE, ACL_WRITE_SECURITY, ACL_CHANGE_OWNER]
+        var entry: acl_entry_t?
+        var id = ACL_FIRST_ENTRY.rawValue
+        while acl_get_entry(acl, id, &entry) == 0 {
+            id = ACL_NEXT_ENTRY.rawValue
+            var tag = acl_tag_t(0)
+            var perms: acl_permset_t?
+            guard acl_get_tag_type(entry, &tag) == 0, acl_get_permset(entry, &perms) == 0 else { return true }
+            if tag == ACL_EXTENDED_DENY { continue }
+            if !changing || tag != ACL_EXTENDED_ALLOW { return true }
+            if changes.contains(where: { acl_get_perm_np(perms, $0) != 0 }) { return true }
+        }
+        return false
+    }
+    #endif
 
     /// Creates `dir` (and missing parents) if needed with `mode`, then checks it like
     /// `checkTrustedDirectory`. An existing directory keeps its mode but must pass the check.

@@ -99,6 +99,13 @@ if geteuid() != 0 && config.source != .replay {
     Log.warning("not running as root: \(config.source.rawValue) needs root (and Full Disk Access)")
 }
 
+// launchd opens the plist's log file (whoreadd.log) for the daemon. Alerts in it name every user's
+// files and processes: say so when someone other than root can read it or change it (macos-3).
+if geteuid() == 0, let problem = Log.privateLogProblem(descriptor: STDERR_FILENO, owner: 0) {
+    Log.error("\(problem); it must be root's alone: sudo chown root:wheel and sudo chmod 600 it, in a root-only "
+              + "directory (scripts/install-dev-daemon.sh sets this up)")
+}
+
 umask(0o022)
 // A client that hangs up mid-reply must cost one EPIPE, not the daemon.
 signal(SIGPIPE, SIG_IGN)
