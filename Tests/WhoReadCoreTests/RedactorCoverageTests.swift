@@ -680,11 +680,24 @@ final class RedactorCoverageTests: XCTestCase {
                        secrets: ["Hun", "ter2pw"])
         assertRedacted(["/bin/sh", "-c", "cat <<EOF > ~/WhoReadTestVault/n\nHun;ter&2pw\nEOF"], ["/bin/sh", "-c", "cat <<EOF > ~/WhoReadTestVault/n\n\(R)\nEOF"],
                        secrets: ["Hun", "ter", "2pw"])
+        // A URL's query and password are read before the split: `&` and `;` belong to them there.
+        assertRedacted(["git", "commit", "-m", "see https://h/x?sv=1&sig=Hunter2pw"], ["git", "commit", "-m", "see https://h/x?sv=1&sig=\(R)"])
+        assertRedacted(["/bin/sh", "-c", "curl https://h/cb?state=1&code=Hunter2pw"], ["/bin/sh", "-c", "curl https://h/cb?state=1&code=\(R)"])
+        assertRedacted(["/bin/sh", "-c", "curl https://h/x?X-Amz-Date=1&X-Amz-Signature=Hunter2pw"],
+                       ["/bin/sh", "-c", "curl https://h/x?X-Amz-Date=1&X-Amz-Signature=\(R)"])
+        assertRedacted(["/bin/sh", "-c", "curl https://h/x;jsessionid=Hunter2pw"], ["/bin/sh", "-c", "curl https://h/x;jsessionid=\(R)"])
+        assertRedacted(["/bin/sh", "-c", "curl -s https://h/x?a=1&auth=Hunter2pw | jq ."], ["/bin/sh", "-c", "curl -s https://h/x?a=1&auth=\(R) | jq ."])
+        assertRedacted(["git", "commit", "-m", "clone https://bob:Hun;ter2pw@host/x"], ["git", "commit", "-m", "clone https://bob:\(R)@host/x"],
+                       secrets: ["Hun", "ter2pw"])
+        assertRedacted(["/bin/sh", "-c", "git clone https://bob:Hun&ter2pw@host/x"], ["/bin/sh", "-c", "git clone https://bob:\(R)@host/x"],
+                       secrets: ["Hun", "ter2pw"])
         assertKept([
             ["/bin/sh", "-c", "echo hello;ls -la"], ["/bin/sh", "-c", "for x in a b;do echo $x;done"], ["/bin/sh", "-c", "x=1;y=2;ls"],
             ["/bin/sh", "-c", "find . -name '*.o' -exec rm {} \\;"], ["/bin/sh", "-c", "make 2>&1|tee log"], ["/bin/sh", "-c", "cmd &>/dev/null&"],
             ["/bin/sh", "-c", "echo ${x//;/,}"], ["/bin/sh", "-c", "cmd >|out.txt"], ["git", "commit", "-m", "Fix a;b and c&&d, e|f"],
             ["psql", "-c", "SELECT a||b FROM t; SELECT 1"], ["/bin/sh", "-c", "case $1 in a|b) echo x;; esac"],
+            ["/bin/sh", "-c", "curl https://h/x?a=1&b=2"], ["/bin/sh", "-c", "curl https://user@host/x;ls"],
+            ["/bin/sh", "-c", "echo // comment@here; ls"], ["/bin/sh", "-c", "sleep 1&echo done"],
         ])
     }
 

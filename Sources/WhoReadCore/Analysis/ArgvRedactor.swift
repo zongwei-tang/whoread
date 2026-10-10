@@ -1397,9 +1397,12 @@ public enum ArgvRedactor {
     }
 
     /// The rules that read a command line's text across its words: quoted headers, JSON and
-    /// JavaScript pairs, SQL and AppleScript.
+    /// JavaScript pairs, SQL and AppleScript, and URLs: a query parameter (`?a=1&sig=x`) and a
+    /// password (`https://bob:a;b@host`) may hold an `&` or `;`, where the command line is split.
     static func redactAcrossWords(_ s: String) -> String {
         var t = replace(quotedHeader, in: s, with: "$1$2$3" + placeholder)
+        if t.contains("=") { t = replace(queryParam, in: t, with: "$1" + placeholder) }
+        t = redactUserinfo(t)
         t = redactQuotedPairs(t)
         t = redactSQLCredentials(t)
         t = replace(appleScriptPassword, in: t, with: "$1" + placeholder + "$3")
