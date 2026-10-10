@@ -1686,7 +1686,7 @@ public enum ArgvRedactor {
     static func redactSQLCredentials(_ s: String) -> String {
         let lower = s.lowercased()
         guard lower.contains("password") || lower.contains("identified") || lower.contains("conn") || lower.contains("crypt")
-                || lower.contains("sp_addlogin") else { return s }
+                || lower.contains("sp_addlogin") || (lower.contains("insert") && lower.contains("values")) else { return s }
         var scanner = SQLScanner(Array(s.unicodeScalars))
         // `CONNECT user/pw@db` is SQL*Plus, RMAN and DGMGRL syntax: it is read only where one of them
         // runs, so that `grep -rn connect src/net` keeps its path.
@@ -1884,6 +1884,61 @@ public enum ArgvRedactor {
             }
         }
 
+        /// `INSERT INTO t (name, password) VALUES ('bob', 'x'), (…)`: the values in a column whose name
+        /// names a secret (`password`, `pwd`, `api_key`, `password_hash`; not `password_length`).
+        mutating func insert() {
+            if upper(peek()) == "INTO" { _ = next() }
+            // The table, possibly qualified or quoted, up to its column list.
+            while peek() != .punct("(") {
+                let t = next()
+                if t == .end || ["VALUES", "SELECT", "SET", "DEFAULT"].contains(upper(t) ?? "") { return }
+            }
+            _ = next()
+            var columns: [Bool] = []
+            var named = false
+            columnList: while true {
+                switch next() {
+                case .end, .punct("("):
+                    return
+                case .word(let w, _):
+                    named = named || (ArgvRedactor.namesSecret(w) && !ArgvRedactor.refersToSecret(w))
+                case .punct(","):
+                    columns.append(named)
+                    named = false
+                case .punct(")"):
+                    columns.append(named)
+                    break columnList
+                default:
+                    break
+                }
+            }
+            guard columns.contains(true), upper(next()) == "VALUES" else { return }
+            // Each row; a literal anywhere in a secret column's value (`crypt('x', gen_salt('bf'))`) goes.
+            while peek() == .punct("(") {
+                _ = next()
+                var column = 0, nesting = 0
+                row: while true {
+                    switch next(value: true) {
+                    case .end:
+                        return
+                    case .literal(let r):
+                        if column < columns.count && columns[column] { secret(r) }
+                    case .punct("("):
+                        nesting += 1
+                    case .punct(")"):
+                        if nesting == 0 { break row }
+                        nesting -= 1
+                    case .punct(","):
+                        if nesting == 0 { column += 1 }
+                    default:
+                        break
+                    }
+                }
+                guard peek() == .punct(",") else { return }
+                _ = next()
+            }
+        }
+
         /// `CONNECT user/x@db`: the logon is one word of the command line.
         mutating func connect() {
             while let c = at(i), c == " " || c == "\t" { i += 1 }
@@ -1946,6 +2001,8 @@ public enum ArgvRedactor {
                         ddl = 3
                     case "GRANT":
                         statement = .grant
+                    case "INSERT":
+                        insert()
                     case "PASSWORD", "OLD_PASSWORD":
                         if statement == .user || statement == .grant {
                             // Cypher: `ALTER CURRENT USER SET PASSWORD FROM 'old' TO 'new'`.

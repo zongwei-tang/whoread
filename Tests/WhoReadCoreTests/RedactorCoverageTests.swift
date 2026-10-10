@@ -68,6 +68,20 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "sqlplus -s /nolog <<EOF\nCONNECT system/\(R)@db\nALTER USER bob IDENTIFIED BY \(R);\nEOF"])
     }
 
+    /// `INSERT … (name, password) VALUES ('bob', 'x')`: the values in a column that names a secret.
+    func testSQLInsertsIntoAPasswordColumn() {
+        assertRedacted(["psql", "-c", "INSERT INTO users (name, password) VALUES ('bob', 'Hunter2pw')"],
+                       ["psql", "-c", "INSERT INTO users (name, password) VALUES ('bob', '\(R)')"])
+        assertRedacted(["sqlite3", "app.db", "INSERT INTO accounts(user, pass) VALUES('bob','Hunter2pw'),('amy','Old2pwxx')"],
+                       ["sqlite3", "app.db", "INSERT INTO accounts(user, pass) VALUES('bob','\(R)'),('amy','\(R)')"], secrets: [secret, "Old2pwxx"])
+        assertRedacted(["/bin/sh", "-c", "psql <<EOF\nINSERT INTO users (name, password)\nVALUES ('bob', crypt('Hunter2pw', gen_salt('bf')));\nEOF"],
+                       secrets: [secret])
+        assertKept([
+            ["psql", "-c", "INSERT INTO users (name, email) VALUES ('bob', 'bob@example.com')"], ["psql", "-c", "INSERT INTO t SELECT * FROM s"],
+            ["git", "commit", "-m", "insert values into the cache"],
+        ])
+    }
+
     /// Neo4j (`cypher-shell -p PW`, `neo4j-admin dbms set-initial-password PW`, Cypher's `ALTER CURRENT
     /// USER SET PASSWORD FROM 'old' TO 'new'`) and SQL Server's `sp_addlogin` and `sp_password`, whose
     /// passwords are positional arguments.
