@@ -650,8 +650,9 @@ public final class DaemonCore: @unchecked Sendable {
         }
 
         init(_ a: Alert) {
+            // The whole chain's agents (the stored chain keeps the nearest 64 links only).
             key = AskKey(responsibleKey: a.responsible.key, categoryID: a.categoryID, access: a.accesses,
-                         chainAgents: Array(Set(a.chain.compactMap(\.agentID))))
+                         chainAgents: a.scopeAgents, ancestryKnown: a.ancestryKnown ?? true)
             responsible = a.responsible
             appleProgram = a.appleProgram
         }
@@ -662,11 +663,13 @@ public final class DaemonCore: @unchecked Sendable {
         var ruleAccess: RuleAccess { key.access == .read ? .read : (key.access == .write ? .write : .any) }
 
         /// An allow rule saved from this answer covers `other` (same subject and pins, category, an
-        /// access it includes, only agents it names: Rule.chainAgents).
+        /// access it includes, only agents it names: Rule.chainAgents; a chain of unknown ancestry only
+        /// if this answer was given for one: Rule.coversUnknownAncestry).
         func allowCovers(_ other: AnswerScope) -> Bool {
             other.key.responsibleKey == key.responsibleKey && other.key.categoryID == key.categoryID
                 && !other.key.access.isEmpty && other.key.access.isSubset(of: key.access)
                 && Set(other.key.chainAgents).isSubset(of: Set(key.chainAgents))
+                && (other.key.ancestryKnown || !key.ancestryKnown)
                 && (responsible.teamID == nil || other.responsible.teamID == responsible.teamID)
                 && (cdhashPin == nil || other.responsible.cdhash?.lowercased() == cdhashPin?.lowercased())
         }
@@ -741,11 +744,12 @@ public final class DaemonCore: @unchecked Sendable {
                                        maxBytes: DaemonCore.maxNameBytes),
             enabled: true, target: .category(categoryID), subject: subject, access: scope.ruleAccess, action: .allow,
             expiresAt: once ? now.addingTimeInterval(DaemonCore.allowOnceDuration) : nil, createdAt: now,
-            template: DaemonCore.askAnswerTemplate, chainAgents: scope.key.chainAgents)
+            template: DaemonCore.askAnswerTemplate, chainAgents: scope.key.chainAgents,
+            coversUnknownAncestry: !scope.key.ancestryKnown)
         try DaemonCore.validate(rule)
         func sameScope(_ x: Rule) -> Bool {
             x.template == DaemonCore.askAnswerTemplate && x.action == .allow && x.target == rule.target && x.subject == rule.subject
-                && x.access == rule.access && x.chainAgents == rule.chainAgents
+                && x.access == rule.access && x.chainAgents == rule.chainAgents && x.coversUnknownAncestry == rule.coversUnknownAncestry
         }
         try saveRuleChange(peer: peer, privileged: true) { list in
             // Answers expire: drop the dead ones, and the earlier "allow once" this one replaces.
@@ -928,6 +932,7 @@ public final class DaemonCore: @unchecked Sendable {
         let r = alert.responsible
         let subject = RuleSubject.responsible(key: r.key, teamID: r.teamID, cdhash: scope.cdhashPin)
         let chainAgents = scope.key.chainAgents
+        let unknownAncestry = !scope.key.ancestryKnown
         let access = scope.ruleAccess
         // The action answered as a question would be (rule, setting, held accesses released or denied).
         var answered = true
@@ -942,7 +947,8 @@ public final class DaemonCore: @unchecked Sendable {
                 // firstPath is the access that made the alert "blocked" (the coalescer moves it on escalation).
                 try addException(toRule: ruleID, RuleException(
                     subject: subject, pathPrefix: alert.firstPath, categoryID: alert.categoryID, access: access,
-                    chainAgents: chainAgents, expiresAt: now.addingTimeInterval(600), remainingUses: 1, createdAt: now))
+                    chainAgents: chainAgents, coversUnknownAncestry: unknownAncestry, expiresAt: now.addingTimeInterval(600),
+                    remainingUses: 1, createdAt: now))
                 // A rule's block: the path-scoped, one-use exception is the whole answer. A category-wide
                 // 10-minute allow rule would also let through files the deny rule does not cover, which
                 // would otherwise be asked. (A rule denial never has an open question to release.)
@@ -954,7 +960,8 @@ public final class DaemonCore: @unchecked Sendable {
             guard privileged else { throw IPCError(.notPermitted, "allowing weakens protection: run it with sudo, or use the WhoRead app") }
             if let ruleID = alert.ruleID, alert.kind == .blocked || alert.kind == .wouldBlock {
                 try addException(toRule: ruleID, RuleException(subject: subject, categoryID: alert.categoryID, access: access,
-                                                               chainAgents: chainAgents, createdAt: now))
+                                                               chainAgents: chainAgents, coversUnknownAncestry: unknownAncestry,
+                                                               createdAt: now))
             }
             try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
             baseline.approve(responsibleKey: r.key, categoryID: alert.categoryID, at: now)

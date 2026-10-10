@@ -362,3 +362,128 @@ final class SigningCategoryTrustTests: AncestryTestCase {
                               ask: off).verdict, .deny, "not while another process controls it")
     }
 }
+
+// MARK: - Unknown ancestry is not "no AI agent" in alerts (process-1 follow-up)
+
+final class UnknownAncestryAlertTests: AncestryTestCase {
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        h.tree.parentResolver = { _ in nil }
+        h.coalescer.window = 0.5  // one alert per access, so each one shows its own kind
+    }
+
+    func ssh(_ pid: Int32, originalPPID: Int32, _ t: TimeInterval) -> ProcessRecord {
+        proc(pid, "/usr/bin/ssh", ppid: 1, start: t, platform: true, signingID: "com.apple.openssh", originalPPID: originalPPID)
+    }
+
+    /// An owner (ssh reading a key) is quiet only with no AI agent in its chain. ssh whose fork-time
+    /// parent was never seen (an agent's shell that exited) has an unknown chain, which may hide one:
+    /// it alerts, in monitor-only mode and for NOTIFY events after an AUTH allow alike.
+    func testAnOwnerWithUnknownAncestryIsNotSilenced() throws {
+        _ = agentShell()
+        let monitor = h.open(ssh(702, originalPPID: 700, 3), sshKey, 4)
+        XCTAssertTrue(monitor.events[0].isOwner)
+        XCTAssertEqual(monitor.events[0].ancestryKnown, false)
+        XCTAssertEqual(monitor.alerts.first?.alert.kind, .criticalNonOwner)
+
+        let afterAuth = h.open(ssh(703, originalPPID: 700, 5), sshKey, 6, context: .afterAuth)
+        XCTAssertEqual(afterAuth.alerts.first?.alert.kind, .criticalNonOwner)
+
+        // The user's own ssh under Terminal (a known chain) stays quiet.
+        let own = h.spawn(h.spawn(P.terminal, P.zsh(520, parent: 100)),
+                          proc(704, "/usr/bin/ssh", ppid: 520, start: 7, platform: true, signingID: "com.apple.openssh"), 7)
+        let quiet = h.open(own, sshKey, 8)
+        XCTAssertEqual(quiet.events[0].ancestryKnown, true)
+        XCTAssertTrue(quiet.alerts.isEmpty)
+    }
+
+    /// With the ancestry lost, the chain stops at the leaf and the access is charged to the leaf itself.
+    /// An approval of `cat` (given for a cat launchd started) does not cover a cat whose starter is
+    /// unknown: a critical read still alerts, as one an AI agent drives does.
+    func testAnApprovalDoesNotCoverUnknownAncestryForCriticalFiles() throws {
+        func cat(_ pid: Int32, originalPPID: Int32, _ t: TimeInterval) -> ProcessRecord {
+            proc(pid, "/bin/cat", ppid: 1, start: t, platform: true, signingID: "com.apple.cat", originalPPID: originalPPID)
+        }
+        let first = h.open(cat(710, originalPPID: 1, 1), sshKey, 2)
+        let key = first.events[0].responsible.key
+        h.baseline.approve(responsibleKey: key, categoryID: first.events[0].categoryID, at: at(2))
+        XCTAssertTrue(h.open(cat(711, originalPPID: 1, 3), sshKey, 4).alerts.isEmpty, "approved")
+
+        let orphan = h.open(cat(712, originalPPID: 700, 5), sshKey, 6)
+        XCTAssertEqual(orphan.events[0].responsible.key, key)
+        XCTAssertEqual(orphan.alerts.first?.alert.kind, .criticalNonOwner)
+    }
+}
+
+// MARK: - Answers scoped by ancestry: "no AI agent" is not "ancestry unknown"
+
+final class AncestryScopedAnswerTests: AncestryTestCase {
+    private let catKey = "bin:apple:com.apple.cat"
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        h.tree.parentResolver = { _ in nil }
+    }
+
+    func cat(_ pid: Int32, originalPPID: Int32) -> ProcessRecord {
+        proc(pid, "/bin/cat", ppid: 1, start: 1, platform: true, signingID: "com.apple.cat", originalPPID: originalPPID)
+    }
+
+    func answer(covering unknown: Bool) -> Rule {
+        Rule(id: "answer", enabled: true, target: .category("ssh"), subject: .responsible(key: catKey, teamID: nil), access: .read,
+             action: .allow, template: RuleTemplates.askAnswer, chainAgents: [], coversUnknownAncestry: unknown)
+    }
+
+    /// cat started by launchd (a known chain) and cat whose starter is unknown (an AI agent's shell that
+    /// is gone) are both charged to cat. An answer given for the known one does not answer for the other,
+    /// and the question about it says its ancestry is unknown.
+    func testAnAnswerForAKnownChainDoesNotCoverUnknownAncestry() {
+        let noTrust = AskPolicy(enabled: true, trustApplePrograms: false, benignChain: false)
+        let known = cat(701, originalPPID: 1), unknown = cat(702, originalPPID: 700)
+        XCTAssertEqual(decide(known, 2, ask: noTrust).askKey?.ancestryKnown, true)
+        let asked = decide(unknown, 2, ask: noTrust)
+        XCTAssertEqual(asked.askKey?.responsibleKey, catKey)
+        XCTAssertEqual(asked.askKey?.ancestryKnown, false)
+
+        h.rules.replace(rules: [answer(covering: false)])
+        XCTAssertEqual(decide(known, 3, ask: noTrust).reason, .explicitAllow)
+        XCTAssertEqual(decide(unknown, 3, ask: noTrust).verdict, .ask)
+        // Answered for the unknown chain, knowing it: it covers both.
+        h.rules.replace(rules: [answer(covering: true)])
+        XCTAssertEqual(decide(unknown, 4, ask: noTrust).reason, .explicitAllow)
+        XCTAssertEqual(decide(known, 4, ask: noTrust).reason, .explicitAllow)
+    }
+
+    /// The same for "always allow" on a rule's block (an exception on the deny rule).
+    func testAnExceptionForAKnownChainDoesNotCoverUnknownAncestry() {
+        func rule(covering unknown: Bool) -> Rule {
+            var r = enforcedRule(Rule(id: "deny-ssh", target: .category("ssh"), subject: .anyNonOwner, action: .deny,
+                                      includePlatformBinaries: true))
+            r.exceptions = [RuleException(subject: .responsible(key: catKey, teamID: nil), categoryID: "ssh", access: .read,
+                                          chainAgents: [], coversUnknownAncestry: unknown)]
+            return r
+        }
+        h.rules.replace(rules: [rule(covering: false)])
+        XCTAssertEqual(decide(cat(711, originalPPID: 1), 2, ask: .off).verdict, .allow)
+        XCTAssertEqual(decide(cat(712, originalPPID: 700), 2, ask: .off).verdict, .deny)
+        h.rules.replace(rules: [rule(covering: true)])
+        XCTAssertEqual(decide(cat(713, originalPPID: 700), 3, ask: .off).verdict, .allow)
+    }
+
+    /// The scope bit survives storage; rules and keys saved before it existed get the narrower scope.
+    func testTheScopeIsStoredAndOldRecordsGetTheNarrowerScope() throws {
+        var r = answer(covering: true)
+        r.exceptions = [RuleException(subject: .anyNonOwner, chainAgents: [], coversUnknownAncestry: true)]
+        let decoded = try JSONDecoder().decode(Rule.self, from: JSONEncoder().encode(r))
+        XCTAssertTrue(decoded.coversUnknownAncestry)
+        XCTAssertEqual(decoded.exceptions.first?.coversUnknownAncestry, true)
+        XCTAssertEqual(decoded, r)
+
+        let old = #"{"id":"a","target":{"category":"ssh"},"subject":{"type":"anyNonOwner"},"action":"allow","chainAgents":[],"exceptions":[{"id":"e","subject":{"type":"anyNonOwner"},"chainAgents":[],"createdAt":0}]}"#
+        let oldRule = try JSONDecoder().decode(Rule.self, from: Data(old.utf8))
+        XCTAssertFalse(oldRule.coversUnknownAncestry)
+        XCTAssertEqual(oldRule.exceptions.first?.coversUnknownAncestry, false)
+        let oldKey = try JSONDecoder().decode(AskKey.self, from: Data(#"{"responsibleKey":"k","categoryID":"ssh","access":"read","chainAgents":[]}"#.utf8))
+        XCTAssertTrue(oldKey.ancestryKnown)
+    }
+}

@@ -11,14 +11,30 @@ public struct AskKey: Codable, Hashable, Sendable {
     public var categoryID: String
     /// The requested access kinds (read, write or both).
     public var access: AccessSet
-    /// Agent ids in the chain, sorted; empty = no AI agent.
+    /// Agent ids in the chain, sorted; empty = no AI agent seen (see `ancestryKnown`).
     public var chainAgents: [String]
+    /// The chain reaches launchd. When it does not, its ancestry was lost and an AI agent may be hidden
+    /// above it: such a question says so, and an answer given for a known chain never covers it.
+    public var ancestryKnown: Bool
 
-    public init(responsibleKey: String, categoryID: String, access: AccessSet, chainAgents: [String]) {
+    public init(responsibleKey: String, categoryID: String, access: AccessSet, chainAgents: [String], ancestryKnown: Bool = true) {
         self.responsibleKey = responsibleKey
         self.categoryID = categoryID
         self.access = access
         self.chainAgents = chainAgents.sorted()
+        self.ancestryKnown = ancestryKnown
+    }
+
+    enum CodingKeys: String, CodingKey { case responsibleKey, categoryID, access, chainAgents, ancestryKnown }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        responsibleKey = try c.decode(String.self, forKey: .responsibleKey)
+        categoryID = try c.decode(String.self, forKey: .categoryID)
+        access = try c.decode(AccessSet.self, forKey: .access)
+        chainAgents = try c.decode([String].self, forKey: .chainAgents)
+        // A key without it scopes an answer to known chains only (the narrower answer).
+        ancestryKnown = try c.decodeIfPresent(Bool.self, forKey: .ancestryKnown) ?? true
     }
 }
 
