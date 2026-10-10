@@ -43,6 +43,9 @@ public struct DaemonConfiguration: Sendable {
     /// rename or unlink in a monitored dotfile directory) the links are re-discovered (files-9). Also
     /// the shortest interval between two such runs.
     public var linkRediscoveryDelay: TimeInterval = 1.5
+    /// The shortest interval between two full searches for links that lost file events cause (more
+    /// link changes at once than are kept): each one reads up to LinkInventory.walkBudget entries.
+    public var linkFullWalkInterval: TimeInterval = 30
 
     public init() {}
 
@@ -332,6 +335,12 @@ public final class DaemonCore: @unchecked Sendable {
     private var pendingLinkChanges: [LinkChange] = []
     private var pendingLinkOverflow = false
     private var _linkRediscoveryRuns = 0
+    /// The links the classifier follows in dotfile directories (files-9).
+    let linkInventory: LinkInventory
+    /// Guarded by `lock`: when links were last searched for in full, and whether a full search that
+    /// lost events asked for is waiting for `linkFullWalkInterval` to pass.
+    private var lastFullLinkWalk = Date()
+    private var fullLinkWalkScheduled = false
     private var rulesLoadError: String?
     /// The previous instance stopped while enforcing; kept (and stored) until the next clean stop.
     private var uncleanStopNote: String?
@@ -415,8 +424,15 @@ public final class DaemonCore: @unchecked Sendable {
         attributor = Attributor(agents: detector)
 
         effectiveCatalog = DaemonCore.resolveOwners(data.catalog, config: config)
+        // The first build searches every dotfile directory for links.
+        let links = LinkInventory()
+        linkInventory = links
+        if !config.inMemoryStore {
+            links.walk(PathClassifier.linkWalkDirectories(catalog: effectiveCatalog, normalizer: normalizerBox.value,
+                                                          projectRoots: settings.projectRoots))
+        }
         let classifier = DaemonCore.makeClassifier(catalog: effectiveCatalog, normalizer: normalizerBox.value, settings: settings,
-                                                   resolveSymlinks: !config.inMemoryStore)
+                                                   resolveSymlinks: !config.inMemoryStore, links: links)
 
         // A store that cannot be read must not be mistaken for a fresh one: keep enforcement off and
         // never overwrite the stored rules with the templates.
@@ -574,9 +590,18 @@ public final class DaemonCore: @unchecked Sendable {
         }
     }
 
-    static func makeClassifier(catalog: Catalog, normalizer: PathNormalizer, settings: Settings, resolveSymlinks: Bool) -> PathClassifier {
-        PathClassifier(catalog: catalog, normalizer: normalizer, projectRoots: settings.projectRoots,
-                       symlinks: resolveSymlinks ? LinkFollowingResolver() : NoSymlinkResolver())
+    /// `links`: where the links in dotfile directories come from (searched there otherwise).
+    static func makeClassifier(catalog: Catalog, normalizer: PathNormalizer, settings: Settings, resolveSymlinks: Bool,
+                               links: LinkInventory? = nil) -> PathClassifier {
+        let resolver: SymlinkResolver
+        if !resolveSymlinks {
+            resolver = NoSymlinkResolver()
+        } else if let links {
+            resolver = InventoryLinkResolver(links)
+        } else {
+            resolver = LinkFollowingResolver()
+        }
+        return PathClassifier(catalog: catalog, normalizer: normalizer, projectRoots: settings.projectRoots, symlinks: resolver)
     }
 
     /// Owner team / signing IDs from `codesign -dv` of the apps installed here (brief §3). Third-party
@@ -1342,7 +1367,7 @@ public final class DaemonCore: @unchecked Sendable {
         let resolved = DaemonCore.resolveOwners(c, config: config)
         let s = currentSettings
         let candidate = DaemonCore.makeClassifier(catalog: resolved, normalizer: normalizerBox.value, settings: s,
-                                                  resolveSymlinks: !config.inMemoryStore)
+                                                  resolveSymlinks: !config.inMemoryStore, links: linkInventory)
         let current = analyzer.classifier
         let orphaned = rules.rules.filter { r in
             guard r.enabled, case .pathPrefix(let p) = r.target else { return false }
@@ -1380,7 +1405,7 @@ public final class DaemonCore: @unchecked Sendable {
         let s = settings
         lock.unlock()
         let c = DaemonCore.makeClassifier(catalog: catalog, normalizer: normalizerBox.value, settings: s,
-                                          resolveSymlinks: !config.inMemoryStore)
+                                          resolveSymlinks: !config.inMemoryStore, links: linkInventory)
         install(classifier: c, readdir: s.readdirEnabled)
     }
 
@@ -1394,11 +1419,25 @@ public final class DaemonCore: @unchecked Sendable {
     /// Homes come and go (new users, network homes) and symlinks inside monitored directories change
     /// (dotfile managers). Rebuilds the classifier only when the monitored set actually changed.
     /// `includingHomes: false` (a link may have changed, files-9) skips the user database.
-    func rediscover(includingHomes: Bool = true) {
+    /// `fullLinkWalk` (default: with the homes) searches the dotfile directories for links again;
+    /// otherwise the rebuild re-reads the links already known (LinkInventory).
+    func rediscover(includingHomes: Bool = true, fullLinkWalk: Bool? = nil) {
         // Discovery reads the user database without any lock; the rebuild runs under the mutation
         // lock so it cannot install a classifier built from a catalog or settings that a concurrent
         // update(catalog:) / update(settings:) has just replaced.
         let found = includingHomes && config.homeDirectories == nil ? HomeDirectories.discover() : nil
+        if fullLinkWalk ?? includingHomes, !config.inMemoryStore {
+            // Outside the mutation lock too: answering a question takes it, and a walk reads the disk.
+            lock.lock()
+            let catalog = effectiveCatalog
+            let s = settings
+            lock.unlock()
+            let normalizer = found.map { PathNormalizer(homeDirectories: $0) } ?? normalizerBox.value
+            linkInventory.walk(PathClassifier.linkWalkDirectories(catalog: catalog, normalizer: normalizer, projectRoots: s.projectRoots))
+            lock.lock()
+            lastFullLinkWalk = Date()
+            lock.unlock()
+        }
         mutation.lock(); defer { mutation.unlock() }
         if let found {
             lock.lock()
@@ -1415,7 +1454,7 @@ public final class DaemonCore: @unchecked Sendable {
         let s = settings
         lock.unlock()
         let candidate = DaemonCore.makeClassifier(catalog: catalog, normalizer: normalizerBox.value, settings: s,
-                                                  resolveSymlinks: !config.inMemoryStore)
+                                                  resolveSymlinks: !config.inMemoryStore, links: linkInventory)
         rediscoveryHook?()
         let current = analyzer.classifier
         if candidate.mutePaths != current.mutePaths || candidate.prefixes != current.prefixes || candidate.ancestors != current.ancestors {
@@ -1439,9 +1478,8 @@ public final class DaemonCore: @unchecked Sendable {
     /// a directory searched for links, may have added, replaced or removed a link the classifier
     /// follows: ES then reports accesses at a target that is not monitored until links are
     /// re-discovered. Instead of waiting up to `rediscoveryInterval`, the paths are looked at
-    /// `linkRediscoveryDelay` later, off the event path, and links are re-discovered when one of them
-    /// is a link now or was a followed one (coalesced: one look per delay at most, which bounds the
-    /// cost of a flood).
+    /// `linkRediscoveryDelay` later, off the event path (coalesced: one look per delay at most, which
+    /// bounds the cost of a flood). See `lookAtLinkChanges`.
     func noteFileOperation(_ activity: FileActivity) {
         switch activity.operation {
         case .create, .rename, .clone, .copyfile, .link, .unlink: break
@@ -1454,43 +1492,112 @@ public final class DaemonCore: @unchecked Sendable {
         }
         guard !changes.isEmpty else { return }
         lock.lock()
-        // Bounded: past that, links are re-discovered without looking at each path.
-        if pendingLinkChanges.count + changes.count > 64 { pendingLinkOverflow = true } else { pendingLinkChanges += changes }
+        // Bounded: past that, links are searched for in full without looking at each path.
+        if pendingLinkChanges.count + changes.count > DaemonCore.maxPendingLinkChanges {
+            pendingLinkOverflow = true
+        } else {
+            pendingLinkChanges += changes
+        }
         guard !linkRediscoveryPending else { lock.unlock(); return }
         linkRediscoveryPending = true
         let generation = linkRediscoveryGeneration
         lock.unlock()
         linkQueue.asyncAfter(deadline: .now() + config.linkRediscoveryDelay) { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            guard generation == self.linkRediscoveryGeneration else { self.lock.unlock(); return }
-            // Taken before the walk: a link that changes during it schedules another look. The next one
-            // starts a delay after this one at least (the queue is serial, so runs never overlap).
-            self.linkRediscoveryPending = false
-            let changes = self.pendingLinkChanges
-            let overflow = self.pendingLinkOverflow
-            self.pendingLinkChanges.removeAll()
-            self.pendingLinkOverflow = false
-            self.lock.unlock()
-            let classifier = self.analyzer.classifier
-            guard overflow || changes.contains(where: { DaemonCore.mayChangeLinks($0, classifier: classifier) }) else { return }
-            self.rediscover(includingHomes: false)
-            self.lock.lock()
-            self._linkRediscoveryRuns += 1
-            self.lock.unlock()
+            self?.lookAtLinkChanges(generation: generation)
         }
+    }
+
+    /// Link changes kept for one look; past that, a full search for links follows.
+    static let maxPendingLinkChanges = 64
+    /// Entries one look reads in directories moved or copied into a searched directory; past that, a
+    /// full search for links follows.
+    static let linkLookBudget = 20_000
+
+    /// On `linkQueue`. The links the noted paths show are added to the LinkInventory: a link created
+    /// there (at any depth: the full search stops at PathClassifier.linkWalkMaxDepth), or the links in
+    /// a directory moved or copied in. Then the classifier is rebuilt from the links already known,
+    /// without searching the directories again, if any path was a followed link or held one, is a link
+    /// now, is a directory moved or copied in, or was made on the way to a link's target. A full search
+    /// runs only when changes were lost, at most once per `linkFullWalkInterval`.
+    private func lookAtLinkChanges(generation: Int) {
+        lock.lock()
+        guard generation == linkRediscoveryGeneration else { lock.unlock(); return }
+        // Taken before the look: a link that changes during it schedules another look. The next one
+        // starts a delay after this one at least (the queue is serial, so runs never overlap).
+        linkRediscoveryPending = false
+        let changes = pendingLinkChanges
+        var overflow = pendingLinkOverflow
+        pendingLinkChanges.removeAll()
+        pendingLinkOverflow = false
+        let sinceFullWalk = Date().timeIntervalSince(lastFullLinkWalk)
+        lock.unlock()
+        let classifier = analyzer.classifier
+        let watch = linkWatch.value
+        var changed = false
+        var budget = DaemonCore.linkLookBudget
+        for change in changes where DaemonCore.mayChangeLinks(change, classifier: classifier, watch: watch) {
+            changed = true
+            var st = stat()
+            guard change.role != .source, change.operation != .unlink, lstat(change.path, &st) == 0 else { continue }
+            switch st.st_mode & S_IFMT {
+            case S_IFLNK:
+                linkInventory.report([change.path])
+            case S_IFDIR where change.operation != .create:
+                let found = LinkFollowingResolver.links(under: change.path, maxDepth: PathClassifier.linkWalkMaxDepth,
+                                                        maxEntries: max(0, budget))
+                budget -= found.visited
+                if budget <= 0 { overflow = true }
+                linkInventory.report(found.links)
+            default:
+                break
+            }
+        }
+        if overflow && sinceFullWalk < config.linkFullWalkInterval {
+            // Too soon after the last full search: it runs when the interval is over. Meanwhile the
+            // links already known (and those found now) are followed.
+            overflow = false
+            lock.lock()
+            let schedule = !fullLinkWalkScheduled
+            fullLinkWalkScheduled = true
+            lock.unlock()
+            if schedule {
+                linkQueue.asyncAfter(deadline: .now() + (config.linkFullWalkInterval - sinceFullWalk)) { [weak self] in
+                    self?.runScheduledFullLinkWalk(generation: generation)
+                }
+            }
+        }
+        guard overflow || changed else { return }
+        rediscover(includingHomes: false, fullLinkWalk: overflow)
+        lock.lock()
+        _linkRediscoveryRuns += 1
+        lock.unlock()
+    }
+
+    /// On `linkQueue`: the full search for links that lost changes asked for.
+    private func runScheduledFullLinkWalk(generation: Int) {
+        lock.lock()
+        guard generation == linkRediscoveryGeneration, fullLinkWalkScheduled else { lock.unlock(); return }
+        fullLinkWalkScheduled = false
+        lock.unlock()
+        rediscover(includingHomes: false, fullLinkWalk: true)
+        lock.lock()
+        _linkRediscoveryRuns += 1
+        lock.unlock()
     }
 
     /// Whether `change` may have changed what the classifier follows: the path was a followed link (or
     /// held one) and was removed, replaced or moved away; or what is there now is a link, or a directory
-    /// moved or copied in (it may hold links). A regular file saved by rename, or a new directory, is not.
-    static func mayChangeLinks(_ change: LinkChange, classifier: PathClassifier) -> Bool {
+    /// moved or copied in (it may hold links), or anything made on the way to a link's target that did
+    /// not exist (the target's real spelling can be read now). A regular file saved by rename, or a new
+    /// directory elsewhere, is not.
+    static func mayChangeLinks(_ change: LinkChange, classifier: PathClassifier, watch: LinkWatch? = nil) -> Bool {
         if !classifier.linkAliases(of: change.path, limit: 1).isEmpty { return true }
         if change.role == .source || change.operation == .unlink { return false }
         var st = stat()
         guard lstat(change.path, &st) == 0 else { return false }
         let type = st.st_mode & S_IFMT
-        return type == S_IFLNK || (type == S_IFDIR && change.operation != .create)
+        if type == S_IFLNK || (type == S_IFDIR && change.operation != .create) { return true }
+        return watch?.isOnTheWayToALinkTarget(change.path) ?? false
     }
 
     /// Drops a scheduled link rediscovery (the daemon is stopping).
@@ -1500,6 +1607,7 @@ public final class DaemonCore: @unchecked Sendable {
         linkRediscoveryPending = false
         pendingLinkChanges.removeAll()
         pendingLinkOverflow = false
+        fullLinkWalkScheduled = false
         lock.unlock()
     }
 
@@ -1692,7 +1800,11 @@ struct LinkWatch {
     private var exact = Set<String>()
     /// Folded prefixes whose contents the classifier searches for links (dot-directories directly under
     /// a home, as in PathClassifier.walksForLinks) or that a followed link leads to.
-    private var walked: [String] = []
+    private var walked = Set<String>()
+    /// Folded proper ancestors of the targets of followed links. A target may lie below directories
+    /// that do not exist yet (`~/.azure/x -> ~/dotfiles/new/x`); once they are made, the target's real
+    /// spelling (its case, a link on the way) can be read.
+    private var targetAncestors = Set<String>()
 
     init(_ c: PathClassifier) {
         normalizer = c.normalizer
@@ -1700,14 +1812,38 @@ struct LinkWatch {
         for p in c.prefixes {
             let key = PathNormalizer.fold(p.path)
             exact.insert(key)
-            if p.viaSymlink || homes.contains(where: { key.hasPrefix($0) }) { walked.append(key) }
+            if p.viaSymlink || homes.contains(where: { key.hasPrefix($0) }) { walked.insert(key) }
+            if p.viaSymlink {
+                var ancestor = ""
+                for component in PathNormalizer.components(key).dropLast() {
+                    ancestor += "/" + component
+                    targetAncestors.insert(ancestor)
+                }
+            }
         }
         for a in c.ancestors { exact.insert(PathNormalizer.fold(a)) }
     }
 
     func covers(_ normalizedPath: String) -> Bool {
         let key = PathNormalizer.fold(PathClassifier.stripTrailingSlash(normalizedPath))
-        return exact.contains(key) || walked.contains { key.hasPrefix($0 + "/") }
+        return exact.contains(key) || isInsideWalked(key)
+    }
+
+    /// Strictly inside a searched directory or a link's target (folded key). One set lookup per
+    /// component: this runs for every create, rename and unlink the source reports.
+    private func isInsideWalked(_ key: String) -> Bool {
+        guard !walked.isEmpty else { return false }
+        var ancestor = ""
+        for component in PathNormalizer.components(key).dropLast() {
+            ancestor += "/" + component
+            if walked.contains(ancestor) { return true }
+        }
+        return false
+    }
+
+    /// A proper ancestor of a followed link's target (normalized path).
+    func isOnTheWayToALinkTarget(_ normalizedPath: String) -> Bool {
+        targetAncestors.contains(PathNormalizer.fold(PathClassifier.stripTrailingSlash(normalizedPath)))
     }
 }
 
@@ -1733,14 +1869,19 @@ final class LinkWatchingSink: EventSink, @unchecked Sendable {
 struct LinkFollowingResolver: SymlinkResolver {
     private let real = RealpathSymlinkResolver()
 
+    /// Missing directories a dangling link's target may lie below.
+    static let maxMissingComponents = 16
+
     func resolve(_ path: String) -> String? {
         real.resolve(path) ?? LinkFollowingResolver.danglingTarget(path)
     }
 
     /// Where writing through the link at `path` creates its file: the link text (relative to the
-    /// link's directory) followed through at most 8 links to a name that does not exist, in a directory
-    /// that does (its real path). nil when `path` is not a link, for a loop, or when the target's
-    /// directory is missing too.
+    /// link's directory) followed through at most 8 links to a name that does not exist, below the real
+    /// path of its deepest existing directory. Directories missing on the way are kept as spelled (a
+    /// later `mkdir -p` makes them; DaemonCore re-reads the target then). nil when `path` is not a link,
+    /// for a loop, when something on the way is not a directory, or when a missing part is `..`
+    /// (where it leads depends on what is made there).
     static func danglingTarget(_ path: String) -> String? {
         var link = path
         for _ in 0..<8 {
@@ -1756,39 +1897,294 @@ struct LinkFollowingResolver: SymlinkResolver {
                 continue
             }
             // Read before any Foundation call can change it.
-            let missing = errno == ENOENT
-            let name = (next as NSString).lastPathComponent
-            guard missing, !name.isEmpty, name != ".", name != "..",
-                  let dir = RealpathSymlinkResolver().resolve(TrustedDirectory.parent(of: next)) else { return nil }
-            return dir == "/" ? "/" + name : dir + "/" + name
+            guard errno == ENOENT else { return nil }
+            // The missing tail, up to the deepest directory that exists.
+            var missing: [String] = []
+            var head = next
+            while true {
+                let name = (head as NSString).lastPathComponent
+                guard !name.isEmpty, name != "..", head != "/", missing.count < maxMissingComponents else { return nil }
+                if name != "." { missing.insert(name, at: 0) }
+                head = TrustedDirectory.parent(of: head)
+                if lstat(head, &st) == 0 { break }
+                guard errno == ENOENT else { return nil }
+            }
+            guard !missing.isEmpty, let dir = RealpathSymlinkResolver().resolve(head) else { return nil }
+            return (dir == "/" ? "" : dir) + "/" + missing.joined(separator: "/")
         }
         return nil
     }
 
-    /// RealpathSymlinkResolver's bounded walk (links to directories are reported, not entered), with
-    /// dangling links included.
     func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] {
-        var out: [(String, String)] = []
+        LinkInventory.resolved(LinkFollowingResolver.links(under: dir, maxDepth: maxDepth, maxEntries: maxEntries).links,
+                               below: dir, resolver: self)
+    }
+
+    /// The links below `dir`, breadth first and in name order, so the same tree gives the same links
+    /// even past the caps, and links near the top are found first. Links to directories are reported,
+    /// not entered. Looks at no more than `maxEntries` entries, `maxDepth` levels down; `visited` says
+    /// how many it looked at.
+    static func links(under dir: String, maxDepth: Int, maxEntries: Int) -> (links: [String], visited: Int) {
+        var out: [String] = []
         var visited = 0
-        func walk(_ d: String, _ depth: Int) {
-            guard depth <= maxDepth, let entries = try? FileManager.default.contentsOfDirectory(atPath: d) else { return }
-            for name in entries {
-                visited += 1
-                if visited > maxEntries { return }
-                let p = d.hasSuffix("/") ? d + name : d + "/" + name
-                var st = stat()
-                guard lstat(p, &st) == 0 else { continue }
-                switch st.st_mode & S_IFMT {
-                case S_IFLNK:
-                    if let target = resolve(p), !target.hasPrefix(dir + "/") && target != dir { out.append((p, target)) }
-                case S_IFDIR:
-                    walk(p, depth + 1)
-                default:
-                    break
+        var level = [dir]
+        var depth = 1
+        while !level.isEmpty && depth <= maxDepth && visited < maxEntries {
+            var next: [String] = []
+            for d in level {
+                guard visited < maxEntries, let stream = opendir(d) else { continue }
+                // The file type comes with the entry on APFS and HFS+: no lstat per file. A directory
+                // is read whole and sorted, so where the budget ends does not depend on the order the
+                // file system returns entries in; only one with more than `maxEntries` entries is read
+                // in part, in that order.
+                var entries: [(name: String, type: Int32)] = []
+                while entries.count < maxEntries, let e = readdir(stream) {
+                    var entry = e.pointee
+                    let name = withUnsafeBytes(of: &entry.d_name) { raw in
+                        String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
+                    }
+                    if name == "." || name == ".." { continue }
+                    entries.append((name, Int32(entry.d_type)))
+                }
+                closedir(stream)
+                entries.sort { $0.name < $1.name }
+                for (name, reported) in entries {
+                    guard visited < maxEntries else { break }
+                    visited += 1
+                    let p = d.hasSuffix("/") ? d + name : d + "/" + name
+                    var type = reported
+                    if type == DT_UNKNOWN {
+                        var st = stat()
+                        guard lstat(p, &st) == 0 else { continue }
+                        switch st.st_mode & S_IFMT {
+                        case S_IFLNK: type = DT_LNK
+                        case S_IFDIR: type = DT_DIR
+                        default: break
+                        }
+                    }
+                    if type == DT_LNK { out.append(p) } else if type == DT_DIR { next.append(p) }
                 }
             }
+            level = next
+            depth += 1
         }
-        walk(dir, 1)
-        return out
+        return (out, visited)
+    }
+}
+
+/// The links the classifier follows inside the directories it searches for them
+/// (PathClassifier.walksForLinks): what the last full walk of those directories found, plus links file
+/// events showed since, at any depth (files-9). A classifier rebuild after a link change re-reads only
+/// these, so it costs in proportion to the number of links, not to the size of the directories. The
+/// full walk (`walkBudget` entries in all, but at least `minimumEntriesPerDirectory` for each
+/// directory) runs at start, at every periodic rediscovery, and after events were lost. A rebuild
+/// searches a directory again only when it was not searched yet or its real path changed since (it,
+/// or a directory above it, was made a link: what the walk found there is somewhere else now),
+/// sharing `walkBudget` the same way. Thread-safe.
+final class LinkInventory: @unchecked Sendable {
+    /// Entries one full walk looks at, over every directory (each also stops at
+    /// PathClassifier.linkWalkMaxEntries).
+    static let walkBudget = 100_000
+    /// Entries every directory may look at even when the others used up `walkBudget`: the directories
+    /// are walked in catalog order, and the last ones (a custom path) still need a share.
+    static let minimumEntriesPerDirectory = 2_000
+
+    /// Entries a walk of one directory looks at, out of `budget` left.
+    static func share(of budget: Int, maxEntries: Int) -> Int {
+        min(maxEntries, max(minimumEntriesPerDirectory, budget))
+    }
+
+    /// Links remembered from file events (the oldest are forgotten first).
+    static let maxReported = 1024
+    /// Links one classifier follows: each one adds monitored prefixes, mute paths and prefilter needles.
+    static let maxFollowed = 4096
+
+    private let lock = NSLock()
+    /// Folded directory → the links the last walk found below it, and `roots(of:)` the directory then.
+    private var walked: [String: (links: [String], roots: [String])] = [:]
+    /// Links file events showed, oldest first, with their folded paths.
+    private var reported: [(path: String, key: String)] = []
+    private var reportedKeys = Set<String>()
+    /// Folded searched directories and their real paths: only links below one are kept from events.
+    private var roots = Set<String>()
+    /// Bumped by every full walk: what a rebuild read before one is not written back over it.
+    private var generation = 0
+    private var _fullWalks = 0
+
+    /// Tests: how many full walks ran.
+    var fullWalks: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _fullWalks
+    }
+
+    /// Searches `dirs` again, in order, sharing `budget` (each keeps `minimumEntriesPerDirectory`), and
+    /// forgets what was found before. Call it outside the daemon's locks: it reads the disk.
+    func walk(_ dirs: [String], budget: Int = LinkInventory.walkBudget) {
+        var found: [String: (links: [String], roots: [String])] = [:]
+        var roots: [String] = []
+        var budget = budget
+        for d in dirs {
+            let key = PathNormalizer.fold(d)
+            guard found[key] == nil else { continue }
+            let dirRoots = LinkInventory.roots(of: d)
+            let r = LinkFollowingResolver.links(under: d, maxDepth: PathClassifier.linkWalkMaxDepth,
+                                                maxEntries: LinkInventory.share(of: budget, maxEntries: PathClassifier.linkWalkMaxEntries))
+            budget -= r.visited
+            found[key] = (r.links, dirRoots)
+            roots += dirRoots
+        }
+        let foundKeys = Set(found.values.flatMap(\.links).map(PathNormalizer.fold))
+        lock.lock()
+        walked = found
+        self.roots = Set(roots)
+        generation += 1
+        // What the walk found itself, and what is no longer below a searched directory, is not kept.
+        forgetReported { r in foundKeys.contains(r.key) || !roots.contains { r.key.hasPrefix($0 + "/") } }
+        _fullWalks += 1
+        lock.unlock()
+    }
+
+    /// Links a file event showed (normalized paths: a link created, or the links below a directory moved
+    /// or copied in).
+    func report(_ links: [String]) {
+        guard !links.isEmpty else { return }
+        lock.lock()
+        for p in links {
+            let key = PathNormalizer.fold(p)
+            // Elsewhere (a link at a catalog path or an ancestor) the rebuild resolves it anyway.
+            guard isBelowRoot(key), reportedKeys.insert(key).inserted else { continue }
+            reported.append((p, key))
+        }
+        let over = reported.count - LinkInventory.maxReported
+        if over > 0 {
+            reported.prefix(over).forEach { reportedKeys.remove($0.key) }
+            reported.removeFirst(over)
+        }
+        lock.unlock()
+        if over > 0 { Log.warning("links: more than \(LinkInventory.maxReported) links reported since the last full walk; forgot the \(over) oldest") }
+    }
+
+    /// Under `lock`: strictly below a searched directory (folded key).
+    private func isBelowRoot(_ key: String) -> Bool {
+        var ancestor = ""
+        for component in PathNormalizer.components(key).dropLast() {
+            ancestor += "/" + component
+            if roots.contains(ancestor) { return true }
+        }
+        return false
+    }
+
+    /// Under `lock`.
+    private func forgetReported(where gone: ((path: String, key: String)) -> Bool) {
+        reported.removeAll { r in
+            guard gone(r) else { return false }
+            reportedKeys.remove(r.key)
+            return true
+        }
+    }
+
+    /// The links below `dir` with their targets now, for the classifier: what the last walk found there
+    /// (walking it now if it has not been, or if its real path changed since), plus reported links below
+    /// it, below its real path too (spelled below `dir`). Links that are gone are forgotten. At most
+    /// `limit`.
+    func links(under dir: String, maxDepth: Int, maxEntries: Int, limit: Int,
+               resolver: LinkFollowingResolver = LinkFollowingResolver()) -> [(link: String, target: String)] {
+        var budget = LinkInventory.walkBudget
+        return links(under: dir, maxDepth: maxDepth, maxEntries: maxEntries, limit: limit, resolver: resolver, budget: &budget)
+    }
+
+    /// `budget`: entries a walk of `dir` may still look at, shared by the directories one classifier
+    /// build walks (each keeps `minimumEntriesPerDirectory`). A walk it cut short is not kept (the next
+    /// build walks again).
+    func links(under dir: String, maxDepth: Int, maxEntries: Int, limit: Int, resolver: LinkFollowingResolver,
+               budget: inout Int) -> [(link: String, target: String)] {
+        guard limit > 0 else { return [] }
+        let key = PathNormalizer.fold(dir)
+        let roots = LinkInventory.roots(of: dir)
+        lock.lock()
+        let known = walked[key].flatMap { $0.roots == roots ? $0.links : nil }
+        let reportedNow = reported
+        let readGeneration = generation
+        lock.unlock()
+        func isLink(_ p: String) -> Bool {
+            var st = stat()
+            return lstat(p, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK
+        }
+        var complete = true
+        let listed: [String]
+        if let known {
+            listed = known
+        } else {
+            let cap = LinkInventory.share(of: budget, maxEntries: maxEntries)
+            let r = LinkFollowingResolver.links(under: dir, maxDepth: maxDepth, maxEntries: cap)
+            budget -= r.visited
+            complete = cap == maxEntries || r.visited < cap
+            listed = r.links
+        }
+        let found = listed.filter(isLink)
+        var candidates = found
+        var seen = Set(found.map(PathNormalizer.fold))
+        var gone = Set<String>()
+        let dirComponents = PathNormalizer.components(dir)
+        for r in reportedNow {
+            guard let root = roots.first(where: { r.key.hasPrefix($0 + "/") }) else { continue }
+            guard isLink(r.path) else { gone.insert(r.key); continue }
+            // Folding keeps the number of components: the tail below the root, spelled below `dir`.
+            let tail = PathNormalizer.components(r.path).dropFirst(PathNormalizer.components(root).count)
+            let spelled = "/" + (dirComponents + tail).joined(separator: "/")
+            if seen.insert(PathNormalizer.fold(spelled)).inserted { candidates.append(spelled) }
+        }
+        lock.lock()
+        if generation == readGeneration {
+            if complete { walked[key] = (found, roots) }
+            self.roots.formUnion(roots)
+        }
+        forgetReported { gone.contains($0.key) }
+        lock.unlock()
+        if candidates.count > limit {
+            Log.warning("links: following only \(LinkInventory.maxFollowed) links; \(candidates.count - limit) below \(dir) are not followed")
+        }
+        return LinkInventory.resolved(Array(candidates.prefix(limit)), below: dir, resolver: resolver)
+    }
+
+    /// Folded `dir` and its real path: the two spellings of what is below it.
+    static func roots(of dir: String) -> [String] {
+        let key = PathNormalizer.fold(PathClassifier.stripTrailingSlash(dir))
+        guard let real = RealpathSymlinkResolver().resolve(dir) else { return [key] }
+        let realKey = PathNormalizer.fold(PathClassifier.stripTrailingSlash(real))
+        return realKey == key ? [key] : [key, realKey]
+    }
+
+    /// `links` with their targets, leaving out links that lead back inside `dir` (whichever way it is
+    /// spelled) and links that do not resolve.
+    static func resolved(_ links: [String], below dir: String, resolver: LinkFollowingResolver) -> [(link: String, target: String)] {
+        let roots = LinkInventory.roots(of: dir)
+        return links.compactMap { p in
+            guard let target = resolver.resolve(p) else { return nil }
+            let t = PathNormalizer.fold(target)
+            if roots.contains(where: { t == $0 || t.hasPrefix($0 + "/") }) { return nil }
+            return (p, target)
+        }
+    }
+}
+
+/// The resolver one classifier build uses: LinkFollowingResolver, with the links below each searched
+/// directory read from the LinkInventory, at most LinkInventory.maxFollowed in all. Directories the
+/// inventory walks anew share LinkInventory.walkBudget.
+final class InventoryLinkResolver: SymlinkResolver, @unchecked Sendable {
+    private let inventory: LinkInventory
+    private let resolver = LinkFollowingResolver()
+    private var followed = 0
+    private var budget = LinkInventory.walkBudget
+
+    init(_ inventory: LinkInventory) { self.inventory = inventory }
+
+    func resolve(_ path: String) -> String? { resolver.resolve(path) }
+
+    func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] {
+        let found = inventory.links(under: dir, maxDepth: maxDepth, maxEntries: maxEntries,
+                                    limit: LinkInventory.maxFollowed - followed, resolver: resolver, budget: &budget)
+        followed += found.count
+        return found
     }
 }

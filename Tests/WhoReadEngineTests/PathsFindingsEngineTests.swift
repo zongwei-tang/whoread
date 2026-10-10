@@ -61,6 +61,33 @@ final class AncestorPrefilterSourceTests: XCTestCase {
     }
 }
 
+// A path inside nested prefixes belongs to every category that accepts it: one access is stored
+// once per category, as an event, a summary row and an alert each.
+final class NestedPrefixStorageTests: XCTestCase {
+    func testAnAccessToANestedPathIsStoredOncePerCategory() throws {
+        let dir = TempDir()
+        let core = try DaemonCore(config: baseConfig(dir), makeSource: { _ in FakeSource(canEnforce: true) })
+        var catalog = core.data.catalog
+        let i = try XCTUnwrap(catalog.categories.firstIndex { $0.kind == .custom })
+        catalog.categories[i].paths = ["~/.ssh/work"]
+        catalog.categories[i].enabled = true
+        try core.update(catalog: catalog, peer: .inProcess)
+        let t = Date()
+        let cat = proc(501, "/opt/homebrew/bin/gcat", ppid: 1, start: t)
+        _ = core.tree.observe(cat, at: t)
+        let read = FileActivity(time: t.addingTimeInterval(1), operation: .open, process: cat,
+                                targets: OperationSemantics.open(path: "/Users/alice/.ssh/work/id_ed25519", fflag: OperationSemantics.fread))
+        core.pipeline.receive(.file(read), context: .monitorOnly)
+        core.writer.flush()
+
+        let events = try core.store.events(EventQuery(includeBenign: true))
+        XCTAssertEqual(events.map(\.categoryID).sorted(), ["custom", "ssh"])
+        XCTAssertEqual(Set(events.map(\.id)).count, 2)
+        XCTAssertEqual(try core.store.summaries(since: nil).map(\.categoryID).sorted(), ["custom", "ssh"])
+        XCTAssertEqual(try core.store.alerts(AlertQuery()).map(\.categoryID).sorted(), ["custom", "ssh"])
+    }
+}
+
 #if canImport(EndpointSecurity)
 import EndpointSecurity
 

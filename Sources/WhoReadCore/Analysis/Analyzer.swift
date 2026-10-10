@@ -147,9 +147,11 @@ public final class Analyzer: @unchecked Sendable {
     /// for `create`, a symlink) at a parent of monitored prefixes changes what is found below it.
     static let carryingInOperations: Set<FileOperation> = [.rename, .clone, .copyfile]
 
-    /// Classifies the targets of an activity. A path that carries files in or out (the source of a
-    /// move or clone, its destination, a symlink created in place of a directory) is also judged by
-    /// what it can hold; those categories come as a second entry for the same target, `viaAncestor`.
+    /// Classifies the targets of an activity. A path inside nested prefixes belongs to every category
+    /// that accepts it (`PathClassifier.classifications`). A path that carries files in or out (the
+    /// source of a move or clone, its destination, a symlink created in place of a directory) is also
+    /// judged by what it can hold; those categories come as a second entry for the same target,
+    /// `viaAncestor`.
     func classifyTargets(_ activity: FileActivity) -> [ClassifiedTarget] {
         let classifier = self.classifier
         let targets = activity.targets
@@ -157,7 +159,7 @@ public final class Analyzer: @unchecked Sendable {
         var out: [ClassifiedTarget] = []
         for (i, t) in targets.enumerated() {
             let path = paths[i]
-            let direct = classifier.classify(normalized: path, truncated: t.truncated)
+            let direct = classifier.classifications(normalized: path, truncated: t.truncated)
             // The source of a move or clone, a directory a rename lands on (a swap carries its content out),
             // and a directory a file system is mounted on: that replaces everything below it for whoever
             // looks there, so it is judged like a directory carried away, though only as a write. Not on a
@@ -170,9 +172,9 @@ public final class Analyzer: @unchecked Sendable {
             let carriesIn = t.role == .destination
                 && (Analyzer.carryingInOperations.contains(activity.operation) || (activity.operation == .create && t.isDirectory == false))
             guard carriesOut || carriesIn else {
-                out.append(ClassifiedTarget(target: t, path: path,
-                                            categories: direct.map { [TargetCategory(id: $0.categoryID, severity: $0.severity)] } ?? [],
-                                            viaAncestor: false))
+                let categories = direct.map { TargetCategory(id: $0.categoryID, severity: $0.severity) }
+                out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false,
+                                            primaryCategory: PathClassifier.ownerLendingCategory(direct, judgedAs: categories)))
                 continue
             }
             // The other end of the move. A move or clone puts the source's object at the destination,
@@ -183,9 +185,9 @@ public final class Analyzer: @unchecked Sendable {
             if isDirectory == nil, carriesIn, activity.operation != .create, let other { isDirectory = targets[other].isDirectory }
             // A directory of the category may hold its most sensitive files (moving a browser profile
             // carries Cookies): judge it by the worst file it can contain. When the source does not say,
-            // a path a specific file pattern named (`.env.tmp`, `History`) is taken as a file; anything
-            // else may be a directory.
-            let mayBeDirectory = activity.operation != .create && (isDirectory ?? direct.map(classifier.mayContainFiles) ?? true)
+            // a path that a specific file pattern of the category it is named by matches (`.env.tmp`,
+            // `History`) is taken as a file; anything else may be a directory.
+            let mayBeDirectory = activity.operation != .create && (isDirectory ?? direct.first.map(classifier.mayContainFiles) ?? true)
             /// A pattern-only category (a project) leaves its prefixes only when the directory does: a
             /// refactor inside the project keeps base severity, `mv ~/code/app/certs /tmp/c` (or into an
             /// excluded `node_modules`) is judged by the keys it can carry.
@@ -198,17 +200,16 @@ public final class Analyzer: @unchecked Sendable {
                 return !classifier.containingCategories(normalized: paths[other] + "/x").contains { $0.id == id }
             }
 
-            var categories: [TargetCategory] = []
-            if let c = direct {
+            let categories: [TargetCategory] = direct.map { c in
                 var severity = c.severity
                 if carriesOut && mayBeDirectory, let m = classifier.maxSeverity(c.categoryID), m > severity, leavesCategory(c.categoryID) {
                     severity = m
                 }
-                categories.append(TargetCategory(id: c.categoryID, severity: severity))
+                return TargetCategory(id: c.categoryID, severity: severity)
             }
             var carried: [TargetCategory] = []
             func carry(_ c: TargetCategory) {
-                guard c.id != direct?.categoryID else { return }
+                guard !direct.contains(where: { $0.categoryID == c.id }) else { return }
                 if let k = carried.firstIndex(where: { $0.id == c.id }) {
                     if c.severity > carried[k].severity { carried[k].severity = c.severity }
                 } else {
@@ -230,7 +231,8 @@ public final class Analyzer: @unchecked Sendable {
                 }
             }
             if !categories.isEmpty || carried.isEmpty {
-                out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false))
+                out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false,
+                                            primaryCategory: PathClassifier.ownerLendingCategory(direct, judgedAs: categories)))
             }
             if !carried.isEmpty {
                 // Most severe first (a question names the first of the most severe), else as found.
@@ -258,8 +260,13 @@ public final class Analyzer: @unchecked Sendable {
         public var path: String
         public var categories: [TargetCategory]
         public var viaAncestor: Bool
+        /// The category the path is named by (the first of `categories`), when it belongs to several and
+        /// not only through a link: its owners own some of the others (PathClassifier.owns).
+        public var primaryCategory: TargetCategory? = nil
         public var isSensitive: Bool { !categories.isEmpty }
-        public var evaluationTarget: EvaluationTarget { EvaluationTarget(path: path, access: target.access, categories: categories) }
+        public var evaluationTarget: EvaluationTarget {
+            EvaluationTarget(path: path, access: target.access, categories: categories, primaryCategory: primaryCategory)
+        }
     }
 
     func handleFile(_ activity: FileActivity, context: RuleContext) -> AnalysisOutput {
@@ -304,7 +311,9 @@ public final class Analyzer: @unchecked Sendable {
         // Rules are evaluated per category: an allow for one category must not silence another
         // category touched by the same operation (copying a key to a USB stick).
         func evaluationTargets(_ group: (category: TargetCategory, targets: [ClassifiedTarget])) -> [EvaluationTarget] {
-            group.targets.map { EvaluationTarget(path: $0.path, access: $0.target.access, categories: [group.category]) }
+            group.targets.map {
+                EvaluationTarget(path: $0.path, access: $0.target.access, categories: [group.category], primaryCategory: $0.primaryCategory)
+            }
         }
         // A denied syscall is a denial for every category it touches, but only a category a rule
         // denies gets the rule and the blocked alert: "allow once" on the other one (the USB stick
@@ -369,7 +378,13 @@ public final class Analyzer: @unchecked Sendable {
             let primary = group.targets[0]
             let access = group.targets.reduce(AccessSet()) { $0.union($1.target.access) }
             let other = classified.first { $0.path != primary.path }?.path
-            let isOwner = classifier.isOwner(process, of: group.category.id)
+            // As in the rules (PathClassifier.owns): an owner of the category a path is named by may own
+            // its other categories too.
+            let isOwner = group.targets.allSatisfy { t in
+                classifier.owns(t.categories.first { $0.id == group.category.id } ?? group.category, namedBy: t.primaryCategory) {
+                    classifier.isOwner(process, of: $0)
+                }
+            }
             var event = AnalyzedEvent(
                 id: takeEventID(), time: time, operation: activity.operation, access: access,
                 path: primary.path, secondaryPath: other, viaAncestor: primary.viaAncestor,
