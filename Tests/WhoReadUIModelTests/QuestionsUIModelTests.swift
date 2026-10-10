@@ -748,6 +748,29 @@ final class QuestionsUIModelTests: XCTestCase {
         XCTAssertEqual(planner.plan(asks: shown, formatter: m.formatter).post, [])
     }
 
+    func testTask2VariantBannerNamesTheCategoryOnceTheCatalogIsRead() throws {
+        try openQuestion()
+        // At launch the questions' own connection is often read first: no catalog yet.
+        let m = AppModel(language: .en)
+        m.apply(asks: SnapshotFetcher.fetchAsks(signed))
+        let planner = NotificationPlanner()
+        func plan() -> AskNotificationPlan {
+            planner.plan(asks: m.asks, formatter: m.formatter, agentName: m.agentName, namesKnown: m.catalog != nil && m.agents != nil)
+        }
+        let first = try XCTUnwrap(plan().post.first)
+        XCTAssertFalse(first.body.contains("SSH keys"), "the category's id stands in: \(first.body)")
+
+        // The first full poll: the banner is replaced, quietly, with the names; once.
+        _ = poll(m, signed, full: true)
+        let second = plan()
+        XCTAssertEqual(second.post.map(\.identifier), [first.identifier])
+        let replaced = try XCTUnwrap(second.post.first)
+        XCTAssertTrue(replaced.quiet)
+        XCTAssertTrue(replaced.body.contains("Terminal (any program run in it) reading SSH keys"), replaced.body)
+        XCTAssertEqual(plan().post, [])
+        XCTAssertEqual(plan().remove, [])
+    }
+
     // MARK: - task-1-variant: what the limited view shows is current
 
     func testTask1VariantUnreadCountFollowsTheStatusWhileAlertsAreRefused() throws {

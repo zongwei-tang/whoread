@@ -243,7 +243,10 @@ final class DaemonConnection {
     private func planAsks() {
         // The daemon lists at most 200 questions; a capped reply must not withdraw banners.
         let complete = model.asks.count < 200 && (model.status?.pendingAsks ?? 0) <= model.asks.count
-        let plan = planner.plan(asks: model.asks, formatter: model.formatter, complete: complete, agentName: model.agentName)
+        // Before the first full poll, category and AI agent names are not known yet: such banners are
+        // replaced once they are.
+        let plan = planner.plan(asks: model.asks, formatter: model.formatter, complete: complete, agentName: model.agentName,
+                                namesKnown: model.catalog != nil && model.agents != nil)
         NotificationManager.shared.remove(asks: plan.remove)
         for n in plan.post { NotificationManager.shared.post(n) }
         if complete && !staleAsksWithdrawn {

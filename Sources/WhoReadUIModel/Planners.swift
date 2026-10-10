@@ -86,12 +86,13 @@ public final class NotificationPlanner: @unchecked Sendable {
     private let launchedAt: Date
     private var lastUncleanStop: String?
     /// Questions notified: id → when first asked (another first time under the same id is another
-    /// question), and whether the banner went out without the file path.
+    /// question), and whether the banner went out incomplete (`plan(asks:)`).
     private var askNotified: [Int64: AskBanner] = [:]
 
     private struct AskBanner {
         var firstAt: Date
-        var pathHidden: Bool
+        /// Without the file path, or with category and AI agent ids for names.
+        var incomplete: Bool
     }
 
     // Category prefixes: each is registered once per kind of app, AI agent or program (".app",
@@ -230,26 +231,31 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// The body puts the AI agents in the chain first (a collapsed banner shows only its first lines),
     /// then the headline, where the program really is and who signed it, what allowing covers (the
     /// app, not only that program), and the chain; names and paths are escaped and capped (`DisplayText`).
-    /// A banner posted while the daemon hid the file path from this app (`AskRequest.pathHidden`: its
-    /// connection was not taken for the app) is replaced, quietly, once the path can be shown: it would
-    /// otherwise keep saying that only the signed app can see the path, to the signed app.
+    /// A banner that went out incomplete is replaced once, quietly, when it can be complete: posted
+    /// while the daemon hid the file path from this app (`AskRequest.pathHidden`: its connection was
+    /// not taken for the app), it would keep saying that only the signed app can see the path, to the
+    /// signed app; posted before the catalog and the AI agent list were read (`namesKnown` false: the
+    /// questions are read on their own connection, often first at launch), it would name the category
+    /// and the agents by their ids ("ssh" for "SSH keys").
     public func plan(asks: [AskRequest], formatter: AlertFormatter, complete: Bool = true,
-                     agentName: (String) -> String = { $0 }) -> AskNotificationPlan {
+                     agentName: (String) -> String = { $0 }, namesKnown: Bool = true) -> AskNotificationPlan {
         var plan = AskNotificationPlan()
         var open: [Int64: AskBanner] = [:]
         for a in asks.sorted(by: { ($0.firstAt, $0.id) < ($1.firstAt, $1.id) }) {
             // Same id, other first time: another question (replaces the old banner).
             let seen = askNotified[a.id].flatMap { abs($0.firstAt.timeIntervalSince(a.firstAt)) < 1 ? $0 : nil }
-            let showsPathNow = seen?.pathHidden == true && !a.pathHidden
-            open[a.id] = AskBanner(firstAt: a.firstAt, pathHidden: showsPathNow ? false : (seen?.pathHidden ?? a.pathHidden))
-            if seen != nil && !showsPathNow { continue }
+            let incomplete = a.pathHidden || !namesKnown
+            let completes = seen?.incomplete == true && !incomplete
+            // Never back to an incomplete text once the complete one was shown.
+            open[a.id] = AskBanner(firstAt: a.firstAt, incomplete: seen.map { $0.incomplete && incomplete } ?? incomplete)
+            if seen != nil && !completes { continue }
             plan.post.append(PlannedAskNotification(
                 identifier: NotificationPlanner.askIdentifier(a.id), askID: a.id, title: L10n.t(.notifAskTitle, formatter.language),
                 body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.displayAlert(formatter.language)),
                        formatter.identityLine(a.asAlert), a.allowCoverageLine(formatter, agentName: agentName),
                        formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
                 categoryIdentifier: NotificationPlanner.askCategory(apple: a.appleProgram, responsible: a.responsible.kind),
-                actions: AskAnswers.actions(for: a), quiet: showsPathNow))
+                actions: AskAnswers.actions(for: a), quiet: completes))
         }
         if complete {
             plan.remove = askNotified.keys.filter { open[$0] == nil }.sorted().map(NotificationPlanner.askIdentifier)
