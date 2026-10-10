@@ -160,8 +160,6 @@ public final class Analyzer: @unchecked Sendable {
         for (i, t) in targets.enumerated() {
             let path = paths[i]
             let direct = classifier.classifications(normalized: path, truncated: t.truncated)
-            // Owners of the category the path is named by are owners of the whole path.
-            let primary = direct.count > 1 ? direct[0].categoryID : nil
             // The source of a move or clone, a directory a rename lands on (a swap carries its content out),
             // and a directory a file system is mounted on: that replaces everything below it for whoever
             // looks there, so it is judged like a directory carried away, though only as a write. Not on a
@@ -174,9 +172,9 @@ public final class Analyzer: @unchecked Sendable {
             let carriesIn = t.role == .destination
                 && (Analyzer.carryingInOperations.contains(activity.operation) || (activity.operation == .create && t.isDirectory == false))
             guard carriesOut || carriesIn else {
-                out.append(ClassifiedTarget(target: t, path: path,
-                                            categories: direct.map { TargetCategory(id: $0.categoryID, severity: $0.severity) },
-                                            viaAncestor: false, primaryCategory: primary))
+                let categories = direct.map { TargetCategory(id: $0.categoryID, severity: $0.severity) }
+                out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false,
+                                            primaryCategory: categories.count > 1 ? categories[0] : nil))
                 continue
             }
             // The other end of the move. A move or clone puts the source's object at the destination,
@@ -233,7 +231,8 @@ public final class Analyzer: @unchecked Sendable {
                 }
             }
             if !categories.isEmpty || carried.isEmpty {
-                out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false, primaryCategory: primary))
+                out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false,
+                                            primaryCategory: categories.count > 1 ? categories[0] : nil))
             }
             if !carried.isEmpty {
                 // Most severe first (a question names the first of the most severe), else as found.
@@ -261,8 +260,9 @@ public final class Analyzer: @unchecked Sendable {
         public var path: String
         public var categories: [TargetCategory]
         public var viaAncestor: Bool
-        /// The category the path is named by, when it belongs to several (see EvaluationTarget).
-        public var primaryCategory: String? = nil
+        /// The category the path is named by (the first of `categories`), when it belongs to several:
+        /// its owners own the others that are not more severe (see EvaluationTarget).
+        public var primaryCategory: TargetCategory? = nil
         public var isSensitive: Bool { !categories.isEmpty }
         public var evaluationTarget: EvaluationTarget {
             EvaluationTarget(path: path, access: target.access, categories: categories, primaryCategory: primaryCategory)
@@ -378,9 +378,13 @@ public final class Analyzer: @unchecked Sendable {
             let primary = group.targets[0]
             let access = group.targets.reduce(AccessSet()) { $0.union($1.target.access) }
             let other = classified.first { $0.path != primary.path }?.path
-            // As in the rules: an owner of the category each path is named by owns its other categories.
-            let isOwner = classifier.isOwner(process, of: group.category.id)
-                || group.targets.allSatisfy { t in t.primaryCategory.map { classifier.isOwner(process, of: $0) } ?? false }
+            // As in the rules: an owner of the category each path is named by owns its other categories
+            // that are not more severe.
+            let isOwner = classifier.isOwner(process, of: group.category.id) || group.targets.allSatisfy { t in
+                guard let primary = t.primaryCategory, let own = t.categories.first(where: { $0.id == group.category.id }),
+                      primary.severity >= own.severity else { return false }
+                return classifier.isOwner(process, of: primary.id)
+            }
             var event = AnalyzedEvent(
                 id: takeEventID(), time: time, operation: activity.operation, access: access,
                 path: primary.path, secondaryPath: other, viaAncestor: primary.viaAncestor,

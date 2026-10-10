@@ -506,6 +506,33 @@ final class NestedPrefixMembershipTests: XCTestCase {
         XCTAssertEqual(asked.askKey?.categoryID, "work-keys")
     }
 
+    // Owners are lent only by a category at least as severe: ssh, owner of a medium ssh path added inside
+    // ~/.aws, is no owner of the critical aws file there.
+    func testOwnersOfALessSevereNamingCategoryDoNotOwnTheOthers() throws {
+        var cat = try catalog()
+        let i = try XCTUnwrap(cat.categories.firstIndex { $0.id == "ssh" })
+        cat.categories[i].paths.append("~/.aws/keys")
+        let file = "/Users/alice/.aws/keys/config"
+        let c = PathClassifier(catalog: cat, normalizer: PathNormalizer(homeDirectories: [home]))
+        XCTAssertEqual(c.classifications(file).map(\.categoryID), ["ssh", "aws"])
+        XCTAssertEqual(c.classifications(file).map(\.severity), [.medium, .critical])
+
+        let denyAWS = enforced(Rule(id: "deny-nonowner-aws", target: .category("aws"), subject: .anyNonOwner, access: .read,
+                                    action: .deny, includePlatformBinaries: true))
+        let h = try harness(rules: [denyAWS], catalog: cat, learningDays: 0)
+        let ssh = userShell(h, proc(502, "/usr/bin/ssh", ppid: 500, platform: true, signingID: "com.apple.openssh"))
+        XCTAssertEqual(authDecision(h, read(ssh, file)).verdict, .deny)
+        XCTAssertEqual(authDecision(h, read(ssh, file)).ruleID, "deny-nonowner-aws")
+        h.rules.replace(rules: [])
+        let asked = authDecision(h, read(ssh, file), ask: ask)
+        XCTAssertEqual(asked.verdict, .ask)
+        XCTAssertEqual(asked.askKey?.categoryID, "aws")
+        let out = h.analyzer.handle(.file(read(ssh, file)))
+        XCTAssertEqual(out.events.first { $0.categoryID == "ssh" }?.isOwner, true)
+        XCTAssertEqual(out.events.first { $0.categoryID == "aws" }?.isOwner, false)
+        XCTAssertEqual(out.alerts.map(\.alert.categoryID), ["aws"])
+    }
+
     // Monitor-only: one event and one alert per category.
     func testEveryCategoryGetsItsOwnEventAndAlert() throws {
         let h = try harness(catalog: try catalog(custom: ["~/.ssh/work"]), learningDays: 0)

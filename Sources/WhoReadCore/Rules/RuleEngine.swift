@@ -17,11 +17,12 @@ public struct EvaluationTarget: Sendable {
     public var access: AccessSet
     public var categories: [TargetCategory]
     /// The category the path is named by (`PathClassifier.classify`), when it is one of several the
-    /// path belongs to: its owners count as owners for the path's other categories too (Chrome reading
-    /// its profile in a home on an external volume is the profile's owner there as well).
-    public var primaryCategory: String?
+    /// path belongs to: its owners count as owners for the path's other categories that are not more
+    /// severe (Chrome reading its cookies in a home on an external volume is their owner there too,
+    /// but ssh is no owner of a critical aws file that a medium ssh path was added inside).
+    public var primaryCategory: TargetCategory?
 
-    public init(path: String, access: AccessSet, categories: [TargetCategory], primaryCategory: String? = nil) {
+    public init(path: String, access: AccessSet, categories: [TargetCategory], primaryCategory: TargetCategory? = nil) {
         self.path = path
         self.access = access
         self.categories = categories
@@ -255,9 +256,11 @@ public final class RuleEngine: @unchecked Sendable {
             return v
         }
         /// Owner of a category of a path: of the category itself, or of the category the path is
-        /// named by.
-        func owns(_ category: String, _ primary: String?) -> Bool {
-            isOwner(category) || (primary.map { $0 != category && isOwner($0) } ?? false)
+        /// named by when that one is at least as severe.
+        func owns(_ category: TargetCategory, _ primary: TargetCategory?) -> Bool {
+            if isOwner(category.id) { return true }
+            guard let primary, primary.id != category.id, primary.severity >= category.severity else { return false }
+            return isOwner(primary.id)
         }
         var responsibleCache: ResponsibleEntity??
         func responsible() -> ResponsibleEntity? {
@@ -274,7 +277,7 @@ public final class RuleEngine: @unchecked Sendable {
         /// `unsignedKey` is the precompiled program path of an `.unsigned` subject. For deny rules a
         /// pinned cdhash also matches the same code at any other path (copying the binary is not a
         /// way around a block), and a responsible agent also matches wherever it is in the chain.
-        func subjectMatches(_ subject: RuleSubject, category: String, primary: String?, unsignedKey: String? = nil,
+        func subjectMatches(_ subject: RuleSubject, category: TargetCategory, primary: TargetCategory?, unsignedKey: String? = nil,
                             widenForDeny: Bool = false) -> Bool {
             switch subject {
             case .signed(let sid, let team):
@@ -363,7 +366,7 @@ public final class RuleEngine: @unchecked Sendable {
                     }
                     // Scoped to the AI agents the user saw: a chain with any other agent is not covered.
                     if let scope = c.chainAgents, !chainAgents.isSubset(of: scope) { continue }
-                    guard subjectMatches(c.rule.subject, category: category.id, primary: target.primaryCategory,
+                    guard subjectMatches(c.rule.subject, category: category, primary: target.primaryCategory,
                                          unsignedKey: c.unsignedKey, widenForDeny: c.rule.action == .deny) else { continue }
 
                     switch c.rule.action {
@@ -384,7 +387,7 @@ public final class RuleEngine: @unchecked Sendable {
                             if !prefixes.isEmpty && !prefixes.contains(where: { pathKey == $0 || pathKey.hasPrefix($0 + "/") }) {
                                 return false
                             }
-                            return subjectMatches(e.subject, category: category.id, primary: target.primaryCategory,
+                            return subjectMatches(e.subject, category: category, primary: target.primaryCategory,
                                                   unsignedKey: c.exceptionUnsignedKeys[ei])
                         }
                         if let ei = exceptionIndex {
@@ -450,7 +453,7 @@ public final class RuleEngine: @unchecked Sendable {
                 for (ci, category) in t.categories.enumerated() {
                     if allowedKinds[ti][ci] != .readWrite { staticAllow = false }
                     if allowed[ti][ci].isSuperset(of: needed) { continue }
-                    if chainAgents.isEmpty && ancestryKnown && owns(category.id, t.primaryCategory) {
+                    if chainAgents.isEmpty && ancestryKnown && owns(category, t.primaryCategory) {
                         byOwner = true
                         continue
                     }
@@ -520,7 +523,7 @@ public final class RuleEngine: @unchecked Sendable {
             return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: .alertRule,
                                 ruleID: rule.id, forceAlert: true, cacheable: cacheable)
         }
-        let owner = sensitive.allSatisfy { t in t.categories.allSatisfy { owns($0.id, t.primaryCategory) } }
+        let owner = sensitive.allSatisfy { t in t.categories.allSatisfy { owns($0, t.primaryCategory) } }
         return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: owner ? .owner : .defaultAllow,
                             cacheable: cacheable)
     }
