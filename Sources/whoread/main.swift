@@ -407,9 +407,11 @@ func cmdAsks(_ c: IPCClient) throws {
         let program = r.responsible.path.map { DisplayText.path(ctx.normalizer.abbreviate($0)) }.map { path in
             AlertFormatter.signer(of: r.responsible, chain: r.chain).map { path + " (" + ctx.formatter.signerName($0) + ")" } ?? path
         } ?? ""
+        // Who started the program was not seen: an AI agent may be behind it.
+        let unknown = r.key.ancestryKnown ? [] : [zh ? "启动者未知" : "unknown starter"]
         return [String(r.id), DisplayText.name(r.responsible.displayName), program, ctx.categoryName(r.key.categoryID) + "/" + r.severity.rawValue,
                 r.key.access.label, ctx.normalizer.abbreviate(r.path),
-                agentIDs.map { ctx.agentName($0, agents) }.joined(separator: ", "),
+                (agentIDs.map { ctx.agentName($0, agents) } + unknown).joined(separator: ", "),
                 "\(r.holding)/\(r.attempts)", r.appleProgram ? (zh ? "是" : "yes") : ""]
     }
     out(Format.table(rows, header: zh ? ["编号", "应用", "程序", "类别", "访问", "路径", "AI agent", "等待/次数", "苹果程序"]

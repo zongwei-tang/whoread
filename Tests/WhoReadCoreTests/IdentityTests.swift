@@ -487,3 +487,22 @@ final class AncestryScopedAnswerTests: AncestryTestCase {
         XCTAssertTrue(oldKey.ancestryKnown)
     }
 }
+
+// MARK: - A question about a chain of unknown ancestry says so
+
+final class UnknownAncestryWordingTests: XCTestCase {
+    func alert(known: Bool?) -> Alert {
+        Alert(id: 1, kind: .ask, createdAt: t0, updatedAt: t0, windowEndsAt: t0, responsible: ResponsibleEntity(kind: .binary, key: "bin:apple:com.apple.cat",
+              displayName: "cat"), categoryID: "ssh", severity: .critical, count: 1, accesses: .read, firstPath: sshKey,
+              firstEventID: 1, lastEventID: 1, paths: [sshKey], chain: [], agentID: nil, ruleID: nil, ancestryKnown: known)
+    }
+
+    func testTheHeadlineSaysWhoStartedItIsUnknown() {
+        let en = AlertFormatter(language: .en), zh = AlertFormatter(language: .zhHans)
+        XCTAssertEqual(en.headline(alert(known: false)),
+                       "cat wants to read /Users/alice/.ssh/id_ed25519: not allowed until you decide (started by an unknown process, possibly an AI agent)")
+        XCTAssertEqual(zh.headline(alert(known: false)), "cat 想要读取 /Users/alice/.ssh/id_ed25519，你决定之前不会放行（不知道是谁启动的，可能是 AI agent）")
+        XCTAssertEqual(en.headline(alert(known: true)), "cat wants to read /Users/alice/.ssh/id_ed25519: not allowed until you decide")
+        XCTAssertEqual(en.headline(alert(known: nil)), en.headline(alert(known: true)), "older alerts read as before")
+    }
+}

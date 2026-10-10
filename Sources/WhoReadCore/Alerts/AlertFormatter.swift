@@ -63,6 +63,11 @@ public struct AlertFormatter: Sendable {
         case (.en, .ask):
             text = "\(app) wants to \(verbENBase) \(path): not allowed until you decide"
         }
+        if alert.ancestryKnown == false {
+            // The chain does not reach launchd: whoever started the program was not seen, so "no AI agent
+            // in the chain" cannot be told (an answer here covers only such chains).
+            text += language == .zhHans ? "（不知道是谁启动的，可能是 AI agent）" : " (started by an unknown process, possibly an AI agent)"
+        }
         if alert.count > 1 {
             text += language == .zhHans ? "（\(alert.count) 次）" : " (×\(alert.count))"
         }

@@ -52,7 +52,7 @@ extension AskRequest {
         Alert(id: id, kind: .ask, createdAt: firstAt, updatedAt: lastAt, windowEndsAt: lastAt, responsible: responsible,
               categoryID: key.categoryID, severity: severity, count: attempts, accesses: key.access, firstPath: path,
               firstEventID: 0, lastEventID: 0, paths: [path], chain: chain, agentID: agentID, ruleID: nil,
-              appleProgram: appleProgram)
+              appleProgram: appleProgram, chainAgents: key.chainAgents, ancestryKnown: key.ancestryKnown)
     }
 }
 
