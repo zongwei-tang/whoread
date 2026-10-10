@@ -106,19 +106,26 @@ out=$(VMJOB shell 'echo shell-ok; exit 7' 2>"$T/err"); rc=$?
 
 echo "== jobs queued behind another job"
 # vmjob gives a job its timeout + grace from its start, not from when it was queued; a job still
-# queued after that is withdrawn (exit 70) and never runs. The second job waits about 12 s for the
-# first and then runs about 12 s: within its 20 s from its start, not from when it was queued.
-printf '#!/bin/bash\necho first\nsleep 12\n' > "$T/first.sh"
+# queued after that is withdrawn (exit 70) and never runs. The second job waits about 18 s for the
+# first and then runs about 18 s: within its 30 s from its start, not from when it was queued. The
+# runner's sync before it writes a result can take many seconds on a busy Mac, which would count
+# against both waits here: a stand-in sync leaves only the jobs' own time.
+mkdir -p "$T/syncbin"
+printf '#!/bin/sh\nexit 0\n' > "$T/syncbin/sync"
+chmod +x "$T/syncbin/sync"
+stop_runner
+WHOREAD_VM_RUNNER_TEST_PATH="$T/syncbin" start_runner daemon || bad "runner did not start with the sync stand-in"
+printf '#!/bin/bash\necho first\nsleep 18\n' > "$T/first.sh"
 VMJOB run first "$T/first.sh" > "$T/first.out" 2>&1 &
 FIRST=$!
 for _ in $(seq 50); do grep -qx 'first' "$SHARE/.vm/results/"*-first-*.out 2>/dev/null && break; sleep 0.2; done
-printf '#!/bin/bash\n# timeout: 20\nsleep 12\necho second ran\nexit 4\n' > "$T/second.sh"
+printf '#!/bin/bash\n# timeout: 30\nsleep 18\necho second ran\nexit 4\n' > "$T/second.sh"
 printf '#!/bin/bash\ntouch "%s/third-ran"\n' "$T" > "$T/third.sh"
 WHOREAD_VMJOB_GRACE=0 VMJOB run third "$T/third.sh" --timeout 1 > "$T/third.out" 2>&1 &
 THIRD=$!
 s=$(date +%s); out=$(WHOREAD_VMJOB_GRACE=0 VMJOB run second "$T/second.sh" 2>"$T/err"); rc=$?; e=$(date +%s)
 [ $rc -eq 4 ] && grep -q '^second ran$' <<< "$out" \
-  && ok "a job queued behind another gets its whole time from its start ($((e - s)) s in all, limit 20 s)" \
+  && ok "a job queued behind another gets its whole time from its start ($((e - s)) s in all, limit 30 s)" \
   || bad "queued job: rc $rc after $((e - s)) s: $out $(cat "$T/err")"
 wait $THIRD; rc=$?
 [ $rc -eq 70 ] && grep -q 'still queued' "$T/third.out" && ok "a job still queued after its limit is withdrawn (exit 70)" \
@@ -126,6 +133,8 @@ wait $THIRD; rc=$?
 wait $FIRST
 sleep 2
 [ ! -e "$T/third-ran" ] && ok "the withdrawn job never ran" || bad "the withdrawn job ran"
+stop_runner
+start_runner daemon >/dev/null || bad "runner did not restart"
 s=$(date +%s); out=$(VMJOB result 20000101-000000-nosuch-1 --wait 2>&1); rc=$?; e=$(date +%s)
 [ $rc -eq 70 ] && [ $((e - s)) -lt 5 ] && grep -q 'no job' <<< "$out" && ok "result --wait of an unknown job: 70 at once" \
   || bad "result --wait of an unknown job: rc $rc after $((e - s)) s: $out"
