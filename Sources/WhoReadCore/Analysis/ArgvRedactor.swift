@@ -858,8 +858,8 @@ public enum ArgvRedactor {
     struct Compound {
         /// Indices inside a group whose output goes to a file or a pipe: `{ echo pw; } > FILE`,
         /// `while …; do echo pw; done > FILE`, `if …; then printf …; fi | tee FILE`, `case … esac >
-        /// FILE`, `f() { echo pw; } > FILE` or `f > FILE` after it, `<(echo pw)` (a pipe), over several
-        /// lines too.
+        /// FILE`, `f() { echo pw; } > FILE` or `f > FILE` (or `exec > FILE`, then `f`) after it, `<(echo
+        /// pw)` (a pipe), over several lines too.
         var redirected = Set<Int>()
         /// The words of a `for` loop whose body writes them there (`for l in 'pw'; do echo "$l"; done
         /// > FILE`).
@@ -896,6 +896,8 @@ public enum ArgvRedactor {
         var pendingFunction: String?
         var functions: [String: ClosedRange<Int>] = [:]
         var calls: [(name: String, at: Int, ended: Bool)] = []
+        // The first `exec > FILE`: a function called after it writes there.
+        var execRedirect: Int?
 
         func close(_ frame: Frame, at end: Int, tail: String) {
             if let name = frame.function { functions[name] = frame.start...end }
@@ -1027,6 +1029,7 @@ public enum ArgvRedactor {
                     pendingFunction = String(word.dropLast(2))
                     continue
                 }
+                if word == "exec" && execRedirect == nil && writesOutput(tokens, after: k, lineStarts: lineStarts) { execRedirect = k }
                 let rest = openParentheses(Substring(word), at: k)
                 if rest.contains("$(") {
                     // `x=$(echo …`: an assignment around a command.
@@ -1045,13 +1048,13 @@ public enum ArgvRedactor {
             }
             closeParentheses(closingParentheses(in: word), at: k)
         }
-        // `f() { echo pw; }` then `f > FILE`: the body writes there. A call inside another redirected
-        // body counts too (one more pass).
+        // `f() { echo pw; }` then `f > FILE`, or `f` after `exec > FILE`: the body writes there. A call
+        // inside another redirected body counts too (one more pass).
         for _ in 0..<2 where !functions.isEmpty {
             for call in calls {
                 // `f;` ends its command at its own word: no redirect of its own follows.
                 guard let body = functions[call.name], body.upperBound < call.at,
-                      result.redirected.contains(call.at)
+                      result.redirected.contains(call.at) || execRedirect.map({ $0 < call.at }) == true
                         || (!call.ended && writesOutput(tokens, after: call.at, lineStarts: lineStarts)) else { continue }
                 result.redirected.formUnion(body)
             }

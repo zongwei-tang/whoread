@@ -428,7 +428,11 @@ final class RedactorCoverageTests: XCTestCase {
         // A function that calls another.
         assertRedacted(["/bin/bash", "-c", "a() { echo Hunter2pw; }; b() { a; }; b > ~/WhoReadTestVault/n"],
                        ["/bin/bash", "-c", "a() { echo \(R); }; b() { a; }; b > ~/WhoReadTestVault/n"])
+        // Defined first, called after `exec > FILE`.
+        assertRedacted(["/bin/bash", "-c", "function f() {\n  echo Hunter2pw\n}\nexec > ~/WhoReadTestVault/n\nf"],
+                       ["/bin/bash", "-c", "function f() {\n  echo \(R)\n}\nexec > ~/WhoReadTestVault/n\nf"])
         assertKept([
+            ["/bin/bash", "-c", "f() { echo hello; }; f\nexec > out.txt"], ["/bin/bash", "-c", "f() { echo hello; }; exec 2>/dev/null; f"],
             ["/bin/bash", "-c", "f() { echo hello; }; f"], ["/bin/bash", "-c", "f() { echo hello; }; f 2>/dev/null"],
             ["/bin/bash", "-c", "f() { echo hello; }; f; ls > out.txt"], ["/bin/bash", "-c", "f() { ls; }; f > out.txt"],
             // Called before it is defined: not this body.
