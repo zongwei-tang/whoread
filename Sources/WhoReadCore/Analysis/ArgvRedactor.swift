@@ -565,11 +565,12 @@ public enum ArgvRedactor {
     /// `htpasswd -b[n] [FILE] USER PW`, `mysqladmin password PW`, `dscl . -passwd PATH [OLD] NEW`,
     /// `dscl . -authonly USER PW`, `dscl . -create PATH Password PW`, `networksetup
     /// -setairportnetwork DEV SSID PW` (and the other Wi-Fi and proxy forms), `openssl passwd PW`,
-    /// redis `AUTH [USER] PW`, `CONFIG SET requirepass PW`, `ACL SETUSER … >PW`, and Oracle logons
-    /// (`sqlplus user/PW@db`, `userid=user/PW`, `rman target user/PW@db`).
+    /// redis `AUTH [USER] PW`, `CONFIG SET requirepass PW`, `ACL SETUSER … >PW`, Oracle logons
+    /// (`sqlplus user/PW@db`, `userid=user/PW`, `rman target user/PW@db`), and `db2 connect to DB
+    /// user U using PW`.
     static func positionalSecrets(_ program: String, tokens: [String], program p: Int, lineStarts: Set<Int>,
                                   shell: Bool) -> [Int: ValueRule] {
-        let known: Set<String> = ["htpasswd", "mysqladmin", "dscl", "networksetup", "openssl"]
+        let known: Set<String> = ["htpasswd", "mysqladmin", "dscl", "networksetup", "openssl", "db2"]
         guard known.contains(program) || redisClients.contains(program) || oracleClients.contains(program) else { return [:] }
         let words = commandWords(tokens, program: p, lineStarts: lineStarts, shell: shell)
         let text = words.map { word -> String in
@@ -600,6 +601,13 @@ public enum ArgvRedactor {
             if batch && !fromStdin && positionals.count >= (display ? 2 : 3), let last = positionals.last { out[last] = .secret }
         case "mysqladmin":
             for j in words.indices.dropLast() where ["password", "old-password"].contains(text[j].lowercased()) && !text[j + 1].hasPrefix("-") {
+                out[words[j + 1]] = .secret
+            }
+        case "db2":
+            // `db2 connect to DB user U using PW [new PW confirm PW]` (also `attach to NODE …`).
+            let lower = text.map { $0.lowercased() }
+            guard let using = lower.indices.first(where: { $0 >= 2 && lower[$0] == "using" && lower[$0 - 2] == "user" }) else { break }
+            for j in words.indices.dropLast() where j == using || (j > using && ["new", "confirm"].contains(lower[j])) {
                 out[words[j + 1]] = .secret
             }
         case "dscl":
@@ -1204,10 +1212,11 @@ public enum ArgvRedactor {
     /// SQL that sets a password, wherever the statement is (`psql -c`, `mysql -e`, `sqlcmd -Q`, a
     /// heredoc fed to a client): `ALTER USER bob [WITH] PASSWORD 'x'`, `CREATE USER 'bob'@'%'
     /// IDENTIFIED [WITH plugin] BY 'x'`, `SET PASSWORD [FOR u] = 'x'` or `= PASSWORD('x')`,
-    /// `ALTER LOGIN sa WITH PASSWORD = 'x' OLD_PASSWORD = 'y'`, `… REPLACE 'current'`, and
-    /// `CONNECT user/x@db` (sqlplus). A literal's contents go and its quotes stay. An unquoted value
-    /// counts only inside a statement that creates or changes a user (Oracle's `IDENTIFIED BY tiger`):
-    /// "password" in a sentence, a `SELECT` or a `CREATE TABLE` is left alone.
+    /// `ALTER LOGIN sa WITH PASSWORD = 'x' OLD_PASSWORD = 'y'`, `… REPLACE 'current'`, `CONNECT
+    /// user/x@db` (sqlplus), `CONNECT TO user IDENTIFIED BY x` (a database link) and `CONNECT TO db
+    /// USER u USING x` (Db2). A literal's contents go and its quotes stay. An unquoted value counts
+    /// only inside a statement that creates or changes a user or connects (Oracle's `IDENTIFIED BY
+    /// tiger`): "password" in a sentence, a `SELECT` or a `CREATE TABLE` is left alone.
     ///
     /// The SQL may sit inside shell quoting: a double quote is only taken as a string delimiter where
     /// a value is expected, so `psql -c "ALTER USER …"` is read through; a single-quoted shell word
@@ -1233,7 +1242,7 @@ public enum ArgvRedactor {
             case punct(Unicode.Scalar)
             case end
         }
-        enum Statement { case none, user, setPassword, grant }
+        enum Statement { case none, user, setPassword, grant, connectTo }
 
         let text: [Unicode.Scalar]
         var i = 0
@@ -1466,11 +1475,26 @@ public enum ArgvRedactor {
                             setPasswordValueSeen = false
                         }
                     case "IDENTIFIED":
-                        identified(bare: statement == .user || statement == .grant)
+                        identified(bare: statement == .user || statement == .grant || statement == .connectTo)
                     case "REPLACE":
                         if statement == .user || statement == .setPassword { value(bare: statement == .user) }
                     case "CONNECT", "CONN":
-                        connect()
+                        if upper(peek()) == "TO" {
+                            // `CREATE DATABASE LINK l CONNECT TO user IDENTIFIED BY x` (Oracle), `CONNECT
+                            // TO db USER u USING x [NEW y CONFIRM y]` (Db2, embedded SQL).
+                            _ = next()
+                            statement = .connectTo
+                        } else {
+                            connect()
+                        }
+                    case "USER" where statement == .connectTo:
+                        _ = next()  // the user name (a word or a literal)
+                        if upper(peek()) == "USING" {
+                            _ = next()
+                            value(bare: true)
+                        }
+                    case "NEW", "CONFIRM":
+                        if statement == .connectTo { value(bare: true) }
                     default:
                         break
                     }

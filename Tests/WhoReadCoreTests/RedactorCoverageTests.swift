@@ -68,6 +68,26 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "sqlplus -s /nolog <<EOF\nCONNECT system/\(R)@db\nALTER USER bob IDENTIFIED BY \(R);\nEOF"])
     }
 
+    /// Statements that connect with a password: an Oracle database link (`CONNECT TO user IDENTIFIED
+    /// BY pw`, the password unquoted) and Db2's `CONNECT TO db USER u USING pw [NEW pw CONFIRM pw]`,
+    /// also as the separate words of a `db2` command.
+    func testSQLThatConnectsWithAPassword() {
+        assertRedacted(["sqlplus", "-s", "/nolog", "CREATE DATABASE LINK l CONNECT TO bob IDENTIFIED BY Hunter2pw USING 'db'"],
+                       ["sqlplus", "-s", "/nolog", "CREATE DATABASE LINK l CONNECT TO bob IDENTIFIED BY \(R) USING 'db'"])
+        assertRedacted(["/bin/zsh", "-c", "sqlplus -s /nolog <<EOF\nCREATE PUBLIC DATABASE LINK l CONNECT TO bob IDENTIFIED BY \"Hunter2pw\" USING 'db';\nEOF"],
+                       ["/bin/zsh", "-c", "sqlplus -s /nolog <<EOF\nCREATE PUBLIC DATABASE LINK l CONNECT TO bob IDENTIFIED BY \"\(R)\" USING 'db';\nEOF"])
+        assertRedacted(["/bin/sh", "-c", "db2 \"connect to sample user bob using 'Hunter2pw'\" && db2 \"select 1 from sysibm.sysdummy1\""],
+                       ["/bin/sh", "-c", "db2 \"connect to sample user bob using '\(R)'\" && db2 \"select 1 from sysibm.sysdummy1\""])
+        assertRedacted(["db2", "connect", "to", "sample", "user", "bob", "using", "Hunter2pw"],
+                       ["db2", "connect", "to", "sample", "user", "bob", "using", R])
+        assertRedacted(["db2", "CONNECT", "TO", "sample", "USER", "bob", "USING", "Old2pwxx", "NEW", "Hunter2pw", "CONFIRM", "Hunter2pw"],
+                       ["db2", "CONNECT", "TO", "sample", "USER", "bob", "USING", R, "NEW", R, "CONFIRM", R], secrets: [secret, "Old2pwxx"])
+        assertKept([
+            ["db2", "connect", "to", "sample"], ["db2", "connect to sample"], ["db2", "list", "database", "directory"],
+            ["psql", "-c", "SELECT * FROM t JOIN u USING (id)"], ["psql", "-c", "\\connect app"],
+        ])
+    }
+
     func testSQLThatOnlyMentionsPasswordsIsKept() {
         assertKept([
             ["psql", "-c", "SELECT usename, passwd IS NOT NULL FROM pg_shadow"],
