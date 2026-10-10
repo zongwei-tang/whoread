@@ -1593,6 +1593,11 @@ public final class DaemonCore: @unchecked Sendable {
         tree.prune(now: now)
         coalescer.expire(now: now)
         askBroker.expire()
+        // dos-1: the baseline is bounded, and with the hourly retention it forgets what history no
+        // longer holds (unapproved entries not seen within the retention period).
+        let retentionDue = now.timeIntervalSince(lastRetention) > 3600
+        let forgotten = baseline.prune(lastSeenBefore: retentionDue ? now.addingTimeInterval(-Double(currentSettings.retentionDays) * 86400) : nil)
+        if forgotten > 0 { Log.info("baseline: forgot \(forgotten) unapproved entries (not seen within retention, or over the limit)") }
         persistBaseline()
         if now.timeIntervalSince(lastRetention) > 3600 {
             lastRetention = now

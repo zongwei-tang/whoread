@@ -123,7 +123,7 @@ public final class NotificationPlanner: @unchecked Sendable {
             let title = a.kind == .blocked ? L10n.t(.notifBlockedTitle, formatter.language) : L10n.t(.notifTitle, formatter.language)
             out.append(PlannedNotification(
                 identifier: "alert-\(a.id)-\(Int(a.createdAt.timeIntervalSince1970))-\(a.kind.rawValue)-\(a.firstEventID)", alertID: a.id, title: title,
-                body: formatter.headline(a) + "\n" + formatter.chainLine(a.chain),
+                body: [formatter.headline(a), formatter.identityLine(a), formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
                 categoryIdentifier: NotificationPlanner.category(for: a.kind, appleProgram: a.appleProgram), threadIdentifier: a.categoryID,
                 actions: a.availableActions))
         }
@@ -146,6 +146,9 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// `agentName`: display name of an AI agent id (`AppModel.agentName`).
     /// `complete`: the reply listed every open question. The daemon caps the list (200), so a question
     /// missing from a capped reply may still be open: only a complete reply withdraws banners.
+    /// The body puts the AI agents in the chain first (a collapsed banner shows only its first lines),
+    /// then the headline, where the program really is and who signed it, and the chain; names and
+    /// paths are escaped and capped (`DisplayText`).
     public func plan(asks: [AskRequest], formatter: AlertFormatter, complete: Bool = true,
                      agentName: (String) -> String = { $0 }) -> AskNotificationPlan {
         var plan = AskNotificationPlan()
@@ -156,8 +159,8 @@ public final class NotificationPlanner: @unchecked Sendable {
             if let seen = askNotified[a.id], abs(seen.timeIntervalSince(a.firstAt)) < 1 { continue }
             plan.post.append(PlannedAskNotification(
                 identifier: NotificationPlanner.askIdentifier(a.id), askID: a.id, title: L10n.t(.notifAskTitle, formatter.language),
-                body: [formatter.headline(a.asAlert), a.agentsLine(formatter.language, agentName: agentName),
-                       formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
+                body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.asAlert),
+                       formatter.identityLine(a.asAlert), formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
                 categoryIdentifier: a.appleProgram ? NotificationPlanner.categoryAskApple : NotificationPlanner.categoryAsk,
                 actions: AskAnswers.actions(for: a)))
         }
@@ -211,7 +214,7 @@ public struct OnboardingModel: Equatable, Sendable {
         if text.contains("not_permitted") || text.contains("full disk access") || text.contains("permitted") {
             return .waiting
         }
-        return s.sourceError.map { .failed($0) } ?? .waiting
+        return s.sourceError.map { .failed(DisplayText.escaped($0, limit: 1000)) } ?? .waiting
     }
 
     public func daemonState(_ status: DaemonStatus?, connected: Bool) -> StepState {

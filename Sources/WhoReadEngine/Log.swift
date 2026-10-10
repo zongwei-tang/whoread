@@ -31,21 +31,12 @@ public enum Log {
 }
 
 extension Log {
-    /// File names, rule ids and process names are attacker-controlled: escape control characters and
-    /// line separators so one message is always one line (no forged log entries), and cap the length.
+    /// File names, rule ids and process names are attacker-controlled: escape control characters,
+    /// line separators and bidi/zero-width formatting characters so one message is always one line
+    /// that reads as written (no forged log entries), and cap the length. Same rules as everything
+    /// WhoRead shows (`DisplayText`).
     static func sanitize(_ message: String, maxLength: Int = 4096) -> String {
-        var out = String.UnicodeScalarView()
-        var count = 0
-        for s in message.unicodeScalars {
-            if count >= maxLength { out.append(contentsOf: "…".unicodeScalars); break }
-            if s.value < 0x20 || s.value == 0x7F || (0x80...0x9F).contains(s.value) || s.value == 0x2028 || s.value == 0x2029 {
-                out.append(contentsOf: "\\u{\(String(s.value, radix: 16))}".unicodeScalars)
-            } else {
-                out.append(s)
-            }
-            count += 1
-        }
-        return String(out)
+        DisplayText.escaped(message, limit: maxLength + 1)
     }
 }
 

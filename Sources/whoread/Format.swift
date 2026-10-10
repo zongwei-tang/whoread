@@ -58,8 +58,11 @@ enum Format {
         }
     }
 
+    /// Cells hold names and paths from the programs and files themselves: each is escaped
+    /// (`DisplayText`), so a name cannot move the cursor, hide the rest of its row, erase a line or
+    /// break the columns. Cap names where they are put in (`DisplayText.name`); paths stay whole.
     static func table(_ rows: [[String]], header: [String]) -> String {
-        let all = [header] + rows
+        let all = ([header] + rows).map { $0.map { DisplayText.escaped($0) } }
         var widths = Array(repeating: 0, count: header.count)
         for r in all { for (i, c) in r.enumerated() where i < widths.count { widths[i] = max(widths[i], displayWidth(c)) } }
         return all.enumerated().map { (idx, r) in
@@ -70,5 +73,21 @@ enum Format {
 
     static func json<T: Encodable>(_ v: T) throws -> String {
         String(decoding: try Exporter.encoder(pretty: true).encode(v), as: UTF8.self)
+    }
+
+    /// JSON as printed to a terminal: JSONEncoder escapes only C0 controls, so DEL, C1 controls
+    /// (U+009B is a CSI to some terminals), bidi controls and the other hidden characters
+    /// (`DisplayText.isHidden`) are written as `\u` escapes too. Such a character can only be inside
+    /// a string (the encoder writes nothing else but ASCII and line breaks), so the document stays
+    /// valid and decodes to exactly the same values.
+    static func terminalSafeJSON(_ json: String) -> String {
+        func hidden(_ u: Unicode.Scalar) -> Bool { u != "\n" && DisplayText.isHidden(u) }
+        guard json.unicodeScalars.contains(where: hidden) else { return json }
+        var out = String.UnicodeScalarView()
+        for u in json.unicodeScalars {
+            guard hidden(u) else { out.append(u); continue }
+            for unit in String(u).utf16 { out.append(contentsOf: String(format: "\\u%04x", unit).unicodeScalars) }
+        }
+        return String(out)
     }
 }

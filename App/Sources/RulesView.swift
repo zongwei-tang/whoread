@@ -82,13 +82,13 @@ struct RuleRow: View {
         switch r.target {
         case .category(let id): target = model.categoryName(id)
         case .severityAtLeast(let s): target = L10n.t(.targetSeverity) + " " + L10n.severity(s)
-        case .pathPrefix(let p): target = p
+        case .pathPrefix(let p): target = model.display(p)
         }
         let subject: String
         switch r.subject {
-        case .signed(let sid, _): subject = sid
-        case .unsigned(let p, _): subject = p
-        case .responsible(let k, _, _, _): subject = k.replacingOccurrences(of: "app:", with: "").replacingOccurrences(of: "agent:", with: "")
+        case .signed(let sid, _): subject = model.display(sid)
+        case .unsigned(let p, _): subject = model.display(p)
+        case .responsible(let k, _, _, _): subject = model.display(k.replacingOccurrences(of: "app:", with: "").replacingOccurrences(of: "agent:", with: ""))
         case .anyNonOwner: subject = L10n.t(.subjectAnyNonOwner)
         case .agentAncestor(let ids, _): subject = ids.map { $0.map(model.agentName).joined(separator: ", ") } ?? L10n.t(.subjectAgentChain)
         }

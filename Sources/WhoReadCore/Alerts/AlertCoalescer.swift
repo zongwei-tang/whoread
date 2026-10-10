@@ -39,11 +39,16 @@ public final class AlertCoalescer: @unchecked Sendable {
     private var nextID: Int64
     public var window: TimeInterval
     public var maxPaths: Int
+    /// Open windows kept at most (dos-1: distinct unsigned program paths are distinct apps, so a
+    /// flood is not merged). Beyond it the windows that close first are dropped: a later event of
+    /// that app and category then opens a new alert instead of joining the old one.
+    public let maxOpen: Int
 
-    public init(window: TimeInterval = 600, nextID: Int64 = 1, maxPaths: Int = 8) {
+    public init(window: TimeInterval = 600, nextID: Int64 = 1, maxPaths: Int = 8, maxOpen: Int = 10_000) {
         self.window = window
         self.nextID = nextID
         self.maxPaths = maxPaths
+        self.maxOpen = max(1, maxOpen)
     }
 
     /// Reloads alerts whose window is still open (after a daemon restart).
@@ -101,6 +106,7 @@ public final class AlertCoalescer: @unchecked Sendable {
             if let a = open[key], event.time >= a.windowEndsAt { open[key] = nil }
             return nil
         }
+        if open.count >= maxOpen { makeRoom(at: event.time) }
         let alert = Alert(
             id: nextID, kind: kind, createdAt: event.time, updatedAt: event.time,
             windowEndsAt: event.time.addingTimeInterval(window), responsible: event.responsible,
@@ -120,6 +126,15 @@ public final class AlertCoalescer: @unchecked Sendable {
             a.resolution = resolution
             open[k] = a
         }
+    }
+
+    /// Drops closed windows, then (still full) the tenth of the windows that close first, so a
+    /// flood sorts once per thousand new alerts rather than on every one. Lock held.
+    private func makeRoom(at now: Date) {
+        open = open.filter { now < $0.value.windowEndsAt }
+        guard open.count >= maxOpen else { return }
+        let drop = open.count - maxOpen + max(1, maxOpen / 10)
+        for (key, _) in open.sorted(by: { $0.value.windowEndsAt < $1.value.windowEndsAt }).prefix(drop) { open[key] = nil }
     }
 
     /// Drops closed windows.

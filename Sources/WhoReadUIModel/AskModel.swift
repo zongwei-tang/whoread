@@ -44,7 +44,7 @@ extension AskRequest {
     /// that agent, and the headline may name just the app (Terminal). nil without an agent.
     public func agentsLine(_ language: Language, agentName: (String) -> String = { $0 }) -> String? {
         guard !key.chainAgents.isEmpty else { return nil }
-        return L10n.f(.askAgentsFormat, key.chainAgents.map(agentName).joined(separator: ", "), language: language)
+        return L10n.f(.askAgentsFormat, key.chainAgents.map { DisplayText.name(agentName($0)) }.joined(separator: ", "), language: language)
     }
 
     /// This question as an `ask` alert, so it reads like one (`AlertFormatter.headline`).

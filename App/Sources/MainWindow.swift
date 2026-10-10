@@ -57,7 +57,7 @@ struct LiveView: View {
                 Table(model.liveRows, selection: $selection) {
                     TableColumn(L10n.t(.colTime)) { e in Text(e.time.formatted(date: .omitted, time: .standard)).monospacedDigit() }
                         .width(min: 70, ideal: 80)
-                    TableColumn(L10n.t(.colApp)) { e in Text(e.responsible.displayName) }.width(min: 90, ideal: 120)
+                    TableColumn(L10n.t(.colApp)) { e in Text(model.displayName(e.responsible)) }.width(min: 90, ideal: 120)
                     TableColumn(L10n.t(.colOperation)) { e in Text(L10n.operation(e.operation) + " · " + L10n.access(e.access)) }
                         .width(min: 80, ideal: 110)
                     TableColumn(L10n.t(.colPath)) { e in Text(model.abbreviate(e.path)).lineLimit(1).truncationMode(.middle) }
@@ -93,25 +93,25 @@ struct EventDetail: View {
                 LabeledContent(L10n.t(.colOperation), value: L10n.operation(event.operation) + " · " + L10n.access(event.access))
                 LabeledContent(L10n.t(.colCategory), value: model.categoryName(event.categoryID))
                 LabeledContent(L10n.t(.colDecision)) { DecisionBadge(event: event) }
-                LabeledContent(L10n.t(.detResponsible), value: event.responsible.displayName)
+                LabeledContent(L10n.t(.detResponsible), value: model.displayName(event.responsible))
                 if let agent = event.agentID {
                     LabeledContent(L10n.t(.colAgent), value: model.agentName(agent))
                 }
             }
             Section(L10n.t(.detProcess)) {
                 LabeledContent(L10n.t(.detPID), value: String(p.pid))
-                LabeledContent(L10n.t(.detExecutable), value: p.executablePath)
-                LabeledContent(L10n.t(.ruleSigningID), value: p.signingID ?? "—")
-                LabeledContent(L10n.t(.ruleTeamID), value: p.teamID ?? "—")
+                LabeledContent(L10n.t(.detExecutable), value: model.display(p.executablePath))
+                LabeledContent(L10n.t(.ruleSigningID), value: p.signingID.map(model.display) ?? "—")
+                LabeledContent(L10n.t(.ruleTeamID), value: p.teamID.map(model.display) ?? "—")
                 LabeledContent(L10n.t(.detCdhash), value: p.cdhash ?? "—")
                 LabeledContent(L10n.t(.detPlatformBinary), value: p.isPlatformBinary ? L10n.t(.yes) : L10n.t(.no))
                 if let argv = p.argv {
-                    LabeledContent(L10n.t(.detArguments), value: argv.joined(separator: " "))
+                    LabeledContent(L10n.t(.detArguments), value: model.display(argv.joined(separator: " ")))
                 }
             }
             Section(L10n.t(.colChain)) {
                 ForEach(Array(event.chain.enumerated()), id: \.offset) { _, link in
-                    Text(verbatim: "\(link.name) (\(link.pid))").help(link.path)
+                    Text(verbatim: "\(model.display(link.name)) (\(link.pid))").help(model.display(link.path))
                 }
             }
         }
@@ -169,6 +169,9 @@ struct AlertRow: View {
                 Text(alert.updatedAt.shortTime).font(.caption).foregroundStyle(.secondary)
             }
             Text(f.headline(alert)).font(.body.weight(.medium))
+            if let identity = model.identityLine(alert) {
+                Text(identity).font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+            }
             Text(f.chainLine(alert.chain)).font(.caption).foregroundStyle(.secondary)
             if alert.paths.count > 1 {
                 Text(L10n.t(.pathsSeen) + ": " + alert.paths.map(model.abbreviate).joined(separator: ", "))

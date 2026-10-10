@@ -227,7 +227,8 @@ public final class ServiceHandler: IPCHandler, @unchecked Sendable {
         case .agents:
             return .agents(d.data.agents)
         case .baseline:
-            return .baseline(d.baseline.allEntries.sorted { $0.lastSeen > $1.lastSeen })
+            // The newest only: one reply stays far below the transports' frame limits (dos-1).
+            return .baseline(d.baseline.newestEntries(limit: Baseline.replyLimit))
         case .restartLearning:
             try d.restartLearning(peer: peer)
             return .status(d.status())

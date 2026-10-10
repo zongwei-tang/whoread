@@ -82,17 +82,17 @@ struct DecisionBadge: View {
     }
 }
 
-/// "Claude Code → zsh → cat", trimmed to the responsible app, with the full chain in a tooltip.
+/// "Claude Code → zsh → cat", trimmed to the responsible app, with the full chain in a tooltip
+/// (both escaped by the model: process names and argv are the programs' own).
 struct ChainText: View {
+    @Environment(AppModel.self) private var model
     let chain: [ChainLink]
     let responsible: ResponsibleEntity
     var body: some View {
-        Text(chain.displayString(responsible: responsible))
+        Text(model.chainText(chain, responsible: responsible))
             .lineLimit(1)
             .truncationMode(.middle)
-            .help(chain.map { link in
-                link.name + (link.argv.map { " " + $0.dropFirst().joined(separator: " ") } ?? "")
-            }.joined(separator: "\n→ "))
+            .help(model.chainDetail(chain))
     }
 }
 

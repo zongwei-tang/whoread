@@ -223,7 +223,7 @@ public final class AppModel {
     public func apply(_ s: Snapshot) {
         switch s.handshake {
         case .ok: versionProblem = nil
-        case .mismatch(let m): versionProblem = m
+        case .mismatch(let m): versionProblem = DisplayText.escaped(m, limit: 1000)
         case nil: break
         }
         if let e = s.error {
@@ -232,7 +232,7 @@ public final class AppModel {
             // Nobody can answer them through a daemon that does not answer (or cannot be read).
             asks = []
             // The handshake's message (just set) reads better than a decoder dump.
-            if e.code == .versionMismatch, versionProblem == nil { versionProblem = e.message }
+            if e.code == .versionMismatch, versionProblem == nil { versionProblem = DisplayText.escaped(e.message, limit: 1000) }
             return
         }
         lastError = nil
@@ -330,17 +330,47 @@ public final class AppModel {
         return AlertFormatter(language: language, abbreviate: { n.abbreviate($0) }, categoryName: { catalog?.category($0)?.name })
     }
 
+    // MARK: - Display text
+    //
+    // Names, paths and argv come from the programs and files themselves: everything below is for
+    // showing, escaped (`DisplayText`) so a name cannot forge lines, reorder text or hide what
+    // follows it. Never feed these back into rules or requests: use the raw values (keys, paths).
+
+    /// A path as shown (`~/…`), escaped but not shortened (tables truncate it, details show it whole).
     public func abbreviate(_ path: String) -> String {
-        PathNormalizer(homeDirectories: catalog?.homeDirectories ?? status?.homeDirectories ?? []).abbreviate(path)
+        DisplayText.escaped(PathNormalizer(homeDirectories: catalog?.homeDirectories ?? status?.homeDirectories ?? []).abbreviate(path))
     }
 
+    /// Any other text from an event or a process (an executable path, a signing ID, argv), whole.
+    public func display(_ text: String) -> String { DisplayText.escaped(text) }
+
+    /// The app, agent or program an access is charged to.
+    public func displayName(_ r: ResponsibleEntity) -> String { DisplayText.name(r.displayName) }
+
     public func categoryName(_ id: String) -> String {
-        catalog?.catalog.category(id)?.name.resolve(language) ?? id
+        DisplayText.name(catalog?.catalog.category(id)?.name.resolve(language) ?? id)
     }
 
     public func agentName(_ id: String) -> String {
-        agents?.agent(id)?.name.resolve(language) ?? id
+        DisplayText.name(agents?.agent(id)?.name.resolve(language) ?? id)
     }
+
+    /// "Claude Code → zsh → cat", trimmed to the responsible app (`displayString`), each name escaped
+    /// and capped, the whole cut in the middle when long.
+    public func chainText(_ chain: [ChainLink], responsible: ResponsibleEntity) -> String {
+        DisplayText.chain(chain, responsible: responsible)
+    }
+
+    /// The whole chain with each process's (redacted) arguments, one process per line.
+    public func chainDetail(_ chain: [ChainLink]) -> String {
+        chain.map { link in
+            DisplayText.name(link.name) + (link.argv.map { " " + DisplayText.escaped($0.dropFirst().joined(separator: " "), limit: 300) } ?? "")
+        }.joined(separator: "\n→ ")
+    }
+
+    /// "Program: ~/x/Terminal.app (not signed by an identified developer)" for a question or alert
+    /// (`AlertFormatter.identityLine`): where the program really is and who signed it.
+    public func identityLine(_ alert: Alert) -> String? { formatter.identityLine(alert) }
 
     // MARK: - Enforcement
 
@@ -402,11 +432,12 @@ public final class AppModel {
            let category = catalog?.catalog.category(id)?.name {
             let prefix = "Block ", suffix = " from " + category.en
             if name.hasPrefix(prefix), name.hasSuffix(suffix), name.count > prefix.count + suffix.count {
-                let app = String(name.dropFirst(prefix.count).dropLast(suffix.count))
-                return L10n.f(.ruleBlockAppFormat, app, category.resolve(language), language: language)
+                // The app part is the name the app gave itself when the rule was made.
+                let app = DisplayText.name(String(name.dropFirst(prefix.count).dropLast(suffix.count)))
+                return L10n.f(.ruleBlockAppFormat, app, DisplayText.name(category.resolve(language)), language: language)
             }
         }
-        return r.name ?? r.id
+        return DisplayText.escaped(r.name ?? r.id, limit: 2 * DisplayText.nameLimit + 40)
     }
 
     /// The AI agents a rule is scoped to (`Rule.chainAgents`, set by answers to questions); nil
@@ -459,7 +490,7 @@ public final class AppModel {
         for s in summaries where showSystemNoise || !s.benign { groups[s.responsible.key, default: []].append(s) }
         return groups.map { key, list in
             let latest = list.max { $0.lastSeen < $1.lastSeen }!.responsible
-            return AppRow(id: key, name: list[0].responsible.displayName, kind: list[0].responsible.kind,
+            return AppRow(id: key, name: DisplayText.name(list[0].responsible.displayName), kind: list[0].responsible.kind,
                           categories: Array(Set(list.map(\.categoryID))).map(categoryName).sorted(),
                           firstSeen: list.map(\.firstSeen).min()!, lastSeen: list.map(\.lastSeen).max()!,
                           count: list.reduce(0) { $0 + $1.count }, denied: list.reduce(0) { $0 + $1.denied },
@@ -473,8 +504,8 @@ public final class AppModel {
         for s in summaries where showSystemNoise || !s.benign { byCategory[s.categoryID, default: []].append(s) }
         return info.catalog.categories.filter(\.enabled).map { c in
             let list = byCategory[c.id] ?? []
-            return FileRow(id: c.id, name: c.name.resolve(language), severity: c.severity, detected: info.detected[c.id] ?? false,
-                           apps: Array(Set(list.map(\.responsible.displayName))).sorted(), lastSeen: list.map(\.lastSeen).max(),
+            return FileRow(id: c.id, name: DisplayText.name(c.name.resolve(language)), severity: c.severity, detected: info.detected[c.id] ?? false,
+                           apps: Array(Set(list.map { DisplayText.name($0.responsible.displayName) })).sorted(), lastSeen: list.map(\.lastSeen).max(),
                            count: list.reduce(0) { $0 + $1.count })
         }.sorted { a, b in
             if (a.lastSeen != nil) != (b.lastSeen != nil) { return a.lastSeen != nil }

@@ -20,6 +20,10 @@ struct AskRow: View {
                 deadline
             }
             Text(f.headline(ask.asAlert)).font(.body.weight(.medium)).multilineTextAlignment(.leading)
+            // Where the program really is and who signed it: the name above is its own choice.
+            if let identity = model.identityLine(ask.asAlert) {
+                Text(identity).font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+            }
             // The answer covers the app only as driven by this agent: say so, the headline may not.
             if let agents = ask.agentsLine(model.language, agentName: model.agentName) {
                 Text(agents).font(.caption.weight(.semibold)).foregroundStyle(.orange)

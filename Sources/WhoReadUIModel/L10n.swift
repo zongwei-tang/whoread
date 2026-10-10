@@ -458,8 +458,9 @@ public enum L10n {
         switch e.code {
         case .notPermitted: return t(.errNotPermitted, language)
         case .unavailable: return t(.errUnavailable, language)
-        case .versionMismatch: return f(.errVersionMismatchFormat, e.message, language: language)
-        default: return f(.errDaemonFormat, e.message, language: language)
+        // The daemon's message can quote names and paths: one escaped line.
+        case .versionMismatch: return f(.errVersionMismatchFormat, DisplayText.escaped(e.message, limit: 1000), language: language)
+        default: return f(.errDaemonFormat, DisplayText.escaped(e.message, limit: 1000), language: language)
         }
     }
 }

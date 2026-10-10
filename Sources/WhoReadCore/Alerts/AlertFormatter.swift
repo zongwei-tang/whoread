@@ -20,10 +20,12 @@ public struct AlertFormatter: Sendable {
         self.categoryName = categoryName
     }
 
+    /// Names and paths come from the files and programs themselves: escaped and capped
+    /// (`DisplayText`), so a name cannot forge or hide lines of the text the user decides on.
     public func headline(_ alert: Alert) -> String {
-        let app = alert.responsible.displayName
-        let path = abbreviate(alert.firstPath)
-        let category = categoryName(alert.categoryID)?.resolve(language) ?? alert.categoryID
+        let app = DisplayText.name(alert.responsible.displayName)
+        let path = DisplayText.path(abbreviate(alert.firstPath))
+        let category = DisplayText.name(categoryName(alert.categoryID)?.resolve(language) ?? alert.categoryID)
         let both = alert.accesses.contains(.read) && alert.accesses.contains(.write)
         let writeOnly = alert.accesses.contains(.write) && !alert.accesses.contains(.read)
         let verbZH = both ? "读写" : writeOnly ? "写入" : "读取"
@@ -68,8 +70,74 @@ public struct AlertFormatter: Sendable {
     }
 
     public func chainLine(_ chain: [ChainLink]) -> String {
-        let names = chain.map(\.name).joined(separator: " → ")
+        let names = DisplayText.escaped(chain.map { DisplayText.name($0.name) }.joined(separator: " → "),
+                                        limit: DisplayText.chainLimit, keepEnd: true)
         return language == .zhHans ? "调用链：\(names)" : "Chain: \(names)"
+    }
+
+    /// Who signed the program the access is charged to, as the user should judge a request:
+    /// a bundle named "Terminal" in a downloads folder is not Terminal.
+    public enum Signer: Equatable, Sendable {
+        /// An Apple platform binary in a system location.
+        case apple
+        /// An Apple platform binary outside the system locations: a copy keeps Apple's signature, so
+        /// this may be any program built from Apple's (the label says where, not that it was copied).
+        case appleCopy
+        /// Signed by a developer with this Team ID.
+        case team(String)
+        /// Ad-hoc signed or unsigned: anyone could have built it.
+        case unidentified
+        /// The program is not in the stored chain (it was cut at its 64 nearest processes).
+        case unknown
+    }
+
+    /// The signer of an `.app` or `.binary` responsible, from its process in the chain (the
+    /// responsible entity itself keeps no platform flag). nil for an AI agent (named from the
+    /// agent catalog) or without a path.
+    public static func signer(of responsible: ResponsibleEntity, chain: [ChainLink]) -> Signer? {
+        guard responsible.kind != .agent, let path = responsible.path else { return nil }
+        let link: ChainLink?
+        if responsible.kind == .app {
+            let key = PathNormalizer.fold(path) + "/"
+            link = chain.last { PathNormalizer.fold($0.path).hasPrefix(key) }
+        } else {
+            link = chain.last { $0.path == path }
+        }
+        guard let link else {
+            if let team = responsible.teamID { return .team(team) }
+            // Attributor keeps a cdhash only for a binary with no Team ID that is not Apple's.
+            return responsible.cdhash != nil ? .unidentified : .unknown
+        }
+        if let team = link.teamID { return .team(team) }
+        if link.isPlatformBinary { return IdentitySpec.isSystemLocation(link.path) ? .apple : .appleCopy }
+        return .unidentified
+    }
+
+    /// "Program: ~/x/Terminal.app (not signed by an identified developer)": where the app or
+    /// program really is, and who signed it. Shown with every question and alert, next to the
+    /// name the program gave itself. nil for an AI agent.
+    public func identityLine(_ alert: Alert) -> String? {
+        guard let path = alert.responsible.path, let signer = AlertFormatter.signer(of: alert.responsible, chain: alert.chain) else {
+            return nil
+        }
+        let location = DisplayText.path(abbreviate(path))
+        let zh = language == .zhHans
+        return zh ? "程序：\(location)（\(signerName(signer))）" : "Program: \(location) (\(signerName(signer)))"
+    }
+
+    public func signerName(_ signer: Signer) -> String {
+        switch (language, signer) {
+        case (.zhHans, .apple): return "Apple"
+        case (.en, .apple): return "Apple"
+        case (.zhHans, .appleCopy): return "Apple 签名，但不在系统目录中"
+        case (.en, .appleCopy): return "Apple-signed, outside the system folders"
+        case (.zhHans, .team(let t)): return "开发者团队 " + DisplayText.name(t)
+        case (.en, .team(let t)): return "developer team " + DisplayText.name(t)
+        case (.zhHans, .unidentified): return "没有已识别开发者的签名"
+        case (.en, .unidentified): return "not signed by an identified developer"
+        case (.zhHans, .unknown): return "签名未知"
+        case (.en, .unknown): return "signature not known"
+        }
     }
 
     /// Titles for the answers to a question (docs/ASK_MODE.md): "deny" saves nothing, "always deny"

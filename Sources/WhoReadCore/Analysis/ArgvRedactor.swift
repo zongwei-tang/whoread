@@ -7,7 +7,9 @@ import Foundation
 ///
 /// AI agents run commands as `zsh -c "<whole command>"`, so an element containing whitespace is
 /// tokenized like a shell command line and every token gets the same treatment as an argv element.
-/// File paths are evidence and are kept wherever a secret is not expected.
+/// File paths are evidence and are kept wherever a secret is not expected. What a command line
+/// writes (echo/printf words sent to a file or a pipe, heredoc bodies written by cat/tee or into a
+/// file, here-strings) is file contents, not metadata: it is redacted, and the redirect's target kept.
 public enum ArgvRedactor {
     public static let placeholder = "‹redacted›"
 
@@ -125,10 +127,16 @@ public enum ArgvRedactor {
     static let quotedHeader = regex(#"(?i)(["'])("# + headerNames + #")(\s*:\s*)[^"'\r\n]+"#)
     /// `scheme://user:password@host`.
     static let urlUserinfo = regex(#"(?i)\b([a-z][a-z0-9+.\-]*://[^/@\s:'"]*):([^/@\s'"]+)@"#)
+    /// `//user:password@host` with no scheme (`mount -t smbfs //bob:pw@nas/share`).
+    static let bareUserinfo = regex(#"(^|[\s='"(])(//[^/@\s:'"]+):([^/@\s'"]+)@"#)
     /// `scheme://<long token>@host`.
     static let urlTokenUserinfo = regex(#"(?i)\b([a-z][a-z0-9+.\-]*://)([^/@\s:'"]{20,})@"#)
-    /// A quoted secret key and its quoted value (JSON, Python dicts, YAML): `{"client_secret":"x"}`.
-    static let quotedPair = regex(#"(?i)(["'])([a-z0-9_.\-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|authorization|private[_-]?key|access[_-]?key|credentials?)[a-z0-9_.\-]*)(["']\s*:\s*["'])([^"'\\\r\n]+)(["'])"#)
+    /// A quoted secret key and its quoted value (JSON, Python dicts, YAML): `{"client_secret":"x"}`,
+    /// also with escaped quotes (`"{\"password\":\"x\"}"` in a shell command) and `auth` keys
+    /// (`{"auths":{"ghcr.io":{"auth":"<base64 user:password>"}}}`, `basic_auth`; not `author`).
+    /// `pass` and `pwd` keys as for key=value (`{"user":"bob","pass":"x"}`, `"db_pwd"`; not `bypass`,
+    /// `compass` or `passport`).
+    static let quotedPair = regex(#"(?i)(\\?["'])([a-z0-9_.\-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|authorization|private[_-]?key|access[_-]?key|credentials?)[a-z0-9_.\-]*|(?:[a-z0-9_.\-]*[_.\-])?(?:auth|pass|pwd))(\\?["']\s*:\s*\\?["'])([^"'\\\r\n]+)(\\?["'])"#)
     /// Sensitive query parameters: `?access_token=…`, `&sig=…`.
     static let queryParam = regex(#"(?i)([?&;][^=&\s#'"]*?(?:token|secret|passw|pwd|api[_-]?key|apikey|auth|sig|signature|credential|session|key|code)[^=&\s#'"]*=)[^&\s#'"]+"#)
     /// Well-known token formats, anywhere in an element.
@@ -212,18 +220,42 @@ public enum ArgvRedactor {
     // MARK: - Sequences
 
     /// Redacts a sequence of arguments (an argv, or the tokens of a command line). `firstIsProgram`:
-    /// element 0 is the program and is kept as is.
-    static func redactSequence(_ tokens: [String], firstIsProgram: Bool, depth: Int = 0) -> [String] {
+    /// element 0 is the program and is kept as is. `lineStarts`: indices of tokens that begin a new
+    /// line of a command line (a new command, or a heredoc's body and end).
+    static func redactSequence(_ tokens: [String], firstIsProgram: Bool, depth: Int = 0, lineStarts: Set<Int> = []) -> [String] {
         var out = tokens
         var pending: ValueRule?
         var program: String?
         var flags: (next: [String: ValueRule], attached: [String: ValueRule]) = ([:], [:])
         var expectProgram = true
         var skipNext = false
+        // Data a command writes (privacy-2): echo/printf words whose output goes to a file or a pipe,
+        // here-strings, and heredoc bodies written by cat/tee or into a file. A file's contents are
+        // never stored; where they went (the redirect's target) is kept.
+        var dataMode = false
+        var dataSeen = false
+        var keepNext = false
+        var hereString = false
+        var heredoc: (delimiter: String?, redactBody: Bool, inBody: Bool)?
+        var commandStart = 0
+        // `>FILE echo …`: standard output redirected before the program word.
+        var outputBeforeProgram = false
+        // Redirects, heredocs and pipes mean something only in a command line, not in an argv.
+        let shell = !firstIsProgram
+        func resetCommand(at i: Int) {
+            pending = nil; program = nil; expectProgram = true; skipNext = false
+            flags = ([:], [:])
+            dataMode = false; dataSeen = false; keepNext = false; hereString = false; outputBeforeProgram = false
+            commandStart = i
+        }
         func startProgram(_ name: String, at i: Int) {
             program = name
             expectProgram = wrappers.contains(name)
             flags = programFlags(name, command: tokens[i...])
+            if shell && dataWriters.contains(name) {
+                dataMode = outputBeforeProgram || writesOutput(tokens, after: i, lineStarts: lineStarts)
+                dataSeen = false
+            }
         }
         for i in tokens.indices {
             let raw = tokens[i]
@@ -231,11 +263,41 @@ public enum ArgvRedactor {
                 startProgram(basename(raw), at: 0)
                 continue
             }
+            if let h = heredoc {
+                if h.delimiter == nil {
+                    // `<< EOF`: this word is the delimiter (still redacted like any word).
+                    heredoc?.delimiter = heredocDelimiter(raw)
+                    out[i] = redactToken(raw)
+                    continue
+                }
+                if !h.inBody && lineStarts.contains(i) { heredoc?.inBody = true }
+                if heredoc?.inBody == true {
+                    if lineStarts.contains(i) && raw == h.delimiter {
+                        // The delimiter line ends the command.
+                        out[i] = redactToken(raw)
+                        heredoc = nil
+                        resetCommand(at: i + 1)
+                        continue
+                    }
+                    if h.redactBody {
+                        out[i] = placeholder
+                        continue
+                    }
+                    // A script read from the heredoc (`python3 - <<EOF`): its lines are words with no
+                    // program of their own.
+                    if lineStarts.contains(i) {
+                        pending = nil; program = nil; expectProgram = false; skipNext = false; flags = ([:], [:])
+                    }
+                }
+            } else if lineStarts.contains(i) {
+                resetCommand(at: i)
+            }
             if isSeparator(raw) {
-                pending = nil; program = nil; expectProgram = true; skipNext = false
-                flags = ([:], [:])
+                resetCommand(at: i + 1)
                 continue
             }
+            // A line continuation (`--password \` + newline + value) is not a word.
+            if raw.first == "\\" && raw.count > 1 && raw.dropFirst().allSatisfy(\.isNewline) { continue }
             // `cd /tmp; curl …`: the next word starts a new command.
             var endsCommand = false
             var word = raw
@@ -244,16 +306,71 @@ public enum ArgvRedactor {
                 endsCommand = true
             }
             defer {
-                if endsCommand {
-                    pending = nil; program = nil; expectProgram = true; skipNext = false
-                    flags = ([:], [:])
-                }
+                if endsCommand { resetCommand(at: i + 1) }
             }
             let (quote, t) = unquote(word)
             let suffix = endsCommand ? ";" : ""
             func emit(_ value: String) { out[i] = quote + value + quote + suffix }
 
+            // Redirects: the operator and its target are kept (`> FILE`, `2>/dev/null`). Shell syntax
+            // is in single words (an element with spaces is a command line of its own, below).
+            if keepNext {
+                keepNext = false
+                emit(redactToken(t))
+                continue
+            }
+            // A here-string is data, whatever it holds: `<<<'machine … password x'` is one word with
+            // spaces in it.
+            if shell && quote.isEmpty && t.hasPrefix("<<<") {
+                if t.count > 3 { emit("<<<" + placeholder) } else { hereString = true }
+                continue
+            }
+            let shellWord = shell && quote.isEmpty && !t.contains(where: \.isWhitespace)
+            if shellWord, t.hasPrefix("<<") {
+                let name = heredocDelimiter(String(t.dropFirst(2)))
+                let sink = ["cat", "tee"].contains(program ?? "") || writesOutput(tokens, after: commandStart, lineStarts: lineStarts)
+                heredoc = (name.isEmpty ? nil : name, sink, false)
+                continue
+            }
+            if hereString {
+                hereString = false
+                emit(placeholder)
+                continue
+            }
+            if shellWord, let r = redirect(in: t) {
+                if dataMode && !r.data.isEmpty {
+                    out[i] = placeholder + r.operatorAndTarget + suffix
+                } else if !r.data.isEmpty {
+                    out[i] = redactToken(r.data) + r.operatorAndTarget + suffix
+                }
+                if r.target.isEmpty && !r.duplicatesDescriptor { keepNext = true }
+                if program == nil && r.isStandardOutput && !r.duplicatesDescriptor && r.data.isEmpty { outputBeforeProgram = true }
+                continue
+            }
+            if dataMode {
+                // `echo -n …`: echo's own options, before the first word of data.
+                if !dataSeen && program == "echo" && t.count > 1 && t.hasPrefix("-") && t.dropFirst().allSatisfy({ "neE".contains($0) }) {
+                    continue
+                }
+                dataSeen = true
+                // `pw|tee FILE`: the data ends at a pipe in the word, and what follows it is a command
+                // of its own.
+                if quote.isEmpty, let pipe = unquotedPipe(in: t) {
+                    let before = String(t[..<pipe.lowerBound]), after = String(t[pipe.upperBound...])
+                    out[i] = (before.isEmpty ? "" : redactedData(before)) + String(t[pipe]) + redactToken(after) + suffix
+                    resetCommand(at: i + 1)
+                    if !after.isEmpty && !after.contains("=") { startProgram(basename(after), at: i) }
+                    continue
+                }
+                // `(echo pw) > FILE`: the subshell's closing parenthesis is not data.
+                let parens = quote.isEmpty ? closingParentheses(in: t) : 0
+                emit(parens == t.count ? t : redactedData(String(t.dropLast(parens))) + String(repeating: ")", count: parens))
+                continue
+            }
+
             if let rule = pending {
+                // `key = value`, `key : value` (INI, YAML, a heredoc): the separator is not the value.
+                if quote.isEmpty && (t == "=" || t == ":") { continue }
                 pending = nil
                 if !(t.hasPrefix("-") && t.count > 1) {
                     emit(apply(rule, to: t, depth: depth))
@@ -275,7 +392,8 @@ public enum ArgvRedactor {
                 }
                 if t.contains("=") { emit(redactToken(t)); continue }
                 if !t.isEmpty && t.allSatisfy({ $0.isNumber || ".smhd".contains($0) }) { continue }
-                startProgram(basename(t), at: i)
+                // `(echo …) > FILE`: a subshell's parenthesis is not part of the program's name.
+                startProgram(basename(String(t.drop { $0 == "(" })), at: i)
                 continue
             }
             if t.hasPrefix("-") && t.count > 1 {
@@ -305,11 +423,173 @@ public enum ArgvRedactor {
                 pending = .bearer
                 continue
             }
-            // `aws configure set aws_secret_access_key X`, `npm config set //host/:_authToken X`.
-            if isSecretKeyName(t) { pending = .unlessPath }
+            // `aws configure set aws_secret_access_key X`, `npm config set //host/:_authToken X`;
+            // `password = X` (INI, a heredoc) when a lone "=" or ":" follows.
+            if isSecretKeyName(t) || (i + 1 < tokens.count && ["=", ":"].contains(tokens[i + 1]) && namesSecret(t)) {
+                pending = .unlessPath
+            } else if ["password", "passwd"].contains(t.lowercased()), i >= commandStart + 2,
+                      tokens[i - 2].lowercased() == "login",
+                      tokens[commandStart..<i].contains(where: { ["machine", "default"].contains($0.lowercased()) }) {
+                // A netrc line: `machine HOST login USER password SECRET`.
+                pending = .secret
+            }
             emit(redactToken(t))
         }
         return out
+    }
+
+    /// A word of data replaced, its quotes kept (`'pw'` → `'‹redacted›'`).
+    static func redactedData(_ word: String) -> String {
+        let (quote, _) = unquote(word)
+        return quote + placeholder + quote
+    }
+
+    /// Programs whose words are data (`echo pw > FILE`, `printf … | git credential approve`).
+    static let dataWriters: Set<String> = ["echo", "printf", "print"]
+
+    /// True when the command starting after `start` sends its standard output to a file
+    /// (`>`, `>>`, `1>`, `&>`, `>|`, attached or not) or into a pipe (`|`, also inside a word:
+    /// `pw|tee FILE`), before the command ends. Inside a `{ …; }` or `( … )` group the group's own
+    /// redirect or pipe counts too (`{ echo pw; } > FILE`): the rest of the line is searched.
+    static func writesOutput(_ tokens: [String], after start: Int, lineStarts: Set<Int>) -> Bool {
+        let grouped = openGroups(tokens, through: start, lineStarts: lineStarts) > 0
+        var k = start + 1
+        while k < tokens.count {
+            let t = tokens[k]
+            if lineStarts.contains(k) { return false }
+            if t == "|" || t == "|&" { return true }
+            if isSeparator(t) && !grouped { return false }
+            let word = !isQuoted(t) && !t.contains(where: \.isWhitespace)
+            if word, let r = redirect(in: t), r.isStandardOutput { return true }
+            if word, unquotedPipe(in: t) != nil { return true }
+            if t.hasSuffix(";") && !t.hasSuffix("\\;") && !isQuoted(t) && !grouped { return false }
+            k += 1
+        }
+        return false
+    }
+
+    /// Groups (`{`, `(`, `(echo`) opened on the line of `index`, up to and including that word, and
+    /// not closed before it.
+    static func openGroups(_ tokens: [String], through index: Int, lineStarts: Set<Int>) -> Int {
+        guard index < tokens.count else { return 0 }
+        var first = index
+        while first > 0 && !lineStarts.contains(first) { first -= 1 }
+        var depth = 0
+        for k in first...index {
+            let t = tokens[k]
+            if isQuoted(t) { continue }
+            if t == "{" || t == "(" { depth += 1; continue }
+            if t == "}" || t == ")" { depth = max(0, depth - 1); continue }
+            depth += t.prefix { $0 == "(" }.count
+            if k < index { depth = max(0, depth - closingParentheses(in: t)) }
+        }
+        return depth
+    }
+
+    /// The first pipe in a word outside quotes (`|` or `|&`; `||` is not one).
+    static func unquotedPipe(in t: String) -> Range<String.Index>? {
+        var quote: Character?
+        var escaped = false
+        var j = t.startIndex
+        while j < t.endIndex {
+            let c = t[j]
+            var next = t.index(after: j)
+            defer { j = next }
+            if escaped { escaped = false; continue }
+            if c == "\\" && quote != "'" { escaped = true; continue }
+            if let q = quote { if c == q { quote = nil }; continue }
+            if c == "\"" || c == "'" { quote = c; continue }
+            guard c == "|" else { continue }
+            // `a||b`: an "or", not a pipe; skip both.
+            if next < t.endIndex && t[next] == "|" { next = t.index(after: next); continue }
+            if next < t.endIndex && t[next] == "&" { return j..<t.index(after: next) }
+            return j..<next
+        }
+        return nil
+    }
+
+    /// How many `)` end the word outside quotes (`'pw')` → 1).
+    static func closingParentheses(in t: String) -> Int {
+        var quote: Character?
+        var escaped = false
+        var run = 0
+        for c in t {
+            if escaped { escaped = false; run = 0; continue }
+            if c == "\\" && quote != "'" { escaped = true; run = 0; continue }
+            if let q = quote { if c == q { quote = nil }; run = 0; continue }
+            if c == "\"" || c == "'" { quote = c; run = 0; continue }
+            run = c == ")" ? run + 1 : 0
+        }
+        return quote == nil ? run : 0
+    }
+
+    /// A redirect in one word, possibly after data written with it (`pw>>FILE`).
+    struct Redirect: Equatable {
+        /// What precedes the redirect (`pw` in `pw>>FILE`); empty for `>FILE`, `2>`, `&>FILE`.
+        var data: String
+        /// `>>FILE`, `2>/dev/null`, `>`.
+        var operatorAndTarget: String
+        var target: String
+        var isStandardOutput: Bool
+        /// `2>&1`, `>&2`: no file follows.
+        var duplicatesDescriptor: Bool
+    }
+
+    /// Finds the first unquoted `>` in `t`. A descriptor number right before it (`2>`) belongs to
+    /// the operator, so do `&` (`&>`) and a following `>`, `|` or `&` (`>>`, `>|`, `>&`).
+    static func redirect(in t: String) -> Redirect? {
+        var quote: Character?
+        var escaped = false
+        var at: String.Index?
+        for j in t.indices {
+            let c = t[j]
+            if escaped { escaped = false; continue }
+            if c == "\\" && quote != "'" { escaped = true; continue }
+            if let q = quote { if c == q { quote = nil }; continue }
+            if c == "\"" || c == "'" { quote = c; continue }
+            if c == ">" { at = j; break }
+        }
+        guard let gt = at else { return nil }
+        var data = String(t[..<gt])
+        var descriptor = ""
+        if data.hasSuffix("&") {
+            data.removeLast()
+            descriptor = "&"
+        } else if !data.isEmpty && data.allSatisfy(\.isNumber) {
+            descriptor = data
+            data = ""
+        }
+        var end = t.index(after: gt)
+        var dup = false
+        if end < t.endIndex, ">|&".contains(t[end]) {
+            dup = t[end] == "&"
+            end = t.index(after: end)
+        }
+        let target = String(t[end...])
+        let isOut = descriptor.isEmpty || descriptor == "1" || descriptor == "&"
+        return Redirect(data: data, operatorAndTarget: descriptor + String(t[gt...]), target: target, isStandardOutput: isOut,
+                        duplicatesDescriptor: dup)
+    }
+
+    /// `EOF` for `EOF`, `-EOF`, `'EOF'`, `"EOF"`.
+    static func heredocDelimiter(_ s: String) -> String {
+        var d = s
+        if d.hasPrefix("-") { d.removeFirst() }
+        return unquote(d).1.replacingOccurrences(of: "\\", with: "")
+    }
+
+    /// A word that names a secret on its own (`password`, `DB_PASS`, `client_secret`).
+    static func namesSecret(_ t: String) -> Bool {
+        let w = t.lowercased()
+        guard !w.isEmpty, !w.contains("="), !w.contains("/") else { return false }
+        if referenceSuffixes.contains(where: { w.hasSuffix($0) }) { return false }
+        return strongFragments.contains(where: { w.contains($0) }) || w == "pass" || w == "pwd" || endsInPass(w)
+    }
+
+    /// `smtp-pass`, `DB_PASS`, `mysql_pwd`, `redis.pwd`: "pass" or "pwd" as the last part of a name
+    /// (not `bypass` or `compass`).
+    static func endsInPass(_ name: String) -> Bool {
+        ["_pass", "-pass", ".pass", "_pwd", "-pwd", ".pwd"].contains(where: { name.hasSuffix($0) })
     }
 
     /// A command line in one element: headers first (they span tokens), then token by token.
@@ -324,7 +604,20 @@ public enum ArgvRedactor {
         if words.count == 1 && words[0] == s.trimmingCharacters(in: .whitespacesAndNewlines) {
             return redactToken(s)
         }
-        var redacted = redactSequence(words, firstIsProgram: false, depth: depth)[...]
+        // Words after a line break start a new command (or a heredoc's body or end).
+        var lineStarts = Set<Int>()
+        var index = 0
+        var afterBreak = false
+        for piece in pieces {
+            if piece.isSpace {
+                afterBreak = afterBreak || piece.text.contains(where: \.isNewline)
+            } else {
+                if afterBreak { lineStarts.insert(index) }
+                afterBreak = false
+                index += 1
+            }
+        }
+        var redacted = redactSequence(words, firstIsProgram: false, depth: depth, lineStarts: lineStarts)[...]
         var out = ""
         for piece in pieces {
             if piece.isSpace { out += piece.text } else { out += redacted.popFirst() ?? piece.text }
@@ -355,6 +648,7 @@ public enum ArgvRedactor {
             }
         }
         var s = replace(urlUserinfo, in: t, with: "$1:" + placeholder + "@")
+        s = replace(bareUserinfo, in: s, with: "$1$2:" + placeholder + "@")
         s = redactTokenUserinfo(s)
         s = replace(queryParam, in: s, with: "$1" + placeholder)
         s = replace(knownTokens, in: s, with: placeholder)
@@ -420,13 +714,24 @@ public enum ArgvRedactor {
         }
     }
 
-    /// The rule for a flag no program table knows: names with a strong fragment carry a secret.
+    /// The rule for a flag no program table knows: names with a strong fragment, or ending in a
+    /// "pass"/"pwd" part (`--smtp-pass`, `--db_pwd`), carry a secret. Single-dash long flags too
+    /// (`-password`, `-passwd`, `-pass`: Java, Go and ffmpeg style), but not short ones (`-p`).
     static func genericRule(forFlag flag: String) -> ValueRule? {
         if secretFlags.contains(flag) { return .unlessPath }
-        guard flag.hasPrefix("--") else { return nil }
         let name = flag.lowercased()
+        let bare: String
+        if name.hasPrefix("--") {
+            bare = String(name.dropFirst(2))
+        } else if name.hasPrefix("-") && name.count > 3 {
+            bare = String(name.dropFirst())
+        } else {
+            return nil
+        }
         if referenceSuffixes.contains(where: { name.hasSuffix($0) }) { return nil }
-        return strongFragments.contains(where: { name.contains($0) }) ? .unlessPath : nil
+        let names = strongFragments.contains(where: { bare.contains($0) }) || endsInPass(bare)
+            || (!name.hasPrefix("--") && (bare == "pass" || bare == "pwd"))
+        return names ? .unlessPath : nil
     }
 
     static func keyIsSecret(_ rawKey: String, value: String) -> Bool {
@@ -440,7 +745,8 @@ public enum ArgvRedactor {
         if strongFragments.contains(where: { key.contains($0) }) || key == "pass" { return true }
         // Soft names: `--key=hunter2` is a secret, `--credential-file-override=/path/sa.json` is evidence.
         if key.contains("session") && key.hasSuffix("id") { return false }
-        let soft = softKeys.contains(key)
+        // `MYSQL_PWD=x`, `DB_PASS=x` (but `PROJECT_PWD=/srv/p`, `OLDPWD=/Users/x` are paths).
+        let soft = softKeys.contains(key) || endsInPass(key)
             || ["key", "credential", "credentials", "cookie"].contains(where: { key.hasSuffix("_" + $0) || key.hasSuffix("-" + $0) || key.hasSuffix("." + $0) })
             || key.contains("cookie") || key.contains("credential") || key.hasPrefix("private")
         return soft && !looksLikePath(value)
@@ -501,18 +807,19 @@ public enum ArgvRedactor {
         var space = ""
         for c in s {
             if escaped { current.append(c); escaped = false; continue }
+            if quote == nil && c.isWhitespace {
+                if !current.isEmpty { pieces.append(Piece(text: current, isSpace: false)); current = "" }
+                space.append(c)
+                continue
+            }
+            // Before a backslash too: `echo \$HOME` stays `echo \$HOME`, not `echo\$HOME `.
+            if !space.isEmpty { pieces.append(Piece(text: space, isSpace: true)); space = "" }
             if c == "\\" && quote != "'" { current.append(c); escaped = true; continue }
             if let q = quote {
                 current.append(c)
                 if c == q { quote = nil }
                 continue
             }
-            if c.isWhitespace {
-                if !current.isEmpty { pieces.append(Piece(text: current, isSpace: false)); current = "" }
-                space.append(c)
-                continue
-            }
-            if !space.isEmpty { pieces.append(Piece(text: space, isSpace: true)); space = "" }
             if c == "\"" || c == "'" { quote = c }
             current.append(c)
         }

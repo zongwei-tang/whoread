@@ -204,9 +204,10 @@ final class AskUIModelTests: XCTestCase {
         XCTAssertEqual(first.post[1].categoryIdentifier, NotificationPlanner.categoryAskApple)
         XCTAssertEqual(first.post[1].actions, [.allowOnce, .alwaysAllow, .keepBlocking, .blockFromNowOn, .trustApplePrograms])
         XCTAssertEqual(first.post[0].title, "Allow this access?")
-        XCTAssertEqual(first.post[0].body,
-                       "Claude Code wants to read ~/.ssh/id_ed25519: not allowed until you decide (×3)\n"
-                       + "AI agent in the chain: claude-code\nChain: launchd → claude → cat")
+        XCTAssertEqual(first.post[0].body, // guard-4: the agent line comes first
+                       "AI agent in the chain: claude-code\n"
+                       + "Claude Code wants to read ~/.ssh/id_ed25519: not allowed until you decide (×3)\n"
+                       + "Chain: launchd → claude → cat")
         XCTAssertEqual(first.post[1].body.components(separatedBy: "\n").count, 2, "no agent line without an agent")
 
         // Still open (more attempts, a new hold): no new banner.
@@ -232,7 +233,7 @@ final class AskUIModelTests: XCTestCase {
         let zh = NotificationPlanner().plan(asks: [agent], formatter: model(status(), language: .zhHans).formatter)
         XCTAssertEqual(zh.post.first?.title, "允许这次访问吗？")
         XCTAssertEqual(zh.post.first?.body,
-                       "Claude Code 想要读取 ~/.ssh/id_ed25519，你决定之前不会放行（3 次）\n调用链中有 AI agent：claude-code\n调用链：launchd → claude → cat")
+                       "调用链中有 AI agent：claude-code\nClaude Code 想要读取 ~/.ssh/id_ed25519，你决定之前不会放行（3 次）\n调用链：launchd → claude → cat")
 
         // The headline may name only the app (Terminal) the agent runs in: the agent is named too,
         // as the app knows it (an answer covers the app only as driven by that agent).
@@ -241,8 +242,8 @@ final class AskUIModelTests: XCTestCase {
         inTerminal.responsible = ResponsibleEntity(kind: .app, key: "app:com.apple.Terminal", displayName: "Terminal")
         let body = try XCTUnwrap(NotificationPlanner().plan(asks: [inTerminal], formatter: m.formatter,
                                                             agentName: { $0 == "claude-code" ? "Claude Code" : $0 }).post.first?.body)
-        XCTAssertTrue(body.hasPrefix("Terminal wants to read"), body)
-        XCTAssertTrue(body.contains("\nAI agent in the chain: Claude Code\n"), body)
+        XCTAssertTrue(body.contains("\nTerminal wants to read"), body)
+        XCTAssertTrue(body.hasPrefix("AI agent in the chain: Claude Code\n"), body)
         XCTAssertNil(apple.agentsLine(.en))
 
         XCTAssertTrue(NotificationPlanner.isAskIdentifier(NotificationPlanner.askIdentifier(9)))

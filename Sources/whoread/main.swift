@@ -72,7 +72,17 @@ let language: Language = {
     return Language.preferred(from: Locale.preferredLanguages)
 }()
 
-func out(_ s: String) { print(s) }
+/// Text for a person, line by line: every line is escaped (`DisplayText.lines`), so nothing printed
+/// here can carry a terminal escape sequence, whatever a value inside it missed. Values are escaped
+/// (and names capped) where they are put in, too, so tables line up.
+func out(_ s: String) { print(DisplayText.lines(s)) }
+
+/// JSON stays exact for programs (it decodes to the same values) and inert in a terminal: hidden
+/// characters JSONEncoder leaves raw are written as `\u` escapes (`Format.terminalSafeJSON`).
+func outJSON(_ s: String) { print(Format.terminalSafeJSON(s)) }
+
+/// Writes text for a person to stderr, escaped like `out`.
+func note(_ s: String) { FileHandle.standardError.write(Data((DisplayText.lines(s) + "\n").utf8)) }
 
 /// The request never got an answer (no daemon, timeout, connection lost), as opposed to an
 /// `.error` the daemon replied with.
@@ -118,14 +128,14 @@ var sudoCommand: String { "sudo whoread " + CommandLine.arguments.dropFirst().ma
 func explain(_ e: IPCError) -> CLIError {
     switch e.code {
     case .notPermitted:
-        return CLIError("not permitted: \(e.message)\n  e.g. \(sudoCommand)", exitCode: 77)
+        return CLIError("not permitted: \(DisplayText.escaped(e.message))\n  e.g. \(sudoCommand)", exitCode: 77)
     default:
-        return CLIError("\(e.code.rawValue): \(e.message)")
+        return CLIError("\(e.code.rawValue): \(DisplayText.escaped(e.message))")
     }
 }
 
 func explain(_ u: Unreachable) -> CLIError {
-    CLIError("cannot reach the WhoRead daemon: \(u.error.message)\n  Is whoreadd running? (sudo launchctl print system/com.whoread.daemon)", exitCode: 69)
+    CLIError("cannot reach the WhoRead daemon: \(DisplayText.escaped(u.error.message))\n  Is whoreadd running? (sudo launchctl print system/com.whoread.daemon)", exitCode: 69)
 }
 
 /// One `.hello` before the first real request, so a whoread/daemon version skew is reported as
@@ -173,8 +183,16 @@ struct Context {
     var normalizer: PathNormalizer { PathNormalizer(homeDirectories: homes) }
 
     func categoryName(_ id: String) -> String {
-        catalog?.category(id)?.name.resolve(language) ?? id
+        DisplayText.name(catalog?.category(id)?.name.resolve(language) ?? id)
     }
+
+    func agentName(_ id: String, _ agents: AgentCatalog) -> String {
+        DisplayText.name(agents.agent(id)?.name.resolve(language) ?? id)
+    }
+
+    /// "Program: ~/x/Terminal.app (not signed by an identified developer)" (guard-4: the name is the
+    /// program's own choice, its place and signer are not).
+    func identity(_ alert: Alert) -> String? { formatter.identityLine(alert) }
 
     var formatter: AlertFormatter {
         let n = normalizer
@@ -189,9 +207,10 @@ struct Context {
         case .wouldDeny: decision = language == .zhHans ? "将被拦截" : "would block"
         default: decision = e.isBenign ? (language == .zhHans ? "系统(折叠)" : "system (folded)") : ""
         }
+        // `tail` prints these cells without `Format.table`: each is escaped here.
         return [Format.time(e.time), e.operation.rawValue + ":" + e.access.label,
-                categoryName(e.categoryID) + "/" + e.severity.rawValue, normalizer.abbreviate(e.path),
-                e.chain.displayString(responsible: e.responsible), decision]
+                categoryName(e.categoryID) + "/" + e.severity.rawValue, DisplayText.escaped(normalizer.abbreviate(e.path)),
+                DisplayText.chain(e.chain, responsible: e.responsible), decision]
     }
 }
 
@@ -209,7 +228,7 @@ func printEvents(_ events: [AnalyzedEvent], _ ctx: Context) {
 
 func cmdStatus(_ c: IPCClient) throws {
     let s = try c.status()
-    if args.json { return out(try Format.json(s)) }
+    if args.json { return outJSON(try Format.json(s)) }
     let modeName: [DaemonMode: (String, String)] = [
         .learning: ("Learning", "学习中"), .monitoring: ("Monitoring", "监控中"), .enforcing: ("Enforcing", "拦截中"),
         .paused: ("Paused", "已暂停"), .error: ("Error", "错误"),
@@ -218,8 +237,9 @@ func cmdStatus(_ c: IPCClient) throws {
     // Settings only add warnings: a daemon that cannot send them still gets a full status.
     let settings = try? c.settings()
     out("WhoRead \(s.version) — \(m)")
-    out("  source:       \(s.source.rawValue) \(s.sourceRunning ? "running" : "stopped")" + (s.sourceError.map { "  ERROR: \($0)" } ?? ""))
-    if let h = s.sourceHint { out("                hint: \(h)") }
+    out("  source:       \(s.source.rawValue) \(s.sourceRunning ? "running" : "stopped")"
+        + (s.sourceError.map { "  ERROR: \(DisplayText.escaped($0))" } ?? ""))
+    if let h = s.sourceHint { out("                hint: \(DisplayText.escaped(h))") }
     if let d = s.sourceDeadlineMissMode { out("  deadline:     AUTH " + NativeDeadlineMissMode.statusDescription(d)) }
     out("  enforcement:  \(s.enforcementActive ? "ACTIVE" : "inactive") (setting \(s.enforcementEnabled ? "on" : "off"))"
         + (s.enforcementInactiveReasons.isEmpty ? "" : " — " + s.enforcementInactiveReasons.map(\.rawValue).joined(separator: ", ")))
@@ -231,11 +251,11 @@ func cmdStatus(_ c: IPCClient) throws {
         out("  trust Apple:  on (Apple programs in system locations are not asked, unless an AI agent is in the chain)")
     }
     if let u = s.uncleanStop {
-        out("  unclean stop: \(u); enforcement was kept as you set it")
+        out("  unclean stop: \(DisplayText.escaped(u)); enforcement was kept as you set it")
     }
     out("  events:       \(s.counts.events) stored (+\(s.counts.aggregatedDays) days aggregated), \(s.eventsProcessed) since start, last \(Format.ago(s.lastEventAt))")
     out("  alerts:       \(s.unreadAlerts) unread of \(s.counts.alerts)")
-    out("  coverage:     \(s.monitoredPrefixes) monitored prefixes, homes \(s.homeDirectories.joined(separator: ", "))")
+    out("  coverage:     \(s.monitoredPrefixes) monitored prefixes, homes \(s.homeDirectories.map { DisplayText.escaped($0) }.joined(separator: ", "))")
     if let p = s.parser {
         out("  eslogger:     \(p.lines) lines read, \(p.events) events parsed, \(p.malformed) malformed, schema \(p.schemaVersions), kernel drops \(p.droppedByKernel)")
     }
@@ -259,25 +279,25 @@ func cmdStatus(_ c: IPCClient) throws {
         out("  WARNING: \(d) events dropped or merged by the source (analysis backlog full; denials were still enforced)")
     }
     if s.parser == nil, let k = s.sourceKernelDrops, k > 0 { out("  WARNING: \(k) events dropped by the kernel before the source saw them") }
-    if let e = s.rulesLoadError { out("  WARNING: stored rules failed to load (\(e)); enforcement stays off") }
+    if let e = s.rulesLoadError { out("  WARNING: stored rules failed to load (\(DisplayText.escaped(e))); enforcement stays off") }
 }
 
 /// Details older than `detailDays` survive only as per-day totals: say so when `--since` reaches
 /// past them, instead of silently returning a shorter history.
 func noteRolledUp(_ c: IPCClient, since: Date?) {
     guard let since, let s = try? c.settings(), since < Date().addingTimeInterval(-Double(s.detailDays) * 86400) else { return }
-    let note = language == .zhHans
+    let text = language == .zhHans
         ? "注意：超过 \(s.detailDays) 天的明细只保留按天汇总，见 `whoread daily` 或 `whoread export --aggregates`。"
         : "note: details older than \(s.detailDays) day\(s.detailDays == 1 ? "" : "s") are kept only as per-day totals; "
             + "see `whoread daily` or `whoread export --aggregates`."
-    FileHandle.standardError.write(Data((note + "\n").utf8))
+    note(text)
 }
 
 func cmdEvents(_ c: IPCClient) throws {
     let q = try eventQuery()
     noteRolledUp(c, since: q.since)
     let events = try c.events(q)
-    if args.json { return out(try Format.json(events)) }
+    if args.json { return outJSON(try Format.json(events)) }
     printEvents(events, context(c))
 }
 
@@ -331,11 +351,14 @@ func cmdAlerts(_ c: IPCClient) throws {
     if let l = args.value("limit"), let n = Int(l) { q.limit = n }
     if let s = args.value("since") { q.since = try Format.parseSince(s) }
     let alerts = try c.alerts(q)
-    if args.json { return out(try Format.json(alerts)) }
-    let f = context(c).formatter
+    if args.json { return outJSON(try Format.json(alerts)) }
+    let ctx = context(c)
+    let f = ctx.formatter
     for a in alerts {
         let status = a.status == .unread ? "●" : (a.status == .read ? "○" : "✓")
         out("\(status) #\(a.id) \(Format.time(a.updatedAt)) [\(f.kindTitle(a.kind))] \(f.line(a))")
+        // Before answering one: where the program really is and who signed it.
+        if a.status != .resolved, let identity = ctx.identity(a) { out("    " + identity) }
         // An ask alert waits for a decision: show how to give it from here.
         if a.kind == .ask && a.status != .resolved {
             let words = a.availableActions.compactMap { action in alertActionWords.first { $0.action == action }?.word }
@@ -372,20 +395,25 @@ let askAnswerWords: [(word: String, action: AlertAction)] = [
 
 func cmdAsks(_ c: IPCClient) throws {
     guard case .asks(let asks) = try c.call(.asks) else { throw IPCError(.internalError, "unexpected response") }
-    if args.json { return out(try Format.json(asks)) }
+    if args.json { return outJSON(try Format.json(asks)) }
     let zh = language == .zhHans
     if asks.isEmpty { return out(zh ? "没有等待回答的问题。" : "No questions waiting.") }
     let ctx = context(c)
     let agents = (try? c.agents()) ?? AgentCatalog(agents: [])
     let rows = asks.map { r -> [String] in
         let agentIDs = r.key.chainAgents.isEmpty ? (r.agentID.map { [$0] } ?? []) : r.key.chainAgents
-        return [String(r.id), r.responsible.displayName, ctx.categoryName(r.key.categoryID) + "/" + r.severity.rawValue,
+        // The APP name is the program's own choice (a bundle can be called "Terminal"): PROGRAM says
+        // where it really is and who signed it.
+        let program = r.responsible.path.map { DisplayText.path(ctx.normalizer.abbreviate($0)) }.map { path in
+            AlertFormatter.signer(of: r.responsible, chain: r.chain).map { path + " (" + ctx.formatter.signerName($0) + ")" } ?? path
+        } ?? ""
+        return [String(r.id), DisplayText.name(r.responsible.displayName), program, ctx.categoryName(r.key.categoryID) + "/" + r.severity.rawValue,
                 r.key.access.label, ctx.normalizer.abbreviate(r.path),
-                agentIDs.map { agents.agent($0)?.name.resolve(language) ?? $0 }.joined(separator: ", "),
+                agentIDs.map { ctx.agentName($0, agents) }.joined(separator: ", "),
                 "\(r.holding)/\(r.attempts)", r.appleProgram ? (zh ? "是" : "yes") : ""]
     }
-    out(Format.table(rows, header: zh ? ["编号", "应用", "类别", "访问", "路径", "AI agent", "等待/次数", "苹果程序"]
-                                      : ["ID", "APP", "CATEGORY", "ACCESS", "PATH", "AGENT", "WAITING/ATTEMPTS", "APPLE"]))
+    out(Format.table(rows, header: zh ? ["编号", "应用", "程序", "类别", "访问", "路径", "AI agent", "等待/次数", "苹果程序"]
+                                      : ["ID", "APP", "PROGRAM", "CATEGORY", "ACCESS", "PATH", "AGENT", "WAITING/ATTEMPTS", "APPLE"]))
     out(zh ? "\n回答：whoread ask 编号 allow-once|allow|deny|block|trust-apple（允许需要 sudo）"
            : "\nanswer: whoread ask ID allow-once|allow|deny|block|trust-apple (allowing needs sudo)")
 }
@@ -403,8 +431,8 @@ func cmdAsk(_ c: IPCClient) throws {
     } catch let e as IPCError where e.code == .notPermitted && [.allowOnce, .alwaysAllow, .trustApplePrograms].contains(action) {
         // Denying is open to the console user; allowing needs root or the signed app, so an AI agent
         // running as the user can turn its own question down but never approve it.
-        throw CLIError(zh ? "不允许：\(e.message)\n  允许访问需要 root 或 WhoRead 应用（以你的身份运行的 AI agent 只能拒绝，不能允许）。\n  例如 \(sudoCommand)"
-                          : "not permitted: \(e.message)\n  Allowing needs root or the WhoRead app (an AI agent running as you can deny, never allow).\n  e.g. \(sudoCommand)",
+        throw CLIError(zh ? "不允许：\(DisplayText.escaped(e.message))\n  允许访问需要 root 或 WhoRead 应用（以你的身份运行的 AI agent 只能拒绝，不能允许）。\n  例如 \(sudoCommand)"
+                          : "not permitted: \(DisplayText.escaped(e.message))\n  Allowing needs root or the WhoRead app (an AI agent running as you can deny, never allow).\n  e.g. \(sudoCommand)",
                        exitCode: 77)
     }
     let done: (en: String, zh: String)
@@ -435,7 +463,7 @@ func groupSummaries(_ sums: [UsageSummary], by key: (UsageSummary) -> String) ->
 func cmdApps(_ c: IPCClient) throws {
     let since = try args.value("since").map { try Format.parseSince($0) }
     let sums = try c.summaries(since: since).filter { args.has("all") || !$0.benign }
-    if args.json { return out(try Format.json(sums)) }
+    if args.json { return outJSON(try Format.json(sums)) }
     let ctx = context(c)
     var rows: [[String]] = []
     for (_, group) in groupSummaries(sums, by: { $0.responsible.key }) {
@@ -443,18 +471,18 @@ func cmdApps(_ c: IPCClient) throws {
         let last = group.map(\.lastSeen).max()!
         let count = group.reduce(0) { $0 + $1.count }
         let cats = Set(group.map(\.categoryID)).map(ctx.categoryName).sorted().joined(separator: ", ")
-        rows.append([group[0].responsible.displayName, group[0].responsible.kind.rawValue, cats, Format.time(first), Format.time(last), String(count)])
+        rows.append([DisplayText.name(group[0].responsible.displayName), group[0].responsible.kind.rawValue, cats, Format.time(first), Format.time(last), String(count)])
     }
     out(Format.table(rows, header: language == .zhHans ? ["应用", "类型", "碰过的类别", "首次", "最近", "次数"] : ["APP", "KIND", "CATEGORIES", "FIRST", "LAST", "COUNT"]))
 }
 
 func cmdFiles(_ c: IPCClient) throws {
     let sums = try c.summaries(since: nil).filter { args.has("all") || !$0.benign }
-    if args.json { return out(try Format.json(sums)) }
+    if args.json { return outJSON(try Format.json(sums)) }
     let ctx = context(c)
     var rows: [[String]] = []
     for (cat, group) in groupSummaries(sums, by: { $0.categoryID }) {
-        let apps = Set(group.map(\.responsible.displayName)).sorted().joined(separator: ", ")
+        let apps = Set(group.map { DisplayText.name($0.responsible.displayName) }).sorted().joined(separator: ", ")
         rows.append([ctx.categoryName(cat), apps, Format.time(group.map(\.lastSeen).max()!), String(group.reduce(0) { $0 + $1.count })])
     }
     out(Format.table(rows, header: language == .zhHans ? ["类别", "碰过它的应用", "最近", "次数"] : ["CATEGORY", "APPS", "LAST", "COUNT"]))
@@ -462,12 +490,12 @@ func cmdFiles(_ c: IPCClient) throws {
 
 func cmdAgents(_ c: IPCClient) throws {
     let sums = try c.summaries(since: nil).filter { $0.agentID != nil }
-    if args.json { return out(try Format.json(sums)) }
+    if args.json { return outJSON(try Format.json(sums)) }
     let ctx = context(c)
     let agents = (try? c.agents()) ?? AgentCatalog(agents: [])
     var rows: [[String]] = []
     for (agent, group) in groupSummaries(sums, by: { $0.agentID! }) {
-        let name = agents.agent(agent)?.name.resolve(language) ?? agent
+        let name = ctx.agentName(agent, agents)
         let cats = Set(group.map(\.categoryID)).map(ctx.categoryName).sorted().joined(separator: ", ")
         rows.append([name, cats, String(group.reduce(0) { $0 + $1.denied }), Format.time(group.map(\.lastSeen).max()!), String(group.reduce(0) { $0 + $1.count })])
     }
@@ -493,7 +521,7 @@ func dailyRows(_ c: IPCClient) throws -> [DailyAggregate] {
 
 func cmdDaily(_ c: IPCClient) throws {
     let rows = try dailyRows(c)
-    if args.json { return out(try Format.json(rows)) }
+    if args.json { return outJSON(try Format.json(rows)) }
     if rows.isEmpty {
         return out(language == .zhHans ? "还没有按天汇总的历史（超过 detail-days 天的明细会汇总到这里）。"
                                        : "No per-day history yet (details older than detail-days are rolled up here).")
@@ -502,8 +530,8 @@ func cmdDaily(_ c: IPCClient) throws {
     let agents = (try? c.agents()) ?? AgentCatalog(agents: [])
     let table = rows.map { a -> [String] in
         let s = a.summary
-        return [a.day, s.responsible.displayName, ctx.categoryName(s.categoryID),
-                s.agentID.map { agents.agent($0)?.name.resolve(language) ?? $0 } ?? "",
+        return [a.day, DisplayText.name(s.responsible.displayName), ctx.categoryName(s.categoryID),
+                s.agentID.map { ctx.agentName($0, agents) } ?? "",
                 String(s.count), String(s.reads), String(s.writes), String(s.denied)]
     }
     out(Format.table(table, header: language == .zhHans ? ["日期", "应用", "类别", "AI agent", "次数", "读", "写", "被拦截"]
@@ -611,12 +639,13 @@ func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter)
         switch f {
         case .json:
             for (i, e) in page.enumerated() {
-                let item = String(decoding: try pretty.encode(e), as: UTF8.self).replacingOccurrences(of: "\n", with: "\n  ")
+                // Hidden characters as \u escapes, as for --json (the same values decode).
+                let item = Format.terminalSafeJSON(String(decoding: try pretty.encode(e), as: UTF8.self)).replacingOccurrences(of: "\n", with: "\n  ")
                 try w.write((count + i == 0 ? "\n  " : ",\n  ") + item)
             }
         case .jsonl:
             for e in page {
-                try w.write(try compact.encode(e))
+                try w.write(Format.terminalSafeJSON(String(decoding: try compact.encode(e), as: UTF8.self)))
                 try w.write("\n")
             }
         case .csv:
@@ -639,12 +668,12 @@ func exportAggregates(_ c: IPCClient, format f: Exporter.Format, to w: ExportWri
     let rows = Array(try dailyRows(c).reversed())
     switch f {
     case .json:
-        try w.write(try Exporter.encoder(pretty: true).encode(rows))
+        try w.write(Format.terminalSafeJSON(String(decoding: try Exporter.encoder(pretty: true).encode(rows), as: UTF8.self)))
         try w.write("\n")
     case .jsonl:
         let enc = Exporter.encoder(pretty: false)
         for r in rows {
-            try w.write(try enc.encode(r))
+            try w.write(Format.terminalSafeJSON(String(decoding: try enc.encode(r), as: UTF8.self)))
             try w.write("\n")
         }
     case .csv:
@@ -715,14 +744,14 @@ func cmdRules(_ c: IPCClient) throws {
     case "list":
         let rules = try c.rules()
         if let e = try? c.status().rulesLoadError {
-            FileHandle.standardError.write(Data(("warning: the stored rules could not be loaded (\(e)); enforcement is off. "
+            note("warning: the stored rules could not be loaded (\(DisplayText.escaped(e))); enforcement is off. "
                 + "Fix with: sudo whoread rules replace --json-file RULES.json --confirm "
-                + "(unreadable rows are kept in the rules_backup table)\n").utf8))
+                + "(unreadable rows are kept in the rules_backup table)")
         }
-        if args.json { return out(try Format.json(rules)) }
+        if args.json { return outJSON(try Format.json(rules)) }
         out(Format.table(rules.map(describe), header: ["ID", "STATE", "ACTION", "ACCESS", "TARGET", "SUBJECT", "NAME"]))
     case "templates":
-        out(try Format.json(RuleTemplates.all))
+        outJSON(try Format.json(RuleTemplates.all))
     case "add":
         guard let file = args.value("json-file") else { throw CLIError("rules add --json-file RULE.json") }
         let data = try Data(contentsOf: URL(fileURLWithPath: file))
@@ -830,7 +859,7 @@ func cmdCatalog(_ c: IPCClient) throws {
         let info = try c.catalog()
         if let id = args.positional.dropFirst(2).first {
             guard let cat = info.catalog.category(id) else { throw CLIError("unknown category \(id) (see whoread catalog show)") }
-            if args.json { return out(try Format.json(cat)) }
+            if args.json { return outJSON(try Format.json(cat)) }
             out("\(cat.id) — \(cat.name.resolve(language))  [\(cat.kind.rawValue), \(cat.severity.rawValue)\(cat.enabled ? "" : ", disabled")]")
             out(cat.paths.isEmpty ? "  (no paths)" : cat.paths.map { "  " + $0 }.joined(separator: "\n"))
             if !cat.patterns.isEmpty { out("  \(cat.patterns.count) file pattern(s), \(cat.owners.count) owner(s)") }
@@ -841,7 +870,7 @@ func cmdCatalog(_ c: IPCClient) throws {
             }
             return
         }
-        if args.json { return out(try Format.json(info)) }
+        if args.json { return outJSON(try Format.json(info)) }
         var rows: [[String]] = []
         for cat in info.catalog.categories {
             let prefixes = info.prefixes.filter { $0.categoryID == cat.id }
@@ -967,7 +996,7 @@ func cmdCatalog(_ c: IPCClient) throws {
 func cmdSettings(_ c: IPCClient) throws {
     var s = try c.settings()
     guard args.positional.dropFirst().first == "set" else {
-        return out(try Format.json(s))
+        return outJSON(try Format.json(s))
     }
     // Exactly one VALUE: the tail of an unquoted path with a space must not be dropped.
     guard args.positional.count == 4 else { throw CLIError("settings set KEY VALUE (quote a VALUE that has spaces)") }
@@ -1010,7 +1039,7 @@ func cmdSettings(_ c: IPCClient) throws {
     default: throw CLIError("unknown setting \(key)")
     }
     _ = try c.call(.updateSettings(s))
-    out(try Format.json(try c.settings()))
+    outJSON(try Format.json(try c.settings()))
 }
 
 func cmdBaseline(_ c: IPCClient) throws {
@@ -1019,9 +1048,10 @@ func cmdBaseline(_ c: IPCClient) throws {
         return out("learning restarted")
     }
     guard case .baseline(let entries) = try c.call(.baseline) else { return }
-    if args.json { return out(try Format.json(entries)) }
+    if args.json { return outJSON(try Format.json(entries)) }
     out(Format.table(entries.map { [$0.key.responsibleKey, $0.key.categoryID, $0.key.access.rawValue, $0.source.rawValue, String($0.count), Format.time($0.lastSeen)] },
                      header: ["RESPONSIBLE", "CATEGORY", "ACCESS", "SOURCE", "COUNT", "LAST"]))
+    if entries.count >= Baseline.replyLimit { note("note: the daemon sends the \(Baseline.replyLimit) most recently seen entries") }
 }
 
 func cmdKillSwitch() throws {
@@ -1069,7 +1099,7 @@ func cmdReplay() throws {
     let alerts = try client.alerts(AlertQuery())
     if args.json {
         struct Result: Encodable { var events: [AnalyzedEvent]; var alerts: [Alert]; var parser: EsloggerParser.Stats? }
-        return out(try Format.json(Result(events: events, alerts: alerts, parser: replay.parserStats)))
+        return outJSON(try Format.json(Result(events: events, alerts: alerts, parser: replay.parserStats)))
     }
     let ctx = Context(catalog: core.analyzer.classifier.catalog, homes: core.homes)
     printEvents(events, ctx)
@@ -1130,9 +1160,9 @@ do {
         }
     }
 } catch let e as CLIError {
-    FileHandle.standardError.write(Data("whoread: \(e.message)\n".utf8))
+    note("whoread: \(e.message)")
     exit(e.exitCode)
 } catch {
-    FileHandle.standardError.write(Data("whoread: \(error)\n".utf8))
+    note("whoread: \(error)")
     exit(1)
 }
