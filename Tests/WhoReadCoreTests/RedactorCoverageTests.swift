@@ -257,4 +257,83 @@ final class RedactorCoverageTests: XCTestCase {
             ["open", "https://example.com/search?q=a&page=2"], ["echo", "see // comment@here"],
         ])
     }
+
+    // MARK: - Data written by compound commands and after exec > FILE
+
+    /// A pgpass line: no key=value or netrc rule would catch it, only the data rules.
+    let pg = "'db:5432:*:bob:Hunter2pw'"
+
+    func testLoopsAndConditionalsWhoseOutputGoesToAFile() {
+        assertRedacted(["/bin/sh", "-c", "while true; do echo \(pg); break; done > ~/WhoReadTestVault/pgpass"],
+                       ["/bin/sh", "-c", "while true; do echo '\(R)'; break; done > ~/WhoReadTestVault/pgpass"])
+        assertRedacted(["/bin/sh", "-c", "if true; then printf '%s\\n' \(pg); fi >> ~/WhoReadTestVault/pgpass"],
+                       ["/bin/sh", "-c", "if true; then printf '\(R)' '\(R)'; fi >> ~/WhoReadTestVault/pgpass"])
+        assertRedacted(["/bin/sh", "-c", "until false; do echo Hunter2pw; break; done | tee -a ~/WhoReadTestVault/n"],
+                       ["/bin/sh", "-c", "until false; do echo \(R); break; done | tee -a ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/sh", "-c", "if false; then :; else echo Hunter2pw; fi>~/WhoReadTestVault/n"],
+                       ["/bin/sh", "-c", "if false; then :; else echo \(R); fi>~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/sh", "-c", "case x in x) echo Hunter2pw;; esac > ~/WhoReadTestVault/n"],
+                       ["/bin/sh", "-c", "case x in x) echo \(R);; esac > ~/WhoReadTestVault/n"])
+        // Over several lines; a `done` in a heredoc body closes nothing.
+        assertRedacted(["/bin/bash", "-c", "{\n  echo \(pg)\n} > ~/WhoReadTestVault/pgpass"],
+                       ["/bin/bash", "-c", "{\n  echo '\(R)'\n} > ~/WhoReadTestVault/pgpass"])
+        assertRedacted(["/bin/bash", "-c", "while true; do\n  python3 - <<EOF\ndone\nEOF\n  echo Hunter2pw\n  break\ndone > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "while true; do\n  python3 - <<EOF\ndone\nEOF\n  echo \(R)\n  break\ndone > ~/WhoReadTestVault/n"])
+        // The list of a for loop is what its body writes.
+        assertRedacted(["/bin/sh", "-c", "for l in \(pg) 'x'; do echo \"$l\"; done >> ~/WhoReadTestVault/pgpass"],
+                       ["/bin/sh", "-c", "for l in '\(R)' '\(R)'; do echo \"\(R)\"; done >> ~/WhoReadTestVault/pgpass"])
+        assertRedacted(["/bin/bash", "-c", "for l in \(pg)\ndo\n  echo \"$l\"\ndone > ~/WhoReadTestVault/pgpass"],
+                       ["/bin/bash", "-c", "for l in '\(R)'\ndo\n  echo \"\(R)\"\ndone > ~/WhoReadTestVault/pgpass"])
+        // A function body's redirect.
+        assertRedacted(["/bin/bash", "-c", "f() { echo Hunter2pw; } > ~/WhoReadTestVault/n; f"],
+                       ["/bin/bash", "-c", "f() { echo \(R); } > ~/WhoReadTestVault/n; f"])
+    }
+
+    func testExecRedirectAndProcessSubstitution() {
+        // exec > FILE: everything the shell writes afterwards goes there, on later lines too.
+        assertRedacted(["/bin/sh", "-c", "exec > ~/WhoReadTestVault/pgpass\necho \(pg)"],
+                       ["/bin/sh", "-c", "exec > ~/WhoReadTestVault/pgpass\necho '\(R)'"])
+        assertRedacted(["/bin/sh", "-c", "exec 1>>~/WhoReadTestVault/pgpass; printf '%s\\n' \(pg)"],
+                       ["/bin/sh", "-c", "exec 1>>~/WhoReadTestVault/pgpass; printf '\(R)' '\(R)'"])
+        assertRedacted(["/bin/bash", "-c", "exec &> ~/WhoReadTestVault/n\nls\necho Hunter2pw"],
+                       ["/bin/bash", "-c", "exec &> ~/WhoReadTestVault/n\nls\necho \(R)"])
+        // Process substitution: echo writes into a pipe; the command around it goes on as before.
+        assertRedacted(["/bin/bash", "-c", "cat <(echo \(pg)) > ~/WhoReadTestVault/pgpass"],
+                       ["/bin/bash", "-c", "cat <(echo '\(R)') > ~/WhoReadTestVault/pgpass"])
+        assertRedacted(["/bin/bash", "-c", "while read l; do echo \"$l\"; done < <(echo \(pg)) > ~/WhoReadTestVault/pgpass"],
+                       ["/bin/bash", "-c", "while read l; do echo \"\(R)\"; done < <(echo '\(R)') > ~/WhoReadTestVault/pgpass"])
+        assertRedacted(["/bin/bash", "-c", "diff <(echo Hunter2pw) ~/WhoReadTestVault/n && curl -u admin:Hunter2pw https://x"],
+                       ["/bin/bash", "-c", "diff <(echo \(R)) ~/WhoReadTestVault/n && curl -u admin:\(R) https://x"])
+    }
+
+    /// The command after `if`, `while`, `until`, `elif` and `!` is a program with its own rules.
+    func testCommandsInConditionsKeepTheirFlagRules() {
+        assertRedacted(["/bin/sh", "-c", "if curl -u admin:Hunter2pw https://x; then echo ok; fi"],
+                       ["/bin/sh", "-c", "if curl -u admin:\(R) https://x; then echo ok; fi"])
+        assertRedacted(["/bin/sh", "-c", "while ! curl -u admin:Hunter2pw https://x; do sleep 1; done"],
+                       ["/bin/sh", "-c", "while ! curl -u admin:\(R) https://x; do sleep 1; done"])
+        assertRedacted(["/bin/sh", "-c", "until mysql -pHunter2pw -e 'select 1'; do sleep 1; done"],
+                       ["/bin/sh", "-c", "until mysql -p\(R) -e 'select 1'; do sleep 1; done"])
+        assertRedacted(["/bin/sh", "-c", "if false; then :; elif sshpass -p Hunter2pw ssh h; then :; fi"],
+                       ["/bin/sh", "-c", "if false; then :; elif sshpass -p \(R) ssh h; then :; fi"])
+        assertRedacted(["/bin/sh", "-c", "case $1 in up) htpasswd -nb bob Hunter2pw;; esac"],
+                       ["/bin/sh", "-c", "case $1 in up) htpasswd -nb bob \(R);; esac"])
+    }
+
+    func testCompoundCommandsThatWriteNowhereAreKept() {
+        assertKept([
+            ["/bin/sh", "-c", "for f in *.txt; do echo \"$f\"; done"],
+            ["/bin/sh", "-c", "while read l; do echo \"$l\"; done < input.txt"],
+            ["/bin/sh", "-c", "if [ -f x ]; then echo yes; else echo no; fi"],
+            ["/bin/sh", "-c", "for f in *.txt; do wc -l \"$f\"; done > counts.txt"],
+            ["/bin/bash", "-c", "for i in 1 2; do\n  echo $i\ndone\nls > out.txt"],
+            ["/bin/sh", "-c", "exec 2>/dev/null; echo hello"],
+            ["/bin/sh", "-c", "cat <(ls) > /tmp/out"],
+            ["/bin/bash", "-c", "diff <(sort a) <(sort b)"],
+            ["/bin/sh", "-c", "case $1 in start) echo starting;; esac"],
+            ["/bin/sh", "-c", "x=$(echo hello) && { echo $x; }"],
+            ["/bin/sh", "-c", "{ echo hello; ls; } 2>/dev/null"],
+            ["/bin/sh", "-c", "while true; do echo tick; sleep 1; done 2>&1"],
+        ])
+    }
 }

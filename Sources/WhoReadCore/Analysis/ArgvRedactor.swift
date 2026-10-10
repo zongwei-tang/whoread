@@ -269,6 +269,10 @@ public enum ArgvRedactor {
         var positional: [Int: ValueRule] = [:]
         // Redirects, heredocs and pipes mean something only in a command line, not in an argv.
         let shell = !firstIsProgram
+        // Loops, conditionals, groups and process substitutions whose output goes to a file or a pipe.
+        let groups = shell ? compound(tokens, lineStarts: lineStarts) : Compound()
+        // `exec > FILE`: from then on the shell's own output goes to FILE, on every later line.
+        var execRedirect = false
         func resetCommand(at i: Int) {
             pending = nil; program = nil; expectProgram = true; skipNext = false
             flags = ([:], [:]); positional = [:]
@@ -281,7 +285,8 @@ public enum ArgvRedactor {
             flags = programFlags(name, command: tokens[i...])
             positional = positionalSecrets(name, tokens: tokens, program: i, lineStarts: lineStarts, shell: shell)
             if shell && dataWriters.contains(name) {
-                dataMode = outputBeforeProgram || writesOutput(tokens, after: i, lineStarts: lineStarts)
+                dataMode = outputBeforeProgram || execRedirect || groups.redirected.contains(i)
+                    || writesOutput(tokens, after: i, lineStarts: lineStarts)
                 dataSeen = false
             }
         }
@@ -317,7 +322,7 @@ public enum ArgvRedactor {
                         pending = nil; program = nil; expectProgram = false; skipNext = false; flags = ([:], [:])
                     }
                 }
-            } else if lineStarts.contains(i) {
+            } else if lineStarts.contains(i) || groups.commandStarts.contains(i) {
                 resetCommand(at: i)
             }
             if isSeparator(raw) {
@@ -329,16 +334,30 @@ public enum ArgvRedactor {
             // `cd /tmp; curl …`: the next word starts a new command.
             var endsCommand = false
             var word = raw
+            var suffix = ""
             if raw.count > 1 && raw.hasSuffix(";") && !raw.hasSuffix("\\;") && !isQuoted(raw) {
-                word = String(raw.dropLast())
+                // `pw;`, and `pw;;` ending a `case` branch.
+                let n = raw.count > 2 && raw.hasSuffix(";;") ? 2 : 1
+                word = String(raw.dropLast(n))
+                suffix = String(repeating: ";", count: n)
                 endsCommand = true
             }
             defer {
-                if endsCommand { resetCommand(at: i + 1) }
+                if endsCommand {
+                    resetCommand(at: i + 1)
+                } else if groups.substitutionEnds.contains(i) {
+                    // After `<(echo pw)`: the words of the command around it, with no rules of their own.
+                    pending = nil; program = nil; expectProgram = false; dataMode = false; flags = ([:], [:]); positional = [:]
+                }
             }
             let (quote, t) = unquote(word)
-            let suffix = endsCommand ? ";" : ""
             func emit(_ value: String) { out[i] = quote + value + quote + suffix }
+
+            // `for l in 'pw'; do echo "$l"; done > FILE`: the loop's words are what it writes.
+            if groups.loopData.contains(i) {
+                emit(placeholder)
+                continue
+            }
 
             // Redirects: the operator and its target are kept (`> FILE`, `2>/dev/null`). Shell syntax
             // is in single words (an element with spaces is a command line of its own, below).
@@ -365,6 +384,13 @@ public enum ArgvRedactor {
                 emit(placeholder)
                 continue
             }
+            // `cat <(echo pw)`: a command of its own whose output goes into a pipe.
+            if shellWord, t.hasPrefix("<(") || t.hasPrefix(">(") {
+                let name = String(t.drop { "<>(".contains($0) })
+                resetCommand(at: i)
+                if !name.isEmpty { startProgram(basename(name), at: i) }
+                continue
+            }
             if shellWord, let r = redirect(in: t) {
                 if dataMode && !r.data.isEmpty {
                     out[i] = placeholder + r.operatorAndTarget + suffix
@@ -373,6 +399,7 @@ public enum ArgvRedactor {
                 }
                 if r.target.isEmpty && !r.duplicatesDescriptor { keepNext = true }
                 if program == nil && r.isStandardOutput && !r.duplicatesDescriptor && r.data.isEmpty { outputBeforeProgram = true }
+                if program == "exec" && expectProgram && r.isStandardOutput && r.data.isEmpty { execRedirect = true }
                 continue
             }
             if dataMode {
@@ -628,41 +655,232 @@ public enum ArgvRedactor {
 
     /// True when the command starting after `start` sends its standard output to a file
     /// (`>`, `>>`, `1>`, `&>`, `>|`, attached or not) or into a pipe (`|`, also inside a word:
-    /// `pw|tee FILE`), before the command ends. Inside a `{ …; }` or `( … )` group the group's own
-    /// redirect or pipe counts too (`{ echo pw; } > FILE`): the rest of the line is searched.
+    /// `pw|tee FILE`), before the command ends. The output of a group or loop around it is
+    /// `compound`'s.
     static func writesOutput(_ tokens: [String], after start: Int, lineStarts: Set<Int>) -> Bool {
-        let grouped = openGroups(tokens, through: start, lineStarts: lineStarts) > 0
         var k = start + 1
         while k < tokens.count {
             let t = tokens[k]
             if lineStarts.contains(k) { return false }
             if t == "|" || t == "|&" { return true }
-            if isSeparator(t) && !grouped { return false }
+            if isSeparator(t) { return false }
             let word = !isQuoted(t) && !t.contains(where: \.isWhitespace)
             if word, let r = redirect(in: t), r.isStandardOutput { return true }
             if word, unquotedPipe(in: t) != nil { return true }
-            if t.hasSuffix(";") && !t.hasSuffix("\\;") && !isQuoted(t) && !grouped { return false }
+            if t.hasSuffix(";") && !t.hasSuffix("\\;") && !isQuoted(t) { return false }
             k += 1
         }
         return false
     }
 
-    /// Groups (`{`, `(`, `(echo`) opened on the line of `index`, up to and including that word, and
-    /// not closed before it.
-    static func openGroups(_ tokens: [String], through index: Int, lineStarts: Set<Int>) -> Int {
-        guard index < tokens.count else { return 0 }
-        var first = index
-        while first > 0 && !lineStarts.contains(first) { first -= 1 }
-        var depth = 0
-        for k in first...index {
-            let t = tokens[k]
-            if isQuoted(t) { continue }
-            if t == "{" || t == "(" { depth += 1; continue }
-            if t == "}" || t == ")" { depth = max(0, depth - 1); continue }
-            depth += t.prefix { $0 == "(" }.count
-            if k < index { depth = max(0, depth - closingParentheses(in: t)) }
+    /// What the compound commands of a command line do with their output (`redactSequence`).
+    struct Compound {
+        /// Indices inside a group whose output goes to a file or a pipe: `{ echo pw; } > FILE`,
+        /// `while …; do echo pw; done > FILE`, `if …; then printf …; fi | tee FILE`, `case … esac >
+        /// FILE`, `f() { echo pw; } > FILE`, `<(echo pw)` (a pipe), over several lines too.
+        var redirected = Set<Int>()
+        /// The words of a `for` loop whose body writes them there (`for l in 'pw'; do echo "$l"; done
+        /// > FILE`).
+        var loopData = Set<Int>()
+        /// Words that start a command though no separator comes before them: after `if`, `while`,
+        /// `until`, `elif` and `!`, and after a `case` pattern.
+        var commandStarts = Set<Int>()
+        /// Words that end a process substitution (`pw)` in `cat <(echo pw) FILE`).
+        var substitutionEnds = Set<Int>()
+    }
+
+    /// Finds the compound commands of a command line: `{ … }`, `( … )`, `$( … )`, `<( … )`, loops,
+    /// `if … fi` and `case … esac`, by their keywords where a command starts (`echo done` is not
+    /// one), across lines and around heredoc bodies (a `done` in a body closes nothing).
+    static func compound(_ tokens: [String], lineStarts: Set<Int>) -> Compound {
+        enum Kind { case brace, paren, substitution, capture, loop, conditional, choice }
+        struct Frame {
+            var kind: Kind
+            var start: Int
+            /// A data writer (echo, printf) runs inside.
+            var writes = false
+            /// `for NAME in WORDS`: 1 after `for`, 2 after the name, 3 in the words.
+            var listState = 0
+            var list: [Int] = []
         }
-        return depth
+        var result = Compound()
+        var stack: [Frame] = []
+        var atCommand = true
+        var pendingHeredoc: String?
+        var body: String?
+
+        func close(_ frame: Frame, at end: Int, tail: String) {
+            guard frame.kind != .capture else { return }
+            guard frame.kind == .substitution || outputLeaves(tokens, after: end, tail: tail, lineStarts: lineStarts) else { return }
+            result.redirected.formUnion(frame.start...end)
+            if frame.writes { result.loopData.formUnion(frame.list) }
+        }
+        func push(_ kind: Kind, at k: Int, listState: Int = 0) { stack.append(Frame(kind: kind, start: k, listState: listState)) }
+        func program(_ word: String) {
+            if dataWriters.contains(basename(word)) { for j in stack.indices { stack[j].writes = true } }
+        }
+        /// `(`, `$(`, `$((`, `<(`, `>(` at the front of a word; returns the rest (a program name).
+        func openParentheses(_ word: Substring, at k: Int) -> Substring {
+            var rest = word
+            while true {
+                if rest.hasPrefix("<(") || rest.hasPrefix(">(") { push(.substitution, at: k); rest = rest.dropFirst(2) }
+                else if rest.hasPrefix("$(") { push(.capture, at: k); rest = rest.dropFirst(2) }
+                else if rest.hasPrefix("(") { push(stack.last?.kind == .capture ? .capture : .paren, at: k); rest = rest.dropFirst() }
+                else { return rest }
+            }
+        }
+        /// `n` closing parentheses at the end of word `k`; in a `case`, a pattern's `)` starts a command.
+        func closeParentheses(_ n: Int, at k: Int) {
+            for _ in 0..<n {
+                guard let top = stack.last else { return }
+                switch top.kind {
+                case .paren, .substitution, .capture:
+                    stack.removeLast()
+                    close(top, at: k, tail: "")
+                    if top.kind == .substitution { result.substitutionEnds.insert(k) }
+                case .choice:
+                    result.commandStarts.insert(k + 1)
+                    atCommand = true
+                    return
+                default:
+                    return
+                }
+            }
+        }
+
+        var k = -1
+        while k + 1 < tokens.count {
+            k += 1
+            let t = tokens[k]
+            if lineStarts.contains(k) {
+                atCommand = true
+                if let d = pendingHeredoc { body = d; pendingHeredoc = nil }
+                if stack.last?.kind == .loop { stack[stack.count - 1].listState = 0 }
+            }
+            if let d = body {
+                if lineStarts.contains(k) && t == d { body = nil }
+                continue
+            }
+            if [";", "&&", "||", "|", "&", "|&", ";;", ";&", ";;&"].contains(t) {
+                atCommand = true
+                if stack.last?.kind == .loop { stack[stack.count - 1].listState = 0 }
+                continue
+            }
+            let quoted = isQuoted(t)
+            let semicolons = quoted || t.hasSuffix("\\;") ? 0 : t.reversed().prefix { $0 == ";" }.count
+            let word = String(t.dropLast(semicolons))
+            let endsCommand = semicolons > 0 && !word.isEmpty
+            defer { if endsCommand { atCommand = true } }
+            // The words of `for NAME in WORDS`.
+            if let top = stack.last, top.kind == .loop, top.listState > 0 && !atCommand {
+                switch top.listState {
+                case 1: stack[stack.count - 1].listState = 2
+                case 2: stack[stack.count - 1].listState = word == "in" ? 3 : 0
+                default: stack[stack.count - 1].list.append(k)
+                }
+                if endsCommand { stack[stack.count - 1].listState = 0 }
+                continue
+            }
+            if quoted {
+                if atCommand { program(t); atCommand = false }
+                continue
+            }
+            if word.hasPrefix("<<") && !word.hasPrefix("<<<") {
+                var name = heredocDelimiter(String(word.dropFirst(2)))
+                if name.isEmpty && k + 1 < tokens.count {
+                    k += 1
+                    name = heredocDelimiter(tokens[k])
+                }
+                pendingHeredoc = name
+                continue
+            }
+            if atCommand {
+                switch word {
+                case "{": push(.brace, at: k); continue
+                case "if": push(.conditional, at: k); result.commandStarts.insert(k + 1); continue
+                case "while", "until": push(.loop, at: k); result.commandStarts.insert(k + 1); continue
+                case "for", "select": push(.loop, at: k, listState: 1); atCommand = false; continue
+                case "case": push(.choice, at: k); atCommand = false; continue
+                case "do", "then", "else": continue
+                case "elif", "!": result.commandStarts.insert(k + 1); continue
+                case "function": if k + 1 < tokens.count { k += 1 }; continue
+                default: break
+                }
+                // `}`, `done`, `fi`, `esac`, with what follows attached (`done>FILE`, `fi;`, `})`).
+                var closed = false
+                for (keyword, kind) in [("}", Kind.brace), ("done", .loop), ("fi", .conditional), ("esac", .choice)] {
+                    guard t == keyword || (t.hasPrefix(keyword) && ";>|&)<".contains(t[t.index(t.startIndex, offsetBy: keyword.count)])) else { continue }
+                    let tail = String(t.dropFirst(keyword.count))
+                    if let at = stack.lastIndex(where: { $0.kind == kind }) {
+                        let frame = stack[at]
+                        stack.removeSubrange(at...)
+                        close(frame, at: k, tail: tail)
+                    }
+                    closeParentheses(closingParentheses(in: String(tail.prefix { $0 == ")" })), at: k)
+                    atCommand = false
+                    closed = true
+                    break
+                }
+                if closed { continue }
+                // `f() { …; }`: a function header, then its body.
+                if word.count > 2 && word.hasSuffix("()") { continue }
+                let rest = openParentheses(Substring(word), at: k)
+                if rest.contains("$(") {
+                    // `x=$(echo …`: an assignment around a command.
+                    let inner = openParentheses(rest[rest.range(of: "$(")!.lowerBound...], at: k)
+                    program(String(inner))
+                    atCommand = false
+                } else if !rest.isEmpty && !(rest.contains("=") && !rest.hasPrefix("-")) && !wrappers.contains(String(rest)) {
+                    program(String(rest))
+                    atCommand = false
+                }
+            } else if word.hasPrefix("<(") || word.hasPrefix(">(") || word.contains("$(") {
+                // `cat <(echo pw)`, `x$(echo`: a command inside an argument.
+                let start = word.hasPrefix("<(") || word.hasPrefix(">(") ? word.startIndex : word.range(of: "$(")!.lowerBound
+                program(String(openParentheses(word[start...], at: k)))
+            }
+            closeParentheses(closingParentheses(in: word), at: k)
+        }
+        return result
+    }
+
+    /// True when the words after a group's closing word send the group's output to a file or a pipe:
+    /// `} > FILE`, `done | tee FILE`, `fi>>FILE` (`tail`: what is attached to the closing word),
+    /// `done 2>/dev/null >FILE`, `done < <(…) > FILE`; not `done; ls > FILE`.
+    static func outputLeaves(_ tokens: [String], after k: Int, tail: String, lineStarts: Set<Int>) -> Bool {
+        var j = k + 1
+        var attached: String? = tail.isEmpty ? nil : tail
+        while true {
+            let t: String
+            if let a = attached {
+                t = a
+                attached = nil
+            } else {
+                guard j < tokens.count, !lineStarts.contains(j) else { return false }
+                t = tokens[j]
+                j += 1
+            }
+            if isQuoted(t) || t.hasPrefix(";") || t.hasPrefix("&&") || t.hasPrefix("||") || t == "&" || t.hasPrefix(")") { return false }
+            if t.hasPrefix("|") { return true }
+            if t.hasPrefix("<") && !t.hasPrefix("<(") {
+                // Input: `< FILE`, `< <(cmd …)` (the whole substitution).
+                if t == "<" && j < tokens.count {
+                    let next = tokens[j]
+                    j += 1
+                    if next.hasPrefix("<(") {
+                        var depth = next.filter { $0 == "(" }.count - closingParentheses(in: next)
+                        while depth > 0 && j < tokens.count && !lineStarts.contains(j) {
+                            depth += tokens[j].filter { $0 == "(" }.count - closingParentheses(in: tokens[j])
+                            j += 1
+                        }
+                    }
+                }
+                continue
+            }
+            guard let r = redirect(in: t), r.data.isEmpty else { return false }
+            if r.isStandardOutput { return true }
+            if r.target.isEmpty && !r.duplicatesDescriptor { j += 1 }
+        }
     }
 
     /// The first pipe in a word outside quotes (`|` or `|&`; `||` is not one).
@@ -1434,7 +1652,7 @@ public enum ArgvRedactor {
     }
 
     static func isSeparator(_ t: String) -> Bool {
-        ["&&", "||", ";", "|", "&", "(", ")", "{", "}", "then", "do", "else", "$("].contains(t)
+        ["&&", "||", ";", "|", "&", "(", ")", "{", "}", "then", "do", "else", "$(", ";;", ";&", ";;&", "|&"].contains(t)
     }
 
     static func isQuoted(_ t: String) -> Bool {
