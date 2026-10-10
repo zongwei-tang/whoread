@@ -725,9 +725,17 @@ public final class DaemonCore: @unchecked Sendable {
     /// The allow rule for "allow once" (10 minutes) or "always allow": the app or agent, the category,
     /// the access, scoped to the AI agents that were in the chain.
     private func addAnswerRule(_ scope: AnswerScope, once: Bool, peer: IPCPeer, now: Date) throws {
+        guard let edit = try answerRuleEdit(scope, once: once, now: now) else { return }
+        try saveRuleChange(peer: peer, privileged: true, edit)
+    }
+
+    /// The change to the rule list that `addAnswerRule` saves (nil: nothing to save). Also tried on a
+    /// copy first where something else would be saved before it, so that a refusal (the rule limit)
+    /// leaves nothing changed.
+    private func answerRuleEdit(_ scope: AnswerScope, once: Bool, now: Date) throws -> ((inout [Rule]) throws -> Void)? {
         // An alert about metadata-only opens (neither read nor write): nothing to allow, and the rule
         // would be `.any` (read and write).
-        guard !scope.key.access.isEmpty else { return }
+        guard !scope.key.access.isEmpty else { return nil }
         let categoryID = scope.key.categoryID
         guard data.catalog.category(categoryID) != nil else {
             throw IPCError(.invalid, "category \(categoryID) is no longer in the catalog")
@@ -747,7 +755,7 @@ public final class DaemonCore: @unchecked Sendable {
             x.template == DaemonCore.askAnswerTemplate && x.action == .allow && x.target == rule.target && x.subject == rule.subject
                 && x.access == rule.access && x.chainAgents == rule.chainAgents
         }
-        try saveRuleChange(peer: peer, privileged: true) { list in
+        return { list in
             // Answers expire: drop the dead ones, and the earlier "allow once" this one replaces.
             list.removeAll { $0.template == DaemonCore.askAnswerTemplate && ($0.expiresAt.map { $0 <= now } ?? false) }
             if once {
@@ -953,6 +961,12 @@ public final class DaemonCore: @unchecked Sendable {
         case .alwaysAllow:
             guard privileged else { throw IPCError(.notPermitted, "allowing weakens protection: run it with sudo, or use the WhoRead app") }
             if let ruleID = alert.ruleID, alert.kind == .blocked || alert.kind == .wouldBlock {
+                // The answer rule saved below must fit (the rule limit): otherwise nothing changes, not
+                // the exception alone.
+                if let edit = try answerRuleEdit(scope, once: false, now: now) {
+                    var trial = rules.rules
+                    try edit(&trial)
+                }
                 try addException(toRule: ruleID, RuleException(subject: subject, categoryID: alert.categoryID, access: access,
                                                                chainAgents: chainAgents, createdAt: now))
             }

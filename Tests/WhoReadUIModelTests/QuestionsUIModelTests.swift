@@ -597,4 +597,133 @@ final class QuestionsUIModelTests: XCTestCase {
         // Other changes: not "need the WhoRead app" to the WhoRead app itself.
         XCTAssertTrue(L10n.message(for: refused, .en).contains("does not recognise this app as the signed WhoRead app"))
     }
+
+    func testTask3VariantRuleLimitOnARuleBlockChangesNothing() throws {
+        // A rule blocked Terminal reading SSH keys; the rule list is full.
+        let block = Rule(name: "Block SSH keys", target: .category("ssh"), subject: .anyNonOwner, action: .deny)
+        let fill = (1..<DaemonCore.maxRules).map { _ in Rule(target: .category("aws"), subject: .anyNonOwner, action: .alert) }
+        try core.setRules([block] + fill)
+        var alert = try XCTUnwrap(try core.store.alerts(AlertQuery(limit: 10)).first)
+        alert.kind = .blocked
+        alert.status = .unread
+        alert.ruleID = block.id
+        alert.responsible = Self.terminal
+        alert.categoryID = "ssh"
+        alert.accesses = .read
+        alert.chain = []
+        try core.store.upsert([alert])
+
+        // "Always allow" there saves an exception on the rule and the app × category answer rule. At
+        // the limit the answer rule does not fit: the exception must not be saved alone, since the
+        // app says nothing changed.
+        let e = try XCTUnwrap(failure(.alertAction(alertID: alert.id, action: .alwaysAllow), signed))
+        XCTAssertEqual(e.code, .invalid)
+        XCTAssertEqual(L10n.alertActionError(e, alertID: alert.id, action: .alwaysAllow, kind: .blocked, .en), L10n.t(.answerRuleLimit, .en))
+        XCTAssertEqual(core.rules.rules.first { $0.id == block.id }?.exceptions, [], "nothing changed")
+        XCTAssertEqual(core.rules.rules.count, DaemonCore.maxRules)
+        XCTAssertNotEqual(try core.store.alert(id: alert.id)?.status, .resolved, "the alert stays open")
+
+        // With room for it, both are saved and the alert is settled.
+        try core.setRules([block] + fill.dropLast())
+        XCTAssertNil(failure(.alertAction(alertID: alert.id, action: .alwaysAllow), signed))
+        XCTAssertEqual(core.rules.rules.first { $0.id == block.id }?.exceptions.count, 1)
+        XCTAssertTrue(core.rules.rules.contains { $0.template == DaemonCore.askAnswerTemplate && $0.action == .allow })
+        XCTAssertEqual(try core.store.alert(id: alert.id)?.status, .resolved)
+    }
+
+    func testTask3VariantRefusalsToAnotherUserOrForAReasonOfTheirOwn() throws {
+        // Another user than the one at the console: every request is refused, allowing and "block from
+        // now on" too. Not "this app is not recognised", which would send the user to the wrong fix.
+        let id = try openQuestion()
+        let alert = try XCTUnwrap(try core.store.alerts(AlertQuery(limit: 10)).first)
+        handler.consoleUID = { geteuid() &+ 1 }
+        for action in [AlertAction.alwaysAllow, .blockFromNowOn, .ignore] {
+            let e = try XCTUnwrap(failure(.alertAction(alertID: alert.id, action: action), signed), "\(action)")
+            XCTAssertEqual(L10n.alertActionError(e, alertID: alert.id, action: action, kind: alert.kind, .en), L10n.t(.errNotConsoleUser, .en))
+        }
+        for action in [AlertAction.allowOnce, .alwaysAllow, .blockFromNowOn] {
+            let e = try XCTUnwrap(failure(.answerAsk(id: id, action: action), signed), "\(action)")
+            XCTAssertEqual(L10n.answerError(e, askID: id, action: action, .zhHans), L10n.t(.errNotConsoleUser, .zhHans))
+            XCTAssertEqual(L10n.message(for: e, .en), L10n.t(.errNotConsoleUser, .en))
+        }
+
+        // The console user, refused a change that strengthens protection (open to it) for a reason of its
+        // own: the daemon's reason, not "this app is not recognised".
+        let own = IPCError(.notPermitted, "the stored rules could not be loaded; only root or the WhoRead app may replace them")
+        let said = "The daemon refused: the stored rules could not be loaded; only root or the WhoRead app may replace them"
+        XCTAssertEqual(L10n.alertActionError(own, alertID: 5, action: .blockFromNowOn, kind: .firstAccess, .en), said)
+        XCTAssertEqual(L10n.alertActionError(own, alertID: 5, action: .keepBlocking, kind: .ask, .en), said)
+        XCTAssertEqual(L10n.answerError(own, askID: 5, action: .blockFromNowOn, .en), said)
+        // "Keep blocking" on a rule's block silences the alert: that one needs the app.
+        XCTAssertTrue(L10n.alertActionError(own, alertID: 5, action: .keepBlocking, kind: .blocked, .en)
+            .hasSuffix("sudo whoread alert 5 keep-blocking"))
+    }
+
+    // MARK: - task-2-variant: a banner does not keep saying the path is hidden
+
+    func testTask2VariantBannerShowsThePathOnceTheAppIsRecognised() throws {
+        let id = try openQuestion()
+        let m = AppModel(language: .en)
+        _ = poll(m, signed, full: true)
+        let planner = NotificationPlanner()
+        // The questions' connection was not taken for the app: the banner goes out without the path.
+        guard case .asks(let hidden) = SnapshotFetcher.fetchAsks(unrecognised) else { return XCTFail() }
+        let first = planner.plan(asks: hidden, formatter: m.formatter)
+        XCTAssertEqual(first.post.count, 1)
+        XCTAssertTrue(try XCTUnwrap(first.post.first).body.contains("file path hidden"))
+        XCTAssertFalse(try XCTUnwrap(first.post.first).quiet)
+
+        // Reconnected and served as the app: the same banner is replaced, quietly, now with the path.
+        guard case .asks(let shown) = SnapshotFetcher.fetchAsks(signed) else { return XCTFail() }
+        let second = planner.plan(asks: shown, formatter: m.formatter)
+        XCTAssertEqual(second.post.map(\.identifier), [NotificationPlanner.askIdentifier(id)])
+        let replaced = try XCTUnwrap(second.post.first)
+        XCTAssertTrue(replaced.quiet)
+        XCTAssertTrue(replaced.body.contains("~/.ssh/id_ed25519"), replaced.body)
+        XCTAssertFalse(replaced.body.contains("file path hidden"), replaced.body)
+        XCTAssertEqual(second.remove, [])
+
+        // Once; and never back to the hidden text (the path was shown already).
+        XCTAssertEqual(planner.plan(asks: shown, formatter: m.formatter).post, [])
+        XCTAssertEqual(planner.plan(asks: hidden, formatter: m.formatter).post, [])
+        XCTAssertEqual(planner.plan(asks: shown, formatter: m.formatter).post, [])
+    }
+
+    // MARK: - task-1-variant: what the limited view shows is current
+
+    func testTask1VariantUnreadCountFollowsTheStatusWhileAlertsAreRefused() throws {
+        let m = AppModel(language: .en)
+        _ = poll(m, unrecognised, full: true)
+        let unread = try XCTUnwrap(m.status).unreadAlerts
+        XCTAssertGreaterThan(unread, 0)
+        XCTAssertEqual(m.alerts, [])
+        // The Alerts tab badge and the popover header: not 0 while the menu bar badge says otherwise.
+        XCTAssertEqual(m.unreadCount, unread)
+        XCTAssertEqual(m.menuBar.unread, m.unreadCount)
+        // A current list is counted.
+        _ = poll(m, signed)
+        XCTAssertEqual(m.unreadCount, m.alerts.filter { $0.status == .unread }.count)
+    }
+
+    func testTask1VariantStateNoLongerServedIsNotShownAsLive() throws {
+        let m = AppModel(language: .en)
+        _ = poll(m, unrecognised, full: true, hello: true)
+        XCTAssertNotNil(m.liveStatus)
+        // Another user is now at the console: the status read before is not this daemon's word any more.
+        handler.consoleUID = { geteuid() &+ 1 }
+        _ = poll(m, unrecognised)
+        XCTAssertNil(m.liveStatus, "no stale switches in the menu")
+        XCTAssertEqual(m.menuBar.symbol, "exclamationmark.triangle")
+        XCTAssertEqual(m.connectionProblemText, L10n.t(.errNotConsoleUser, .en))
+
+        // Another version: said once, in words, not again as a decoder dump under the questions.
+        let v = AppModel(language: .en)
+        var mismatch = Snapshot()
+        mismatch.handshake = .mismatch("client speaks protocol 9, daemon 10")
+        mismatch.error = IPCError(.versionMismatch, "keyNotFound(…)")
+        v.apply(mismatch)
+        v.apply(asks: .failed(IPCError(.versionMismatch, "keyNotFound(…)")))
+        XCTAssertNotNil(v.versionProblem)
+        XCTAssertNil(v.asksProblemText)
+    }
 }

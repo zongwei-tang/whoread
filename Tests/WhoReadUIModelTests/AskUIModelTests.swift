@@ -404,8 +404,11 @@ final class AskUIModelTests: XCTestCase {
                        + "or an administrator can allow. The question is still open. In Terminal: sudo whoread ask 7 allow-once")
         XCTAssertTrue(L10n.answerError(refused, askID: 7, action: .trustApplePrograms, .zhHans).hasSuffix("sudo whoread ask 7 trust-apple"))
         XCTAssertTrue(L10n.answerError(refused, askID: 7, action: .alwaysAllow, .en).hasSuffix("sudo whoread ask 7 allow"))
-        // Denying is open to the console user: refused only to another user, and that is what it says.
-        XCTAssertEqual(L10n.answerError(refused, askID: 7, action: .keepBlocking, .en), L10n.t(.errNotConsoleUser, .en))
+        // Denying is open to the console user: refused to another user (and that is what it says), or for a
+        // reason of its own, which the daemon's message gives.
+        let otherUser = IPCError(.notPermitted, "only root or the console user may talk to the WhoRead daemon")
+        XCTAssertEqual(L10n.answerError(otherUser, askID: 7, action: .keepBlocking, .en), L10n.t(.errNotConsoleUser, .en))
+        XCTAssertEqual(L10n.answerError(refused, askID: 7, action: .keepBlocking, .en), "The daemon refused: allowing needs root or the signed app")
         XCTAssertEqual(L10n.answerError(IPCError(.notFound, "no question #7"), askID: 7, action: .keepBlocking, .zhHans),
                        "这个问题已经关闭：已在别处回答、已过期，或 WhoRead 监控程序已重启。如果程序再次尝试访问，会再次询问你。")
         XCTAssertEqual(L10n.answerError(IPCError(.invalid, "bad"), askID: 7, action: .alwaysAllow, .en), "The daemon refused: bad")

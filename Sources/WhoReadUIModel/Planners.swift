@@ -22,6 +22,8 @@ public struct PlannedAskNotification: Equatable, Sendable {
     public var body: String
     public var categoryIdentifier: String
     public var actions: [AlertAction]
+    /// Replaces the banner already shown for this question (now with its file path): no sound.
+    public var quiet = false
 }
 
 /// A notification category to register: the answers offered on a banner, as buttons. Button titles
@@ -83,8 +85,14 @@ public final class NotificationPlanner: @unchecked Sendable {
     private var seeded = false
     private let launchedAt: Date
     private var lastUncleanStop: String?
-    /// Questions notified: id → first asked (a restarted daemon reuses ids).
-    private var askNotified: [Int64: Date] = [:]
+    /// Questions notified: id → when first asked (another first time under the same id is another
+    /// question), and whether the banner went out without the file path.
+    private var askNotified: [Int64: AskBanner] = [:]
+
+    private struct AskBanner {
+        var firstAt: Date
+        var pathHidden: Bool
+    }
 
     // Category prefixes: each is registered once per kind of app, AI agent or program (".app",
     // ".agent", ".binary"), see `categories(language:)`.
@@ -222,21 +230,26 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// The body puts the AI agents in the chain first (a collapsed banner shows only its first lines),
     /// then the headline, where the program really is and who signed it, what allowing covers (the
     /// app, not only that program), and the chain; names and paths are escaped and capped (`DisplayText`).
+    /// A banner posted while the daemon hid the file path from this app (`AskRequest.pathHidden`: its
+    /// connection was not taken for the app) is replaced, quietly, once the path can be shown: it would
+    /// otherwise keep saying that only the signed app can see the path, to the signed app.
     public func plan(asks: [AskRequest], formatter: AlertFormatter, complete: Bool = true,
                      agentName: (String) -> String = { $0 }) -> AskNotificationPlan {
         var plan = AskNotificationPlan()
-        var open: [Int64: Date] = [:]
+        var open: [Int64: AskBanner] = [:]
         for a in asks.sorted(by: { ($0.firstAt, $0.id) < ($1.firstAt, $1.id) }) {
-            open[a.id] = a.firstAt
-            // Same id, other first time: a restarted daemon's new question (replaces the old banner).
-            if let seen = askNotified[a.id], abs(seen.timeIntervalSince(a.firstAt)) < 1 { continue }
+            // Same id, other first time: another question (replaces the old banner).
+            let seen = askNotified[a.id].flatMap { abs($0.firstAt.timeIntervalSince(a.firstAt)) < 1 ? $0 : nil }
+            let showsPathNow = seen?.pathHidden == true && !a.pathHidden
+            open[a.id] = AskBanner(firstAt: a.firstAt, pathHidden: showsPathNow ? false : (seen?.pathHidden ?? a.pathHidden))
+            if seen != nil && !showsPathNow { continue }
             plan.post.append(PlannedAskNotification(
                 identifier: NotificationPlanner.askIdentifier(a.id), askID: a.id, title: L10n.t(.notifAskTitle, formatter.language),
                 body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.displayAlert(formatter.language)),
                        formatter.identityLine(a.asAlert), a.allowCoverageLine(formatter, agentName: agentName),
                        formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
                 categoryIdentifier: NotificationPlanner.askCategory(apple: a.appleProgram, responsible: a.responsible.kind),
-                actions: AskAnswers.actions(for: a)))
+                actions: AskAnswers.actions(for: a), quiet: showsPathNow))
         }
         if complete {
             plan.remove = askNotified.keys.filter { open[$0] == nil }.sorted().map(NotificationPlanner.askIdentifier)

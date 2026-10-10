@@ -397,9 +397,10 @@ public final class AppModel {
     public var liveCursor: Int64? { live.lastID }
 
     /// `status` while it describes the running daemon: nil once that daemon answers in a protocol
-    /// this app cannot read (another version replaced it). `status` is kept for restart detection.
+    /// this app cannot read (another version replaced it), or no longer serves this app (it runs as
+    /// another user than the one at the console). `status` is kept for restart detection.
     public var liveStatus: DaemonStatus? {
-        lastError?.code == .versionMismatch ? nil : status
+        lastError?.code == .versionMismatch || lastError?.code == .notPermitted ? nil : status
     }
 
     public var menuBar: MenuBarState {
@@ -517,6 +518,8 @@ public final class AppModel {
     /// Why the open questions cannot be read, while the daemon is otherwise reachable.
     public var asksProblemText: String? {
         guard let e = asksError, connected else { return nil }
+        // Another version: `versionProblem` says so in words, shown above everything else.
+        if e.code == .versionMismatch, versionProblem != nil { return nil }
         switch e.code {
         case .notPermitted: return L10n.t(.errNotConsoleUser, language)
         // The status was read: the daemon runs, this read got no reply in time.
@@ -650,7 +653,12 @@ public final class AppModel {
         alertsUnreadOnly ? alerts.filter { $0.status == .unread } : alerts
     }
 
-    public var unreadCount: Int { alerts.filter { $0.status == .unread }.count }
+    /// Unread alerts: counted in the list while it is current, otherwise (refused, not answered) as the
+    /// status counts them, so the Alerts tab and the popover agree with the menu bar badge.
+    public var unreadCount: Int {
+        if failures[.alerts] != nil, let s = liveStatus { return s.unreadAlerts }
+        return alerts.filter { $0.status == .unread }.count
+    }
 
     public var appRows: [AppRow] {
         var groups: [String: [UsageSummary]] = [:]

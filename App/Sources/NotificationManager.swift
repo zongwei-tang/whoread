@@ -45,7 +45,8 @@ final class NotificationManager: @unchecked Sendable {
         content.categoryIdentifier = n.categoryIdentifier
         content.threadIdentifier = NotificationPlanner.categoryAsk
         content.userInfo = ["askID": NSNumber(value: n.askID)]
-        content.sound = .default
+        // A replacement (the same question, now with its path) does not sound again.
+        content.sound = n.quiet ? nil : .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: n.identifier, content: content, trigger: nil))
     }
 

@@ -506,12 +506,14 @@ public enum L10n {
     /// What to show when the daemon did not take an answer to a question. An allow refused for lack
     /// of privilege (not recognised as the signed app, not root) says how to give it from Terminal.
     public static func answerError(_ e: IPCError, askID: Int64, action: AlertAction, _ language: Language = current) -> String {
+        if isNotConsoleUser(e) { return t(.errNotConsoleUser, language) }
         switch e.code {
         case .notPermitted where AskAnswers.isAllow(action):
             return f(.askAllowNotPermittedFormat, "sudo whoread ask \(askID) \(AskAnswers.cliVerb(action))", language: language)
-        // Denying is open to the console user: refused only to another user.
+        // Denying is open to the console user: refused for a reason of its own (the stored rules could
+        // not be loaded), which the daemon's message gives. Not "this app is not recognised".
         case .notPermitted:
-            return t(.errNotConsoleUser, language)
+            return f(.errDaemonFormat, DisplayText.escaped(e.message, limit: 1000), language: language)
         case .notFound:
             return t(.askGone, language)
         default:
@@ -520,11 +522,25 @@ public enum L10n {
     }
 
     /// The same for an answer given on an alert (Alerts tab, alert banners; `whoread alert` words).
-    public static func alertActionError(_ e: IPCError, alertID: Int64, action: AlertAction, _ language: Language = current) -> String {
+    /// `kind`: the alert's kind, when known ("deny" on a question's alert is open to the console user).
+    public static func alertActionError(_ e: IPCError, alertID: Int64, action: AlertAction, kind: AlertKind? = nil,
+                                        _ language: Language = current) -> String {
+        if isNotConsoleUser(e) { return t(.errNotConsoleUser, language) }
         if e.code == .notPermitted {
+            // "Block from now on", and "deny" on a question's alert, strengthen protection: open to the
+            // console user, so refused for a reason of its own.
+            if action == .blockFromNowOn || (action == .keepBlocking && kind == .ask) {
+                return f(.errDaemonFormat, DisplayText.escaped(e.message, limit: 1000), language: language)
+            }
             return f(.alertNotPermittedFormat, "sudo whoread alert \(alertID) \(alertCLIWord(action))", language: language)
         }
         return answerOutcome(e, language) ?? message(for: e, language)
+    }
+
+    /// The daemon serves only root and the user at the console: this app runs as another user. Every
+    /// request is refused then, whatever it is (ServiceHandler.authorize words it so).
+    static func isNotConsoleUser(_ e: IPCError) -> Bool {
+        e.code == .notPermitted && e.message.hasPrefix("only root or the console user")
     }
 
     /// `whoread alert ID WORD`.
@@ -559,7 +575,7 @@ public enum L10n {
     /// translated sentence.
     public static func message(for e: IPCError, _ language: Language = current) -> String {
         switch e.code {
-        case .notPermitted: return t(.errNotPermitted, language)
+        case .notPermitted: return t(isNotConsoleUser(e) ? .errNotConsoleUser : .errNotPermitted, language)
         case .unavailable: return t(.errUnavailable, language)
         // The daemon's message can quote names and paths: one escaped line.
         case .versionMismatch: return f(.errVersionMismatchFormat, DisplayText.escaped(e.message, limit: 1000), language: language)

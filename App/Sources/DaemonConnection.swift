@@ -152,6 +152,8 @@ final class DaemonConnection {
         if case .failed(let e) = poll {
             // Banners stay: the questions may still be open, and a refused answer says so.
             if e.code == .unavailable { reresolveService() }
+            // A reply this app cannot read: the next poll's handshake gives the reason in words.
+            if e.code == .versionMismatch, model.versionProblem == nil { needsHello = true }
         } else {
             planAsks()
             // Paths hidden: the daemon did not take this connection for the app.
@@ -251,11 +253,12 @@ final class DaemonConnection {
     }
 
     /// Runs a request off the main thread, applies the daemon's answer, then refreshes.
-    /// `failed` describes a refusal (default: `L10n.message(for:)`) and may act on it.
-    private func run(_ work: @escaping @Sendable (XPCClient) throws -> IPCResponse,
+    /// `failed` describes a refusal (default: `L10n.message(for:)`) and may act on it. `questions`: on
+    /// the questions' connection (an answer), never queued behind a history read.
+    private func run(_ work: @escaping @Sendable (XPCClient) throws -> IPCResponse, questions: Bool = false,
                      failed: ((IPCError) -> String)? = nil, then: (() -> Void)? = nil) {
-        let client = self.client
-        queue.async {
+        let client = questions ? askClient : self.client
+        (questions ? askQueue : queue).async {
             var response: IPCResponse?
             var failure: IPCError?
             do {
@@ -276,6 +279,7 @@ final class DaemonConnection {
                     if let response { self.model.apply(response: response) }
                     then?()
                 }
+                if questions { self.pollAsks() }
                 self.poll(full: true)
             }
         }
@@ -286,11 +290,13 @@ final class DaemonConnection {
     }
 
     /// `fromNotification`: the user answered a banner, so explain there if "block from now on"
-    /// saved a rule that cannot block right now.
+    /// saved a rule that cannot block right now. A question's alert is answered like the question, on
+    /// the questions' connection.
     func act(on alert: Int64, _ action: AlertAction, fromNotification: Bool = false) {
-        run({ try $0.call(.alertAction(alertID: alert, action: action)) }, failed: { e in
+        let kind = model.alerts.first { $0.id == alert }?.kind
+        run({ try $0.call(.alertAction(alertID: alert, action: action)) }, questions: kind == .ask, failed: { e in
             // The rule limit, an answer applied but not saved, no reply: said as such, not "refused".
-            let text = L10n.alertActionError(e, alertID: alert, action: action)
+            let text = L10n.alertActionError(e, alertID: alert, action: action, kind: kind)
             if fromNotification {
                 NotificationManager.shared.post(SystemNotice(identifier: "whoread.alert-failed-\(alert)",
                                                              title: L10n.t(.notifAskFailedTitle), body: text), tab: .alerts)
