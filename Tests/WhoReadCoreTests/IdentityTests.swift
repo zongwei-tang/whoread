@@ -106,15 +106,65 @@ final class AgentExecTests: AncestryTestCase {
                        ["2.0.1", "zsh", "cat"])
     }
 
-    /// Guard: an agent that execs another agent takes the new one (Claude Code starting Codex in place).
-    func testAnAgentThatExecsAnotherAgentBecomesThatAgent() {
+    /// An agent that execs another agent stays the agent it is (Claude Code starting Codex in place):
+    /// what looks like another agent is only a name or an argv away (see the test below), so taking the
+    /// new one would let any agent shed itself.
+    func testAnAgentThatExecsAnotherAgentStaysTheAgentItIs() {
         let zsh = h.spawn(P.terminal, P.zsh(500, parent: 100))
         let claude = h.spawn(zsh, P.node(600, parent: 500, argv: claudeNodeArgv), 1)
         var codex = P.node(600, parent: 500, argv: ["node", "/opt/homebrew/bin/codex"])
         codex.startTime = claude.startTime
         codex.pidVersion = claude.pidVersion.map { $0 + 1 }
         h.exec(claude, codex, 2)
-        XCTAssertEqual(h.tree.chain(for: codex, at: at(3)).nearestAgent, "codex")
+        XCTAssertEqual(h.tree.chain(for: codex, at: at(3)).nearestAgent, "claude-code")
+    }
+
+    /// agent-exec variant: Claude Code (native, its team pinned by a "block from now on" rule) execs a
+    /// copy of cat named `codex` (Codex's executable name), or an unsigned program run as `claude` (the
+    /// same agent, without its team). Either would have relabelled the process and let it read the key
+    /// past the rule; it stays Claude Code with its team.
+    func testAnAgentCannotShedItselfByExecingSomethingThatLooksLikeAnotherAgent() {
+        let block = Rule(id: "block-claude", enabled: true, enforce: true, target: .category("ssh"),
+                         subject: .responsible(key: "agent:claude-code", teamID: claudeTeam, exceptOwners: true),
+                         access: .any, action: .deny)
+        h.rules.replace(rules: [block])
+        let zsh = h.spawn(P.terminal, P.zsh(500, parent: 100))
+        for (pid, image) in [(Int32(600), proc(600, "/Users/alice/bin/codex", ppid: 500, start: 1, argv: ["codex", sshKey])),
+                             (Int32(610), proc(610, "/Users/alice/bin/x", ppid: 500, start: 1, argv: ["claude", sshKey]))] {
+            XCTAssertNotNil(h.detector.detect(image), "it looks like an agent")
+            let claude = h.spawn(zsh, proc(pid, "/Users/alice/.local/share/claude/versions/2.0.1", ppid: 500, start: 1,
+                                           signingID: "com.anthropic.claude-code", teamID: claudeTeam, argv: ["claude"]), 1)
+            var relabelled = image
+            relabelled.pidVersion = claude.pidVersion.map { $0 + 1 }
+            h.exec(claude, relabelled, 2)
+            let chain = h.tree.chain(for: relabelled, at: at(3))
+            XCTAssertEqual(chain.nearestAgent, "claude-code", image.executablePath)
+            XCTAssertEqual(h.attributor.attribute(chain: chain).teamID, claudeTeam, image.executablePath)
+            XCTAssertEqual(decide(relabelled, 3).ruleID, "block-claude", image.executablePath)
+        }
+    }
+
+    /// The exec of an agent was not processed yet when libproc gave its new image (a child's event came
+    /// first), so the agent was recognised from that image, which has no team. The team comes from the
+    /// agent's own image once the exec arrives; a team that is known is never replaced.
+    func testATeamUnknownFromLibprocIsTakenFromTheAgentsImage() {
+        let block = Rule(id: "block-claude", enabled: true, enforce: true, target: .category("ssh"),
+                         subject: .responsible(key: "agent:claude-code", teamID: claudeTeam), access: .any, action: .deny)
+        h.rules.replace(rules: [block])
+        let zsh = h.spawn(P.terminal, P.zsh(500, parent: 100))
+        let shell = h.spawn(zsh, P.zsh(600, parent: 500), 1)
+        var claude = proc(600, "/Users/alice/.local/share/claude/versions/2.0.1", ppid: 500, start: 0,
+                          signingID: "com.anthropic.claude-code", teamID: claudeTeam, argv: ["claude"])
+        claude.pidVersion = shell.pidVersion.map { $0 + 1 }
+        h.tree.parentResolver = { pid in
+            pid == 600 ? ProcessRecord(pid: 600, ppid: 500, executablePath: claude.executablePath, argv: ["claude"], startTime: claude.startTime) : nil
+        }
+        var cat = proc(601, "/bin/cat", ppid: 600, start: 2, platform: true, signingID: "com.apple.cat")
+        cat.parentToken = ProcessToken(pid: 600, pidVersion: claude.pidVersion!)
+        XCTAssertEqual(h.tree.chain(for: cat, at: at(2)).nearestAgent, "claude-code")
+        h.exec(shell, claude, 2)
+        XCTAssertEqual(h.attributor.attribute(chain: h.tree.chain(for: claude, at: at(3))).teamID, claudeTeam)
+        XCTAssertEqual(decide(cat, 3).ruleID, "block-claude")
     }
 }
 
@@ -702,6 +752,31 @@ final class AgentAncestryRestartTests: AncestryTestCase {
         let responsible = h.attributor.attribute(chain: chain)
         XCTAssertEqual(responsible.key, "agent:claude-code")
         XCTAssertEqual(responsible.teamID, claudeTeam)
+        XCTAssertEqual(decide(job, 11).ruleID, "block-claude")
+    }
+
+    /// The same when what it exec'd looks like the agent itself (an unsigned program run as `claude`):
+    /// libproc's image is recognised as Claude Code, but without its team, which the record gives back.
+    func testAnAgentThatExecdSomethingThatLooksLikeItKeepsItsTeamAfterARestart() throws {
+        let block = Rule(id: "block-claude", enabled: true, enforce: true, target: .category("ssh"),
+                         subject: .responsible(key: "agent:claude-code", teamID: claudeTeam), access: .any, action: .deny)
+        let zsh = h.spawn(P.terminal, P.zsh(500, parent: 100))
+        let claude = h.spawn(zsh, proc(600, "/Users/alice/.local/share/claude/versions/2.0.1", ppid: 500, start: 1,
+                                       signingID: "com.anthropic.claude-code", teamID: claudeTeam, argv: ["claude"]), 1)
+        var lookalike = proc(600, "/Users/alice/bin/x", ppid: 500, start: 1, argv: ["claude"])
+        lookalike.pidVersion = claude.pidVersion.map { $0 + 1 }
+        h.exec(claude, lookalike, 2)
+        let job = h.spawn(lookalike, proc(610, "/usr/bin/python3", ppid: 600, start: 3), 3)
+        let records = h.tree.agentAncestry()
+
+        try restart(seed: [libproc(1, "/sbin/launchd", ppid: 0, start: -1000, platform: true),
+                           libproc(100, P.terminal.executablePath, ppid: 1, start: 0, platform: true),
+                           libproc(500, "/bin/zsh", ppid: 100, start: 0, platform: true),
+                           libproc(600, "/Users/alice/bin/x", ppid: 500, start: 1, argv: ["claude"]),
+                           libproc(610, "/usr/bin/python3", ppid: 600, start: 3)], records: records)
+        h.rules.replace(rules: [block])
+        XCTAssertEqual(h.tree.node(pid: 600)?.agentID, "claude-code")
+        XCTAssertEqual(h.tree.node(pid: 600)?.agentTeamID, claudeTeam)
         XCTAssertEqual(decide(job, 11).ruleID, "block-claude")
     }
 

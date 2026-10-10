@@ -335,7 +335,9 @@ public final class ProcessTree: @unchecked Sendable {
         var placeholders: [Instance: UInt64] = [:]
         for record in records.prefix(AgentAncestryRecord.maxRecords) {
             guard let id = liveNode(pid: record.pid, startTime: record.startTime), var node = nodes[id] else { continue }
-            if node.agentID == nil, let agent = record.agentID {
+            // The agent it was, with its team, even if libproc's image now looks like another agent or like
+            // the same one without a team (it exec'd that: see `adopt`).
+            if let agent = record.agentID, node.agentID != agent || node.agentTeamID != record.agentTeamID {
                 node.agentID = agent
                 node.agentHeld = true
                 node.heldAgentTeamID = record.agentTeamID
@@ -542,22 +544,27 @@ public final class ProcessTree: @unchecked Sendable {
         }
     }
 
-    /// A new image for the same process instance (exec). A process that was an AI agent stays that agent
-    /// when the new image is not one: exec replaces the program, not who is running it. Not when it was
-    /// only a fork-time copy of its agent parent (the agent forking a shell for a command): the parent
-    /// already puts that agent in the chain, and the shell is what it started, not the agent itself.
+    /// A new image for the same process instance (exec). A process that was an AI agent stays that agent,
+    /// with its team, whatever it execs: exec replaces the program, not who is running it. That includes
+    /// a program that looks like another agent, or like the same agent from another team: a copy of cat
+    /// named `codex`, or run as `exec -a claude`, would otherwise shed the agent and its team-pinned
+    /// rules. Not when it was only a fork-time copy of its agent parent (the agent forking a shell for a
+    /// command): the parent already puts that agent in the chain, and the new image is what it started.
     private func adopt(_ image: ProcessRecord, into node: inout ProcessNode) {
         let previous = node.agentID.map { ($0, node.agentTeamID) }
         let parent = node.parentID.flatMap { nodes[$0] }
         node.image = image
-        if let detected = detector.detect(image) {
+        let detected = detector.detect(image)
+        if let (agent, team) = previous, !(parent?.agentID == agent && parent?.agentTeamID == team) {
+            node.agentID = agent
+            node.agentHeld = true
+            // A team that was not known (the agent was recognised from a libproc image, which has no code
+            // identity, or it has none) is taken from a new image of the same agent; a known one stays.
+            node.heldAgentTeamID = team ?? (detected == agent ? image.teamID : nil)
+        } else if let detected {
             node.agentID = detected
             node.agentHeld = false
             node.heldAgentTeamID = nil
-        } else if let (agent, team) = previous, !(parent?.agentID == agent && parent?.agentTeamID == team) {
-            node.agentID = agent
-            node.agentHeld = true
-            node.heldAgentTeamID = team
         } else {
             node.agentID = nil
         }
