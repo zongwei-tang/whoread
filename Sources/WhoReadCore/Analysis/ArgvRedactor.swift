@@ -318,6 +318,7 @@ public enum ArgvRedactor {
         var bodyRun = -1
         var pending: ValueRule?
         var program: String?
+        var programAt = 0
         var flags: (next: [String: ValueRule], attached: [String: ValueRule]) = ([:], [:])
         var expectProgram = true
         var skipNext = false
@@ -329,7 +330,7 @@ public enum ArgvRedactor {
         var dataSeen = false
         var keepNext = false
         var hereString = false
-        var heredoc: (delimiter: String?, redactBody: Bool, inBody: Bool)?
+        var heredoc: (delimiter: String?, redactBody: Bool, inBody: Bool, script: Bool)?
         var commandStart = 0
         // `>FILE echo …`: standard output redirected before the program word.
         var outputBeforeProgram = false
@@ -391,6 +392,7 @@ public enum ArgvRedactor {
         }
         func startProgram(_ name: String, at i: Int) {
             program = name
+            programAt = i
             expectProgram = wrappers.contains(name)
             flags = programFlags(name, command: tokens[i...])
             positional = positionalSecrets(name, tokens: tokens, program: i, lineStarts: lineStarts, shell: shell)
@@ -455,9 +457,14 @@ public enum ArgvRedactor {
                         continue
                     }
                     // A script read from the heredoc (`python3 - <<EOF`): its lines are words with no
-                    // program of their own.
+                    // program of their own. A shell's script (`bash <<EOF`, `ssh host <<EOF`) is
+                    // command lines: each line is a command with its own rules.
                     if lineStarts.contains(i) {
-                        pending = nil; program = nil; expectProgram = false; skipNext = false; flags = ([:], [:])
+                        if h.script {
+                            resetCommand(at: i)
+                        } else {
+                            pending = nil; program = nil; expectProgram = false; skipNext = false; flags = ([:], [:])
+                        }
                     }
                 }
             } else if lineStarts.contains(i) || groups.commandStarts.contains(i) {
@@ -541,7 +548,8 @@ public enum ArgvRedactor {
             if shellWord, t.hasPrefix("<<") {
                 let name = heredocDelimiter(String(t.dropFirst(2)))
                 let sink = ["cat", "tee"].contains(program ?? "") || writesOutput(tokens, after: commandStart, lineStarts: lineStarts)
-                heredoc = (name.isEmpty ? nil : name, sink, false)
+                let script = !sink && program.map { readsScript($0, tokens: tokens, program: programAt, lineStarts: lineStarts) } == true
+                heredoc = (name.isEmpty ? nil : name, sink, false, script)
                 continue
             }
             if hereString {
@@ -987,6 +995,40 @@ public enum ArgvRedactor {
         return (words[j + 1], nil)
     }
 
+    /// Shells that read a script from standard input when given no command line or script file.
+    static let scriptShells: Set<String> = ["sh", "bash", "zsh", "dash", "ksh", "mksh"]
+
+    /// True when the command whose program is at `p` reads a shell script from standard input, so a
+    /// heredoc fed to it holds command lines: `bash <<EOF`, `sh -s <<EOF`, `sudo bash <<EOF`, `ssh
+    /// host <<EOF` (with no command, the remote shell reads it). Not `bash -c '…'`, `bash run.sh` or
+    /// `ssh host cat`.
+    static func readsScript(_ program: String, tokens: [String], program p: Int, lineStarts: Set<Int>) -> Bool {
+        let words = commandWords(tokens, program: p, lineStarts: lineStarts, shell: true).map { unquote(tokens[$0]).1 }
+        if program == "ssh" {
+            var j = 0
+            while j < words.count, words[j].count > 1, words[j].hasPrefix("-") {
+                if words[j] == "--" { j += 1; break }
+                let letters = words[j].dropFirst()
+                let valued = letters.firstIndex { sshValueOptions.contains($0) }
+                j += valued.map { letters.index(after: $0) == letters.endIndex } == true ? 2 : 1
+            }
+            return j + 1 == words.count
+        }
+        guard scriptShells.contains(program) else { return false }
+        var skip = false
+        for w in words {
+            if skip { skip = false; continue }
+            if w == "-s" { return true }
+            if w == "-o" || w == "+o" { skip = true; continue }
+            if w.hasPrefix("--") { continue }
+            // `-c`, `-lc`: a command line, not standard input.
+            if w.hasPrefix("-") || w.hasPrefix("+") { if w.dropFirst().contains("c") { return false }; continue }
+            // A script file.
+            return false
+        }
+        return true
+    }
+
     /// A word of data replaced, its quotes kept (`'pw'` → `'‹redacted›'`).
     static func redactedData(_ word: String) -> String {
         let (quote, _) = unquote(word)
@@ -1235,6 +1277,13 @@ public enum ArgvRedactor {
                 if name.isEmpty && k + 1 < tokens.count {
                     k += 1
                     name = heredocDelimiter(tokens[k])
+                }
+                // A shell that reads its script from standard input (`bash <<EOF`, `ssh host <<EOF`):
+                // the body is command lines, read like any others.
+                if let c = calls.last, c.at < k, !c.ended,
+                   !(c.at + 1..<k).contains(where: { lineStarts.contains($0) || isSeparator(tokens[$0]) }),
+                   readsScript(basename(c.name), tokens: tokens, program: c.at, lineStarts: lineStarts) {
+                    continue
                 }
                 pendingHeredoc = name
                 continue

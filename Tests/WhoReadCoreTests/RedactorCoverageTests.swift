@@ -776,6 +776,25 @@ final class RedactorCoverageTests: XCTestCase {
         ])
     }
 
+    /// A heredoc fed to a shell that reads its script from standard input (`bash <<EOF`, `ssh host
+    /// <<'EOF'` with no command) is command lines: each line has its own program's rules, and data
+    /// written in loops there is data. Other programs' heredocs stay words (`python3 - <<EOF`).
+    func testHeredocScriptsOfShellsAreCommandLines() {
+        assertRedacted(["/bin/zsh", "-c", "ssh db1 <<'EOF'\nmysql -uroot -pHunter2pw -e 'select 1'\necho Hunter2pw > /etc/app/secret\nEOF"],
+                       ["/bin/zsh", "-c", "ssh db1 <<'EOF'\nmysql -uroot -p\(R) -e 'select 1'\necho \(R) > /etc/app/secret\nEOF"])
+        assertRedacted(["/bin/zsh", "-c", "sudo bash <<EOF\nhtpasswd -b /etc/nginx/htpasswd bob Hunter2pw\ncurl -u admin:Hunter2pw https://x\nEOF"],
+                       ["/bin/zsh", "-c", "sudo bash <<EOF\nhtpasswd -b /etc/nginx/htpasswd bob \(R)\ncurl -u admin:\(R) https://x\nEOF"])
+        assertRedacted(["/bin/zsh", "-c", "bash -s <<EOF\nfor l in 'db:5432:*:bob:Hunter2pw'; do echo \"$l\"; done > ~/WhoReadTestVault/pgpass\nEOF"],
+                       ["/bin/zsh", "-c", "bash -s <<EOF\nfor l in '\(R)'; do echo \"$l\"; done > ~/WhoReadTestVault/pgpass\nEOF"])
+        assertRedacted(["/bin/zsh", "-c", "ssh -p 2222 web bash <<'EOF'\nsshpass -p Hunter2pw ssh db\nEOF"],
+                       ["/bin/zsh", "-c", "ssh -p 2222 web bash <<'EOF'\nsshpass -p \(R) ssh db\nEOF"])
+        assertKept([
+            ["/bin/zsh", "-c", "ssh web <<'EOF'\nuptime\ndf -h /var\nEOF"], ["/bin/zsh", "-c", "bash <<EOF\nls -la\ncd /tmp && make\nEOF"],
+            ["/bin/zsh", "-c", "bash run.sh <<EOF\nyes\nEOF"], ["/bin/zsh", "-c", "ssh web wc -l <<EOF\nhello\nEOF"],
+            ["/bin/zsh", "-c", "python3 - <<EOF\nprint('done')\nEOF"],
+        ])
+    }
+
     /// What an expect script sends to the program it spawned answers that program's prompts: a
     /// password, usually. It is data.
     func testExpectScriptsSendData() {
