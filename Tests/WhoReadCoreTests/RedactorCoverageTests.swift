@@ -47,6 +47,9 @@ final class RedactorCoverageTests: XCTestCase {
         assertRedacted(["sqlcmd", "-Q", "ALTER LOGIN sa WITH PASSWORD = 'Hunter2pw' OLD_PASSWORD = 'Old2pwxx'"],
                        ["sqlcmd", "-Q", "ALTER LOGIN sa WITH PASSWORD = '\(R)' OLD_PASSWORD = '\(R)'"], secrets: [secret, "Old2pwxx"])
         assertRedacted(["snowsql", "-q", "ALTER USER bob SET PASSWORD = 'Hunter2pw'"], ["snowsql", "-q", "ALTER USER bob SET PASSWORD = '\(R)'"])
+        // Cut short (a long command line is bounded) or closed outside this word: the rest of the line.
+        assertRedacted(["psql", "-c", "ALTER USER bob PASSWORD 'Hunter2pw"], ["psql", "-c", "ALTER USER bob PASSWORD '\(R)"])
+        assertRedacted(["mysql", "-e", "SET PASSWORD = \"Hunter2pw\nSELECT 1"], ["mysql", "-e", "SET PASSWORD = \"\(R)\nSELECT 1"])
         // A quote inside the literal ('' or \') does not end it.
         assertRedacted(["psql", "-c", "ALTER USER bob PASSWORD 'Hun''ter2pw;x'"], ["psql", "-c", "ALTER USER bob PASSWORD '\(R)'"],
                        secrets: ["ter2pw"])
@@ -81,6 +84,100 @@ final class RedactorCoverageTests: XCTestCase {
             ["git", "commit", "-m", "Set password for the admin user"],
             ["git", "commit", "-m", "create user, then set password"],
             ["/bin/sh", "-c", "echo 'identified by its pid' && ls"],
+        ])
+    }
+    // MARK: - Passwords as positional arguments
+
+    func testHtpasswdBatchModePassword() {
+        assertRedacted(["htpasswd", "-b", "~/WhoReadTestVault/htpasswd", "bob", "Hunter2pw"],
+                       ["htpasswd", "-b", "~/WhoReadTestVault/htpasswd", "bob", R])
+        assertRedacted(["htpasswd", "-cbB", "~/WhoReadTestVault/htpasswd", "bob", "Hunter2pw"],
+                       ["htpasswd", "-cbB", "~/WhoReadTestVault/htpasswd", "bob", R])
+        assertRedacted(["htpasswd", "-nb", "bob", "Hunter2pw"], ["htpasswd", "-nb", "bob", R])
+        assertRedacted(["htpasswd", "-b", "-C", "12", "-B", "f", "bob", "Hunter2pw"], ["htpasswd", "-b", "-C", "12", "-B", "f", "bob", R])
+        assertRedacted(["/bin/sh", "-c", "htpasswd -nbB bob Hunter2pw > ~/WhoReadTestVault/htpasswd && echo ok"],
+                       ["/bin/sh", "-c", "htpasswd -nbB bob \(R) > ~/WhoReadTestVault/htpasswd && echo ok"])
+        // No password argument: delete, verify or create with a prompt.
+        assertKept([["htpasswd", "-bD", "f", "bob"], ["htpasswd", "-c", "f", "bob"], ["htpasswd", "-v", "f", "bob"], ["htpasswd", "-n", "bob"]])
+    }
+
+    func testPositionalPasswordsOfOtherTools() {
+        // mysqladmin's `password NEW`.
+        assertRedacted(["mysqladmin", "-u", "root", "-pOld2pwxx", "password", "Hunter2pw"],
+                       ["mysqladmin", "-u", "root", "-p\(R)", "password", R], secrets: [secret, "Old2pwxx"])
+        // macOS directory service: -passwd PATH [OLD] NEW, -authonly USER PASSWORD, -P PASSWORD, and a
+        // password attribute.
+        assertRedacted(["dscl", ".", "-passwd", "/Users/bob", "Hunter2pw"], ["dscl", ".", "-passwd", "/Users/bob", R])
+        assertRedacted(["dscl", ".", "-passwd", "/Users/bob", "Old2pwxx", "Hunter2pw"], ["dscl", ".", "-passwd", "/Users/bob", R, R],
+                       secrets: [secret, "Old2pwxx"])
+        assertRedacted(["dscl", "/Local/Default", "-authonly", "bob", "Hunter2pw"], ["dscl", "/Local/Default", "-authonly", "bob", R])
+        assertRedacted(["dscl", "-u", "admin", "-P", "Hunter2pw", ".", "-create", "/Users/bob"], ["dscl", "-u", "admin", "-P", R, ".", "-create", "/Users/bob"])
+        assertRedacted(["dscl", ".", "-create", "/Users/bob", "Password", "Hunter2pw"], ["dscl", ".", "-create", "/Users/bob", "Password", R])
+        // Wi-Fi and authenticated proxy passwords.
+        assertRedacted(["networksetup", "-setairportnetwork", "en0", "Home WiFi", "Hunter2pw"],
+                       ["networksetup", "-setairportnetwork", "en0", "Home WiFi", R])
+        assertRedacted(["networksetup", "-addpreferredwirelessnetworkatindex", "en0", "Home", "0", "WPA2", "Hunter2pw"],
+                       ["networksetup", "-addpreferredwirelessnetworkatindex", "en0", "Home", "0", "WPA2", R])
+        assertRedacted(["networksetup", "-setsecurewebproxy", "Wi-Fi", "proxy.example.com", "8080", "on", "bob", "Hunter2pw"],
+                       ["networksetup", "-setsecurewebproxy", "Wi-Fi", "proxy.example.com", "8080", "on", "bob", R])
+        // openssl passwd hashes the password given as an argument.
+        assertRedacted(["openssl", "passwd", "-6", "Hunter2pw"], ["openssl", "passwd", "-6", R])
+        assertRedacted(["openssl", "passwd", "-1", "-salt", "abc", "Hunter2pw"], ["openssl", "passwd", "-1", "-salt", "abc", R])
+        // Redis commands.
+        assertRedacted(["redis-cli", "AUTH", "Hunter2pw"], ["redis-cli", "AUTH", R])
+        assertRedacted(["redis-cli", "-h", "cache", "-p", "6380", "auth", "bob", "Hunter2pw"], ["redis-cli", "-h", "cache", "-p", "6380", "auth", "bob", R])
+        assertRedacted(["redis-cli", "CONFIG", "SET", "requirepass", "Hunter2pw"], ["redis-cli", "CONFIG", "SET", "requirepass", R])
+        assertRedacted(["redis-cli", "config", "set", "masterauth", "Hunter2pw"], ["redis-cli", "config", "set", "masterauth", R])
+        assertRedacted(["redis-cli", "ACL", "SETUSER", "bob", "on", ">Hunter2pw", "~*", "+@all"],
+                       ["redis-cli", "ACL", "SETUSER", "bob", "on", ">\(R)", "~*", "+@all"])
+        assertRedacted(["redis-cli", "HELLO", "3", "AUTH", "bob", "Hunter2pw"], ["redis-cli", "HELLO", "3", "AUTH", "bob", R])
+        // Oracle logons: user/password@db.
+        assertRedacted(["sqlplus", "-s", "scott/Hunter2pw@orcl"], ["sqlplus", "-s", "scott/\(R)@orcl"])
+        assertRedacted(["sqlplus", "system/Hunter2pw@//db.example.com:1521/ORCLPDB1", "@run.sql"],
+                       ["sqlplus", "system/\(R)@//db.example.com:1521/ORCLPDB1", "@run.sql"])
+        assertRedacted(["expdp", "userid=system/Hunter2pw@db", "directory=d"], ["expdp", "userid=system/\(R)@db", "directory=d"])
+        assertRedacted(["rman", "target", "sys/Hunter2pw@db", "catalog", "rcat/Hunter2pw@rcat"],
+                       ["rman", "target", "sys/\(R)@db", "catalog", "rcat/\(R)@rcat"])
+        assertRedacted(["sqlldr", "scott/Hunter2pw", "control=x.ctl"], ["sqlldr", "scott/\(R)", "control=x.ctl"])
+        assertKept([
+            ["mysqladmin", "-u", "root", "-p", "status"], ["mysqladmin", "-u", "root", "-p", "password"],
+            ["dscl", ".", "-read", "/Users/bob"], ["dscl", ".", "-list", "/Users"], ["dscl", ".", "-create", "/Users/bob", "UserShell", "/bin/zsh"],
+            ["networksetup", "-setairportnetwork", "en0", "OpenNet"], ["networksetup", "-getairportnetwork", "en0"],
+            ["networksetup", "-setairportpower", "en0", "on"], ["networksetup", "-setwebproxy", "Wi-Fi", "proxy", "8080"],
+            ["openssl", "passwd", "-6", "-stdin"], ["openssl", "rand", "-hex", "16"],
+            ["redis-cli", "GET", "auth"], ["redis-cli", "CONFIG", "GET", "requirepass"], ["redis-cli", "-h", "cache", "PING"],
+            ["sqlplus", "/nolog"], ["sqlplus", "-s", "/", "as", "sysdba"], ["sqlplus", "scott@orcl"], ["sqlplus", "-s", "/@wallet_alias", "@x.sql"],
+            ["rman", "target", "/"],
+        ])
+    }
+
+    func testProgramSpecificPasswordFlags() {
+        // security: the import/export passphrase, the partition-list and keychain passwords.
+        assertRedacted(["security", "import", "cert.p12", "-k", "build.keychain", "-P", "Hunter2pw", "-T", "/usr/bin/codesign"],
+                       ["security", "import", "cert.p12", "-k", "build.keychain", "-P", R, "-T", "/usr/bin/codesign"])
+        assertRedacted(["security", "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", "Hunter2pw", "build.keychain"],
+                       ["security", "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", R, "build.keychain"])
+        assertRedacted(["security", "set-keychain-password", "-o", "Old2pwxx", "-p", "Hunter2pw", "build.keychain"],
+                       ["security", "set-keychain-password", "-o", R, "-p", R, "build.keychain"], secrets: [secret, "Old2pwxx"])
+        // SQL Server tools.
+        assertRedacted(["sqlcmd", "-S", "db", "-U", "sa", "-P", "Hunter2pw", "-Q", "SELECT 1"], ["sqlcmd", "-S", "db", "-U", "sa", "-P", R, "-Q", "SELECT 1"])
+        assertRedacted(["bcp", "t", "out", "f", "-S", "db", "-U", "sa", "-P", "Hunter2pw"], ["bcp", "t", "out", "f", "-S", "db", "-U", "sa", "-P", R])
+        // HTTPie and xh: -a/--auth USER:PASS, or a bearer token.
+        assertRedacted(["http", "-a", "bob:Hunter2pw", "https://x"], ["http", "-a", "bob:\(R)", "https://x"])
+        assertRedacted(["xh", "--auth=bob:Hunter2pw", "https://x"], ["xh", "--auth=bob:\(R)", "https://x"])
+        assertRedacted(["http", "--auth-type=bearer", "--auth", "Hunter2pwToken", "https://x"], ["http", "--auth-type=bearer", "--auth", R, "https://x"],
+                       secrets: ["Hunter2pwToken"])
+        // AppleScript run with administrator rights.
+        assertRedacted(["osascript", "-e", "do shell script \"ls /var/root\" password \"Hunter2pw\" with administrator privileges"],
+                       ["osascript", "-e", "do shell script \"ls /var/root\" password \"\(R)\" with administrator privileges"])
+        assertRedacted(["/bin/zsh", "-c", "osascript -e 'do shell script \"id\" user name \"bob\" password \"Hunter2pw\" with administrator privileges'"],
+                       ["/bin/zsh", "-c", "osascript -e 'do shell script \"id\" user name \"bob\" password \"\(R)\" with administrator privileges'"])
+        assertRedacted(["/bin/sh", "-c", "osascript -e \"do shell script \\\"id\\\" password \\\"Hunter2pw\\\" with administrator privileges\""],
+                       ["/bin/sh", "-c", "osascript -e \"do shell script \\\"id\\\" password \\\"\(R)\\\" with administrator privileges\""])
+        assertKept([
+            ["security", "create-keychain", "-P", "build.keychain"], ["security", "export", "-k", "build.keychain", "-t", "certs", "-o", "/tmp/certs.pem"],
+            ["security", "find-generic-password", "-s", "svc", "-w"], ["curl", "-a", "-T", "f", "ftp://h/x"], ["http", "-a", "bob", "https://x"],
+            ["osascript", "-e", "display dialog \"Enter your password\" default answer \"\" with hidden answer"],
         ])
     }
 }

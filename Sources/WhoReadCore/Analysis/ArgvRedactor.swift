@@ -35,6 +35,10 @@ public enum ArgvRedactor {
         case opensslPass
         /// The value after `Bearer`: redacted unless it is an ordinary word.
         case bearer
+        /// An Oracle logon, `user/password@db` or `userid=user/password@db`: the password.
+        case logon
+        /// A Redis ACL rule: `>password`, `<password`, `#hash`, `!hash` keep their first character.
+        case redisACL
     }
 
     /// Flags whose next argument is a secret, for every program.
@@ -72,6 +76,11 @@ public enum ArgvRedactor {
     /// Program-specific flags: separate value (`-p value`) and attached value (`-pvalue`).
     static func programFlags(_ program: String, command: ArraySlice<String>) -> (next: [String: ValueRule], attached: [String: ValueRule]) {
         switch program {
+        case "http", "https", "xh", "xhs", "httpie":
+            // HTTPie and xh: -a/--auth USER:PASS, or a token with `--auth-type bearer`.
+            let bearer = command.contains { $0.lowercased().contains("bearer") }
+            let auth: ValueRule = bearer ? .secret : .afterColon
+            return (["-H": .header, "--header": .header, "-a": auth, "--auth": auth], [:])
         case _ where httpClients.contains(program):
             return (["-H": .header, "--header": .header, "--proxy-header": .header,
                      "-u": .afterColon, "--user": .afterColon, "-U": .afterColon, "--proxy-user": .afterColon,
@@ -85,8 +94,19 @@ public enum ArgvRedactor {
         case "redis-cli", "valkey-cli", "keydb-cli":
             return (["-a": .secret], [:])
         case "security":
-            // add-generic-password -w, unlock-keychain / create-keychain -p (a keychain path is kept).
-            return (["-w": .secret, "-p": .unlessPath], [:])
+            // add-generic-password -w, unlock-keychain / create-keychain -p (a keychain path is kept);
+            // the passphrase of import/export -P, the keychain password of set-*-partition-list -k,
+            // and set-keychain-password -o OLD -p NEW. Elsewhere -P, -k and -o are a prompt flag, a
+            // keychain and an output file.
+            var next: [String: ValueRule] = ["-w": .secret, "-p": .unlessPath]
+            if command.contains("import") || command.contains("export") { next["-P"] = .secret }
+            if command.contains(where: { $0.hasPrefix("set-") && $0.hasSuffix("-partition-list") }) { next["-k"] = .secret }
+            if command.contains("set-keychain-password") { next["-o"] = .secret; next["-p"] = .secret }
+            return (next, [:])
+        case "dscl":
+            return (["-P": .secret], [:])
+        case "sqlcmd", "bcp", "osql":
+            return (["-P": .secret], [:])
         case "ssh-keygen":
             // New and old key passphrases.
             return (["-N": .secret, "-P": .secret], [:])
@@ -137,6 +157,10 @@ public enum ArgvRedactor {
     /// `pass` and `pwd` keys as for key=value (`{"user":"bob","pass":"x"}`, `"db_pwd"`; not `bypass`,
     /// `compass` or `passport`).
     static let quotedPair = regex(#"(?i)(\\?["'])([a-z0-9_.\-]*(?:password|passwd|passphrase|secret|token|api[_-]?key|apikey|authorization|private[_-]?key|access[_-]?key|credentials?)[a-z0-9_.\-]*|(?:[a-z0-9_.\-]*[_.\-])?(?:auth|pass|pwd))(\\?["']\s*:\s*\\?["'])([^"'\\\r\n]+)(\\?["'])"#)
+    /// AppleScript run with administrator rights: `do shell script "…" [user name "bob"] password "x"`
+    /// (`osascript -e`), and the same inside a double-quoted shell word (`password \"x\"`).
+    static let appleScriptPassword = regex(#"(?i)(\bdo\s+shell\s+script\b[^\r\n]*?\bpassword\s+")((?:[^"\\\r\n]|\\.)*)(")"#)
+    static let escapedAppleScriptPassword = regex(#"(?i)(\bdo\s+shell\s+script\b[^\r\n]*?\bpassword\s+\\")([^\r\n]*?)(\\")"#)
     /// Sensitive query parameters: `?access_token=…`, `&sig=…`.
     static let queryParam = regex(#"(?i)([?&;][^=&\s#'"]*?(?:token|secret|passw|pwd|api[_-]?key|apikey|auth|sig|signature|credential|session|key|code)[^=&\s#'"]*=)[^&\s#'"]+"#)
     /// Well-known token formats, anywhere in an element.
@@ -240,11 +264,13 @@ public enum ArgvRedactor {
         var commandStart = 0
         // `>FILE echo …`: standard output redirected before the program word.
         var outputBeforeProgram = false
+        // Passwords some programs take as plain arguments (`htpasswd -b FILE USER PW`), by index.
+        var positional: [Int: ValueRule] = [:]
         // Redirects, heredocs and pipes mean something only in a command line, not in an argv.
         let shell = !firstIsProgram
         func resetCommand(at i: Int) {
             pending = nil; program = nil; expectProgram = true; skipNext = false
-            flags = ([:], [:])
+            flags = ([:], [:]); positional = [:]
             dataMode = false; dataSeen = false; keepNext = false; hereString = false; outputBeforeProgram = false
             commandStart = i
         }
@@ -252,6 +278,7 @@ public enum ArgvRedactor {
             program = name
             expectProgram = wrappers.contains(name)
             flags = programFlags(name, command: tokens[i...])
+            positional = positionalSecrets(name, tokens: tokens, program: i, lineStarts: lineStarts, shell: shell)
             if shell && dataWriters.contains(name) {
                 dataMode = outputBeforeProgram || writesOutput(tokens, after: i, lineStarts: lineStarts)
                 dataSeen = false
@@ -368,6 +395,11 @@ public enum ArgvRedactor {
                 continue
             }
 
+            if let rule = positional[i] {
+                pending = nil
+                emit(apply(rule, to: t, depth: depth))
+                continue
+            }
             if let rule = pending {
                 // `key = value`, `key : value` (INI, YAML, a heredoc): the separator is not the value.
                 if quote.isEmpty && (t == "=" || t == ":") { continue }
@@ -439,6 +471,147 @@ public enum ArgvRedactor {
                 pending = .secret
             }
             emit(redactToken(t))
+        }
+        return out
+    }
+
+    /// The words of the command whose program is at `program`, up to where that command ends (a
+    /// separator, a line break, a word ending in `;` or holding a pipe), without redirects and
+    /// their targets (`shell`: in an argv, `>x` is a plain argument).
+    static func commandWords(_ tokens: [String], program: Int, lineStarts: Set<Int>, shell: Bool) -> [Int] {
+        var words: [Int] = []
+        var k = program + 1
+        while k < tokens.count && !lineStarts.contains(k) {
+            let t = tokens[k]
+            if isSeparator(t) { break }
+            let plain = shell && !isQuoted(t) && !t.contains(where: \.isWhitespace)
+            if plain, t.hasPrefix("<") || redirect(in: t).map({ $0.data.isEmpty }) == true {
+                // `> FILE`, `2>/dev/null`, `< FILE`: skip the target too when it is the next word.
+                let attached = t.drop { "<>&|0123456789".contains($0) }
+                k += attached.isEmpty && !t.hasSuffix("&1") && !t.hasSuffix("&2") ? 2 : 1
+                continue
+            }
+            if plain && unquotedPipe(in: t) != nil { break }
+            words.append(k)
+            if plain && t.hasSuffix(";") && !t.hasSuffix("\\;") { break }
+            k += 1
+        }
+        return words
+    }
+
+    static let oracleClients: Set<String> = ["sqlplus", "sql", "dgmgrl", "expdp", "impdp", "exp", "imp", "sqlldr", "rman"]
+    static let redisClients: Set<String> = ["redis-cli", "valkey-cli", "keydb-cli"]
+    /// redis-cli options followed by a value (so the value is not taken for the command).
+    static let redisValueOptions: Set<String> = ["-h", "-p", "-s", "-a", "-u", "-n", "-r", "-i", "-d", "-D", "--user", "--pass",
+                                                  "--cacert", "--cacertdir", "--cert", "--key", "--sni", "--pattern", "--count",
+                                                  "--rdb", "--eval", "--tls-ciphers", "--tls-ciphersuites"]
+
+    /// Passwords given as plain arguments, by index into `tokens`:
+    /// `htpasswd -b[n] [FILE] USER PW`, `mysqladmin password PW`, `dscl . -passwd PATH [OLD] NEW`,
+    /// `dscl . -authonly USER PW`, `dscl . -create PATH Password PW`, `networksetup
+    /// -setairportnetwork DEV SSID PW` (and the other Wi-Fi and proxy forms), `openssl passwd PW`,
+    /// redis `AUTH [USER] PW`, `CONFIG SET requirepass PW`, `ACL SETUSER … >PW`, and Oracle logons
+    /// (`sqlplus user/PW@db`, `userid=user/PW`, `rman target user/PW@db`).
+    static func positionalSecrets(_ program: String, tokens: [String], program p: Int, lineStarts: Set<Int>,
+                                  shell: Bool) -> [Int: ValueRule] {
+        let known: Set<String> = ["htpasswd", "mysqladmin", "dscl", "networksetup", "openssl"]
+        guard known.contains(program) || redisClients.contains(program) || oracleClients.contains(program) else { return [:] }
+        let words = commandWords(tokens, program: p, lineStarts: lineStarts, shell: shell)
+        let text = words.map { word -> String in
+            var w = unquote(tokens[word]).1
+            if w.hasSuffix(";") && !isQuoted(tokens[word]) { w.removeLast() }
+            return w
+        }
+        var out: [Int: ValueRule] = [:]
+        func secret(from start: Int, rule: ValueRule = .secret) {
+            for j in start..<words.count where !text[j].hasPrefix("-") { out[words[j]] = rule }
+        }
+        switch program {
+        case "htpasswd":
+            // Options come first; -C and -r take a value. With -b the password is the last argument:
+            // FILE USER PW, or USER PW with -n (not with -D, which deletes USER).
+            var batch = false, display = false, fromStdin = false, skip = false
+            var positionals: [Int] = []
+            for j in words.indices {
+                if skip { skip = false; continue }
+                let w = text[j]
+                if positionals.isEmpty && w.hasPrefix("-") && w.count > 1 {
+                    if w == "-C" || w == "-r" { skip = true; continue }
+                    batch = batch || w.contains("b"); display = display || w.contains("n"); fromStdin = fromStdin || w.contains("i")
+                    continue
+                }
+                positionals.append(words[j])
+            }
+            if batch && !fromStdin && positionals.count >= (display ? 2 : 3), let last = positionals.last { out[last] = .secret }
+        case "mysqladmin":
+            for j in words.indices.dropLast() where ["password", "old-password"].contains(text[j].lowercased()) && !text[j + 1].hasPrefix("-") {
+                out[words[j + 1]] = .secret
+            }
+        case "dscl":
+            for j in words.indices {
+                switch text[j] {
+                case "-passwd", "-authonly":
+                    // After the record path or user name: the password(s).
+                    if j + 2 < words.count { secret(from: j + 2) }
+                case "-create", "-append", "-merge":
+                    if j + 3 < words.count, namesSecret(text[j + 2]) { secret(from: j + 3) }
+                default:
+                    break
+                }
+            }
+        case "networksetup":
+            let at: [String: Int] = ["-setairportnetwork": 3, "-addpreferredwirelessnetworkatindex": 5, "-setwebproxy": 6,
+                                     "-setsecurewebproxy": 6, "-setftpproxy": 6, "-setsocksfirewallproxy": 6,
+                                     "-setstreamingproxy": 6, "-setgopherproxy": 6]
+            for j in words.indices {
+                if let n = at[text[j].lowercased()], j + n < words.count { out[words[j + n]] = .secret }
+            }
+        case "openssl":
+            guard text.first == "passwd" else { break }
+            let valued: Set<String> = ["-salt", "-in", "-rand", "-writerand", "-provider", "-provider-path", "-propquery"]
+            var skip = false
+            for j in words.indices.dropFirst() {
+                if skip { skip = false; continue }
+                if valued.contains(text[j]) { skip = true; continue }
+                if !text[j].hasPrefix("-") { out[words[j]] = .secret }
+            }
+        case _ where redisClients.contains(program):
+            guard let c = words.indices.first(where: { j in
+                !text[j].hasPrefix("-") && !(j > 0 && redisValueOptions.contains(text[j - 1]))
+            }) else { break }
+            let args = Array(words.indices.dropFirst(c + 1))
+            let upper = text.map { $0.uppercased() }
+            switch upper[c] {
+            case "AUTH":
+                if let last = args.last { out[words[last]] = .secret }
+            case "CONFIG" where args.first.map({ upper[$0] }) == "SET":
+                var j = c + 2
+                while j + 1 < words.count {
+                    if ["REQUIREPASS", "MASTERAUTH"].contains(upper[j]) { out[words[j + 1]] = .secret }
+                    j += 2
+                }
+            case "ACL" where args.first.map({ upper[$0] }) == "SETUSER":
+                for j in args.dropFirst(2) where text[j].count > 1 && ">#<!".contains(text[j].first!) { out[words[j]] = .redisACL }
+            case "HELLO", "MIGRATE":
+                // HELLO 3 AUTH USER PW, MIGRATE … AUTH PW, MIGRATE … AUTH2 USER PW.
+                if let a = args.first(where: { ["AUTH", "AUTH2"].contains(upper[$0]) }) {
+                    let n = upper[a] == "AUTH" && upper[c] == "MIGRATE" ? 1 : 2
+                    if a + n < words.count { out[words[a + n]] = .secret }
+                }
+            default:
+                break
+            }
+        default:
+            // Oracle tools: the first argument is the logon (rman: after target, catalog or auxiliary),
+            // and `userid=` anywhere.
+            for j in words.indices where text[j].lowercased().hasPrefix("userid=") { out[words[j]] = .logon }
+            if program == "rman" {
+                for j in words.indices.dropLast() where ["target", "catalog", "auxiliary"].contains(text[j].lowercased()) {
+                    out[words[j + 1]] = .logon
+                }
+            } else if let first = words.indices.first(where: { !text[$0].hasPrefix("-") }) {
+                out[words[first]] = .logon
+            }
         }
         return out
     }
@@ -603,6 +776,8 @@ public enum ArgvRedactor {
         var s = replace(quotedHeader, in: s, with: "$1$2$3" + placeholder)
         s = redactQuotedPairs(s)
         s = redactSQLCredentials(s)
+        s = replace(appleScriptPassword, in: s, with: "$1" + placeholder + "$3")
+        s = replace(escapedAppleScriptPassword, in: s, with: "$1" + placeholder + "$3")
         let pieces = tokenize(s)
         let words = pieces.filter { !$0.isSpace }.map(\.text)
         // One word that is the whole string (`print('a b')`: the quote starts mid-word): splitting
@@ -770,8 +945,11 @@ public enum ArgvRedactor {
         }
 
         /// The value after PASSWORD, BY, AS, `=` or REPLACE: a literal, `PASSWORD('x')` when
-        /// `function`, a `0x…` hash, or (`bare`) an unquoted word.
-        mutating func value(equals: Bool = false, function: Bool = false, bare: Bool = false) {
+        /// `function`, a `0x…` hash, or (`bare`) an unquoted word. Inside a statement that sets a
+        /// password (`bare`, or always for the forms that only take one), an unterminated literal
+        /// goes to the end of its line: the statement was cut short, or its closing quote is outside
+        /// this word.
+        mutating func value(equals: Bool = false, function: Bool = false, bare: Bool = false, open: Bool = true) {
             var t = next(value: true)
             if equals, t == .punct("=") { t = next(value: true) }
             if function, let w = upper(t), w == "PASSWORD" || w == "OLD_PASSWORD", peek() == .punct("(") {
@@ -789,9 +967,20 @@ public enum ArgvRedactor {
                                              "REQUIRE", "LOCK", "UNLOCK", "DISABLE", "VALID", "RETAIN", "CURRENT", "AND",
                                              "WITH", "EXTERNALLY", "GLOBALLY"]
                 if bare && !keywords.contains(k) { secret(r) } else { i = r.lowerBound }
-            case .punct, .end:
+            case .punct(let c):
+                let escaped = c == "\\" && (at(i) == "'" || at(i) == "\"")
+                if open && (c == "'" || c == "\"" || escaped) {
+                    let start = escaped ? i + 1 : i
+                    var end = start
+                    while end < text.count && text[end] != "\n" && text[end] != "\r" { end += 1 }
+                    secret(start..<end)
+                    i = end
+                    return
+                }
                 // Not a value: let the main loop see it (`;` ends the statement).
-                if case .punct = t { i -= 1 }
+                i -= 1
+            case .end:
+                break
             }
         }
 
@@ -809,14 +998,14 @@ public enum ArgvRedactor {
             case "BY":
                 if let next = upper(peek()), next == "PASSWORD" || next == "VALUES" {
                     _ = self.next()
-                    value()
+                    value(open: bare)
                 } else if upper(peek()) != "RANDOM" {
-                    value(bare: bare)
+                    value(bare: bare, open: bare)
                 }
             case "AS":
-                value()
+                value(open: bare)
             case "USING":
-                value(function: true)
+                value(function: true, open: bare)
             default:
                 i = r.lowerBound
             }
@@ -996,6 +1185,17 @@ public enum ArgvRedactor {
         case .bearer:
             let ordinary = value.count < 8 || value.allSatisfy { $0.isLowercase && $0.isLetter }
             return ordinary ? value : placeholder
+        case .logon:
+            var key = "", logon = value
+            if let eq = value.firstIndex(of: "="), value[..<eq].lowercased() == "userid" {
+                key = String(value[...eq])
+                logon = String(value[value.index(after: eq)...])
+            }
+            guard let range = logonPasswordRange(logon) else { return value }
+            return key + logon.replacingCharacters(in: range, with: placeholder)
+        case .redisACL:
+            guard let first = value.first, value.count > 1 else { return value }
+            return String(first) + placeholder
         }
     }
 
