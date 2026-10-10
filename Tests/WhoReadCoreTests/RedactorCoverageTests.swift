@@ -316,6 +316,8 @@ final class RedactorCoverageTests: XCTestCase {
             ["kubectl", "get", "secret", "app:v1"], ["git", "show", "HEAD:password.txt"],
             ["tool", "--opt", "a:1,b:2"], ["tool", "user:bob,role:admin"], ["docker", "run", "-p", "80:80,443:443", "img"],
             ["mongosh", "mongodb://h1:27017,h2:27017/db"], ["tool", "user:bob,password_file:/Users/alice/x"],
+            // A search for the key: nothing follows the colon but a space.
+            ["rg", "password: ", "config/"], ["/bin/sh", "-c", "grep -rn 'password: ' ."], ["/bin/sh", "-c", "grep -rn \"api_key:  \" src"],
         ])
     }
 

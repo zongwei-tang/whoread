@@ -1824,12 +1824,13 @@ public enum ArgvRedactor {
 
     /// `password:PW`, `api_key:PW`: a secret's name, a colon and the value in one word (`tmux -t
     /// session:1`, `read:packages` and `HEAD:password.txt` are not: only strong names count). Also a
-    /// Windows-style option (`sqlpackage /TargetPassword:PW`). Nil for any other word.
+    /// Windows-style option (`sqlpackage /TargetPassword:PW`). Nil for any other word, and for a
+    /// search pattern that ends after the colon (`grep 'password: ' FILE`).
     static func secretAfterColon(_ t: String) -> String? {
         guard let colon = t.firstIndex(of: ":"), colon != t.startIndex else { return nil }
         let key = String(t[..<colon]), value = String(t[t.index(after: colon)...])
         let name = key.hasPrefix("/") ? String(key.dropFirst()) : key
-        guard !value.isEmpty, !value.hasPrefix("//"), !value.contains(placeholder), !name.isEmpty,
+        guard !value.isEmpty, !value.allSatisfy(\.isWhitespace), !value.hasPrefix("//"), !value.contains(placeholder), !name.isEmpty,
               name.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "_.-".contains($0)) }),
               namesSecret(String(name.drop { $0 == "-" })), !refersToSecret(name),
               !looksLikePath(value), !switchValues.contains(value.lowercased()) else { return nil }
