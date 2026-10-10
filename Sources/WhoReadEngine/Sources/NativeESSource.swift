@@ -553,6 +553,30 @@ enum NativeDrain {
         }
         return quiet(timeout)
     }
+
+    /// What became of a client at a stop or an aborted setup.
+    enum Outcome: Equatable {
+        case deleted
+        /// The drain timed out on a client whose handler reads message memory outside its gate: not
+        /// deleted, so that no message is freed under a handler still reading it.
+        case keptUndrained
+        /// A call inside the gate (an es_* call, or a read of message memory) was still running at the
+        /// timeout: not deleted (es_delete_client must not run alongside it).
+        case keptBusy
+    }
+
+    /// After es_unsubscribe_all: `drain` (`run`), then `close` the client's gate (bounded; true when
+    /// nothing is inside) and `delete` it. `gatedOnly`: every es_* call and every read of message memory
+    /// of the client's handler runs inside its gate (the process client: the conversion is gated, the
+    /// process tree update after it is not), so a drain that timed out only means a slow delivery,
+    /// which the delete does not touch: the gate decides alone. Otherwise (the file client: the
+    /// watchdog's and the NOTIFY path's reads are outside the gate) the client is kept undeleted.
+    static func retire(gatedOnly: Bool, drain: () -> Bool, close: () -> Bool, delete: () -> Void) -> Outcome {
+        guard drain() || gatedOnly else { return .keptUndrained }
+        guard close() else { return .keptBusy }
+        delete()
+        return .deleted
+    }
 }
 
 /// The default mute set of a new ES client (ESClient.h, es_new_client): macOS mutes most AUTH events
@@ -1008,8 +1032,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             // Armed by a connect that ran after the cancel above.
             self.disarmWatchdog()
             self.closeAsks()
-            if let c = self.fileClient { NativeESSource.retire(c, gate: self.fileGate, activity: self.fileActivity) }
-            if let c = self.procClient { NativeESSource.retire(c, gate: self.procGate, activity: self.procActivity) }
+            if let c = self.fileClient { NativeESSource.retire(c, gate: self.fileGate, activity: self.fileActivity, gatedOnly: false) }
+            if let c = self.procClient { NativeESSource.retire(c, gate: self.procGate, activity: self.procActivity, gatedOnly: true) }
             self.forgetClients()
             self.publish {
                 $0.running = false
@@ -1170,9 +1194,9 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         disarm()
         disarmWatchdog()
         closeAsks()
-        NativeESSource.retire(file, gate: fileGate, activity: fileActivity)
+        NativeESSource.retire(file, gate: fileGate, activity: fileActivity, gatedOnly: false)
         // The process client may already be subscribed (a later step failed): its handler may be running.
-        NativeESSource.retire(proc, gate: procGate, activity: procActivity)
+        NativeESSource.retire(proc, gate: procGate, activity: procActivity, gatedOnly: true)
         forgetClients()
         report(error: message, hint: "Endpoint Security setup failed; retrying.")
         scheduleRetry()
@@ -1192,11 +1216,12 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     }
 
     /// Unsubscribes a client, lets its handler work through what the kernel queued before (NativeDrain:
-    /// es_sync_client on macOS 27, an idle handler before), then deletes it. If the drain does not finish
-    /// in time, a call may still be running on the client: it is not deleted then (the process is
-    /// stopping and the kernel tears it down, or a retry replaces it). Client thread (es_sync_client must
-    /// not be called from the client's handler).
-    static func retire(_ client: OpaquePointer, gate: NativeClientGate?, activity: NativeHandlerActivity?) {
+    /// es_sync_client on macOS 27, an idle handler before), then deletes it once no other es_* call on
+    /// it is running (header: es_delete_client is not safe concurrently with any of them). A client that
+    /// cannot be deleted safely in time is left alone (NativeDrain.retire): the process is stopping and
+    /// the kernel tears it down, or a retry replaces it. `gatedOnly`: see NativeDrain.retire (the process
+    /// client). Client thread (es_sync_client must not be called from the client's handler).
+    static func retire(_ client: OpaquePointer, gate: NativeClientGate?, activity: NativeHandlerActivity?, gatedOnly: Bool) {
         _ = es_unsubscribe_all(client)
         #if canImport(Darwin)
         let sync = NativeDrain.syncClientFunction(NativeDeadlineMissMode.symbol(NativeDrain.syncClientName)).map { f in
@@ -1205,24 +1230,23 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         #else
         let sync: ((@escaping NativeDrain.SyncBlock) -> Bool)? = nil
         #endif
-        let drained = NativeDrain.run(sync: sync, quiet: { activity?.waitQuiet(NativeDrain.quiet, waitAtMost: $0) ?? true })
-        guard drained else {
+        var drained = true
+        let outcome = NativeDrain.retire(gatedOnly: gatedOnly, drain: {
+            drained = NativeDrain.run(sync: sync, quiet: { activity?.waitQuiet(NativeDrain.quiet, waitAtMost: $0) ?? true })
+            return drained
+        }, close: { gate?.close(waitAtMost: deleteWait) ?? true }, delete: { _ = es_delete_client(client) })
+        switch outcome {
+        case .deleted where !drained:
+            Log.warning("Endpoint Security process client deleted although its handler had not finished the queued messages "
+                        + "within \(Int(NativeDrain.wait)) s (a slow process tree update; nothing was running on the client)")
+        case .deleted:
+            break
+        case .keptUndrained:
             Log.error("Endpoint Security client not deleted: its handler did not finish the queued messages within "
                       + "\(Int(NativeDrain.wait)) s")
-            return
-        }
-        delete(client, gate: gate)
-    }
-
-    /// es_delete_client once no other es_* call on the client is running (header: not safe concurrently
-    /// with any of them). If one still is after the wait, the client is not deleted under it: the process
-    /// is stopping (the kernel tears the client down), or a retry replaces it. Client thread.
-    static func delete(_ client: OpaquePointer, gate: NativeClientGate?) {
-        guard gate?.close(waitAtMost: deleteWait) ?? true else {
+        case .keptBusy:
             Log.error("Endpoint Security client not deleted: a call on it was still running after \(Int(deleteWait)) s")
-            return
         }
-        _ = es_delete_client(client)
     }
 
     /// Cancels the file client's watchdog (client thread; stop() also cancels it from its own thread).

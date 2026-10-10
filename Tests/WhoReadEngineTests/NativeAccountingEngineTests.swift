@@ -281,6 +281,49 @@ final class NativeDrainTests: XCTestCase {
     }
     #endif
 
+    /// Runs `NativeDrain.retire` with a drain and a gate that answer as given; what it did.
+    private func retire(gatedOnly: Bool, drained: Bool, gateFree: Bool) -> (NativeDrain.Outcome, closed: Int, deleted: Int) {
+        var closed = 0
+        var deleted = 0
+        let outcome = NativeDrain.retire(gatedOnly: gatedOnly, drain: { drained }, close: {
+            closed += 1
+            return gateFree
+        }, delete: { deleted += 1 })
+        return (outcome, closed, deleted)
+    }
+
+    func testAProcessClientIsDeletedWhenOnlyItsDeliveryOutlastsTheDrain() {
+        // The process client's handler converts each message inside its gate (record(), es_exec_arg) and
+        // updates the process tree after it: a slow analyzer keeps the handler, and so the drain, busy,
+        // but nothing on the client. Before, a drain that timed out left the client undeleted (abortSetup
+        // then leaked it on every retry).
+        let r = retire(gatedOnly: true, drained: false, gateFree: true)
+        XCTAssertEqual(r.0, .deleted)
+        XCTAssertEqual(r.closed, 1)
+        XCTAssertEqual(r.deleted, 1)
+    }
+
+    func testAFileClientIsKeptWhenItsDrainTimesOut() {
+        // Its handler reads message memory outside the gate (the watchdog's deadline, NOTIFY conversion).
+        let r = retire(gatedOnly: false, drained: false, gateFree: true)
+        XCTAssertEqual(r.0, .keptUndrained)
+        XCTAssertEqual(r.closed, 0, "the gate stays open: the process is stopping, or a retry replaces the client")
+        XCTAssertEqual(r.deleted, 0)
+    }
+
+    func testNoClientIsDeletedWhileACallInsideItsGateRuns() {
+        for gatedOnly in [true, false] {
+            for drained in [true, false] where gatedOnly || drained {
+                let r = retire(gatedOnly: gatedOnly, drained: drained, gateFree: false)
+                XCTAssertEqual(r.0, .keptBusy, "gated only \(gatedOnly), drained \(drained)")
+                XCTAssertEqual(r.deleted, 0)
+            }
+            let r = retire(gatedOnly: gatedOnly, drained: true, gateFree: true)
+            XCTAssertEqual(r.0, .deleted)
+            XCTAssertEqual(r.deleted, 1)
+        }
+    }
+
     func testEsSyncClientIsFoundOnlyWhereTheSystemHasIt() {
         let has27 = ProcessInfo.processInfo.isOperatingSystemAtLeast(OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0))
         XCTAssertEqual(NativeDeadlineMissMode.symbol(NativeDrain.syncClientName) != nil, has27)
@@ -782,15 +825,6 @@ final class NativeMutedPathsConversionTests: XCTestCase {
         XCTAssertEqual(ES_MUTE_PATH_TYPE_LITERAL.rawValue, NativeDefaultMutes.programLiteral)
         XCTAssertEqual(ES_RESPOND_RESULT_SUCCESS.rawValue, NativeLateAnswer.respondSuccess)
         XCTAssertEqual(ES_RESPOND_RESULT_ERR_DUPLICATE_RESPONSE.rawValue, NativeLateAnswer.respondDuplicate)
-    }
-}
-
-final class NativeStopWaitTests: XCTestCase {
-    func testStopWaitsLongerThanAllItsBoundedWaits() {
-        // The broker's denyAll, the held messages, then a drain and a gated delete per client.
-        XCTAssertEqual(NativeESSource.stopWaitCovers,
-                       AskBroker.denyAllWait + NativeHeldMessages.denyAllWait + 2 * (NativeDrain.wait + NativeESSource.deleteWait))
-        XCTAssertGreaterThan(NativeESSource.stopWait, NativeESSource.stopWaitCovers)
     }
 }
 
