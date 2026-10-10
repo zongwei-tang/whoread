@@ -298,26 +298,30 @@ public final class ProcessTree: @unchecked Sendable {
 
     /// The AI agent ancestry of live processes, to be restored after a daemon restart: libproc has no
     /// fork-time parent, so a job an agent started whose shell has exited would come back with its
-    /// ancestry unknown and the agent gone. At most `limit` processes (the oldest first: long-running
-    /// jobs are the ones still there after a restart) and `AgentAncestryRecord.maxAgents` agents each.
+    /// ancestry unknown and the agent gone. At most `limit` processes and `AgentAncestryRecord.maxAgents`
+    /// agents each. First what a restart cannot find again by itself: the agents (libproc has no code
+    /// identity) and the processes whose parent is gone; then the processes the snapshot links to a
+    /// running parent. Each group oldest first: long-running jobs are the ones still there after a restart.
     public func agentAncestry(limit: Int = AgentAncestryRecord.maxRecords) -> [AgentAncestryRecord] {
         lock.lock(); defer { lock.unlock() }
-        var out: [AgentAncestryRecord] = []
+        var out: [(rank: Int, record: AgentAncestryRecord)] = []
         for node in nodes.values where node.exitedAt == nil && node.image.pid > 1 && ProcessTree.hasAgents(node) {
             guard let start = node.image.startTime else { continue }
-            let parent = node.parentID.flatMap { nodes[$0] }.flatMap { $0.image.isSystemRoot ? nil : $0 }
+            let up = node.parentID.flatMap { nodes[$0] }
+            let parent = up.flatMap { $0.image.isSystemRoot ? nil : $0 }
             var agents: [AgentAncestryRecord.Link] = []
             for mark in node.ancestry.agents.prefix(AgentAncestryRecord.maxAgents) {
                 guard let n = nodes[mark.mark.id], !n.image.isSystemRoot else { continue }
                 agents.append(AgentAncestryRecord.Link(n, agentID: mark.agentID, agentTeamID: mark.teamID))
             }
-            out.append(AgentAncestryRecord(
+            let needed = node.agentID != nil || up == nil || up?.exitedAt != nil
+            out.append((needed ? 0 : 1, AgentAncestryRecord(
                 pid: node.image.pid, startTime: start, agentID: node.agentID, agentTeamID: node.agentID == nil ? nil : node.agentTeamID,
                 parent: parent.map { AgentAncestryRecord.Link($0, agentID: $0.agentID, agentTeamID: $0.agentID == nil ? nil : $0.agentTeamID) },
-                agentsAbove: agents))
+                agentsAbove: agents)))
         }
-        out.sort { ($0.startTime, $0.pid) < ($1.startTime, $1.pid) }
-        return Array(out.prefix(max(0, limit)))
+        out.sort { ($0.rank, $0.record.startTime, $0.record.pid) < ($1.rank, $1.record.startTime, $1.record.pid) }
+        return out.prefix(max(0, limit)).map(\.record)
     }
 
     /// After `seed`: gives processes that are still running the AI agents they had before the restart.

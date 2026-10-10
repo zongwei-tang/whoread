@@ -780,11 +780,31 @@ final class AgentAncestryRestartTests: AncestryTestCase {
         XCTAssertEqual(decide(job, 11).ruleID, "block-claude")
     }
 
-    /// Only running processes with an AI agent in their ancestry are saved, the oldest first when there
-    /// are more than the limit.
-    func testOnlyRunningProcessesWithAnAgentAreSavedOldestFirst() {
+    /// Only running processes with an AI agent in their ancestry are saved: first the agents and the
+    /// processes whose parent is gone (a restart cannot find those again), then the rest, each oldest first.
+    func testOnlyRunningProcessesWithAnAgentAreSavedWhatARestartNeedsFirst() {
         _ = agentJobBeforeRestart()
-        XCTAssertEqual(h.tree.agentAncestry().map(\.pid), [600, 601, 702], "Claude Code, its shell and the job, not sh (exited)")
+        XCTAssertEqual(h.tree.agentAncestry().map(\.pid), [600, 702, 601],
+                       "Claude Code and the orphaned job, then its shell (linked to Claude Code by the snapshot), not sh (exited)")
         XCTAssertEqual(h.tree.agentAncestry(limit: 1).map(\.pid), [600])
+    }
+
+    /// The limit is not used up by the many long-running processes of agent sessions (MCP servers,
+    /// language servers) that the snapshot links to their running parent anyway: the job whose shell
+    /// exited, started last, is still saved, and comes back with its agent.
+    func testAnOrphanedJobIsSavedBeforeProcessesWithARunningParent() throws {
+        let shell = agentShell()
+        for i in Int32(0)..<Int32(AgentAncestryRecord.maxRecords) {
+            h.spawn(shell, proc(1000 + i, "/usr/bin/python3", ppid: 601, start: 2), 2)
+        }
+        let sh = h.spawn(shell, proc(700, "/bin/sh", ppid: 601, start: 3, platform: true, signingID: "com.apple.sh"), 3)
+        h.spawn(sh, proc(702, "/usr/bin/ssh", ppid: 700, start: 4, platform: true, signingID: "com.apple.openssh"), 4)
+        h.tree.exit(sh, at: at(5))
+        let records = h.tree.agentAncestry()
+        XCTAssertEqual(records.count, AgentAncestryRecord.maxRecords)
+        XCTAssertTrue(records.contains { $0.pid == 702 })
+
+        try restart(seed: runningAfterRestart(), records: records)
+        XCTAssertEqual(h.tree.chain(for: ssh, at: at(11)).nearestAgent, "claude-code")
     }
 }
