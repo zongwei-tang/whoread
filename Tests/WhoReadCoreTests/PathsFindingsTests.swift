@@ -666,6 +666,17 @@ final class PrefilterFindingsTests: XCTestCase {
     }
     private func open(_ jsonPath: String) -> String { line(#""open":{"fflag":1,"file":{"path":"\#(jsonPath)"}}"#) }
 
+    // The prefilter looks at prefixes, not categories: a path inside nested prefixes contains the
+    // outer one, so it is parsed, and then classified as every category.
+    func testAPathInsideNestedPrefixesIsParsed() throws {
+        let c = PathClassifier(catalog: try catalog(custom: ["~/.ssh/work"]), normalizer: PathNormalizer(homeDirectories: [home]))
+        let filter = LinePrefilter(prefixes: c.mutePaths, ancestors: c.ancestors)
+        let json = open(#"\/Users\/alice\/.ssh\/work\/id_ed25519"#)
+        XCTAssertEqual(filter.verdict(json), .parse)
+        guard case .event(.file(let f)) = EsloggerParser().parse(line: json) else { return XCTFail() }
+        XCTAssertEqual(c.classifications(f.targets[0].path).map(\.categoryID), ["ssh", "custom"])
+    }
+
     // files-3: a create at exactly an ancestor of a prefix is parsed, every spelling of it.
     func testACreateAtAnAncestorIsParsed() throws {
         let h = try Harness()
