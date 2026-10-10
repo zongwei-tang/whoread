@@ -11,33 +11,85 @@ public enum Handshake: Equatable, Sendable {
     case mismatch(String)
 }
 
+/// What a poll reads besides the status, each read on its own: one that is refused or fails keeps
+/// the data last read and leaves the others alone. The open questions are not among them: they have
+/// their own connection and timer (`SnapshotFetcher.fetchAsks`), so no history read can delay, hide or
+/// clear them.
+public enum SnapshotPart: String, CaseIterable, Sendable {
+    // What the daemon recorded: root or the signed app only (ServiceHandler's `.recorded` reads).
+    case alerts, live, summaries, rules
+    // Open to the console user.
+    case settings, catalog, agents
+
+    /// Refused to a peer that is neither root nor the signed WhoRead app.
+    public var isRecorded: Bool {
+        switch self {
+        case .alerts, .live, .summaries, .rules: return true
+        case .settings, .catalog, .agents: return false
+        }
+    }
+}
+
 /// One poll's worth of daemon state. Fetched off the main thread, applied on it.
 public struct Snapshot: Sendable {
     /// Set when the poll started with a handshake (first poll, reconnect, daemon restart).
     public var handshake: Handshake?
     public var status: DaemonStatus?
-    public var alerts: [Alert] = []
-    /// Ask mode: questions waiting for an answer (fetched on every poll; fetching them also tells
-    /// the daemon an answering app is present).
-    public var asks: [AskRequest] = []
-    /// Live events after `liveAfter` (the cursor this poll was fetched with).
-    public var newLive: [AnalyzedEvent] = []
+    /// nil: not read in this poll (refused, failed, or not part of it).
+    public var alerts: [Alert]?
+    /// Live events after `liveAfter` (the cursor this poll was fetched with); nil when not read.
+    public var newLive: [AnalyzedEvent]?
     public var liveAfter: Int64?
     public var summaries: [UsageSummary]?
     public var rules: [Rule]?
     public var settings: Settings?
     public var catalog: CatalogInfo?
     public var agents: AgentCatalog?
+    /// The handshake or the status failed: the daemon cannot be reached, speaks another protocol,
+    /// or does not serve this user. Nothing else was read.
     public var error: IPCError?
+    /// Reads that failed on their own (refused, timed out, store error). Their data is kept as last read.
+    public var failures: [SnapshotPart: IPCError] = [:]
 
     public init() {}
+
+    /// The read succeeded in this poll.
+    public func read(_ part: SnapshotPart) -> Bool {
+        switch part {
+        case .alerts: return alerts != nil
+        case .live: return newLive != nil
+        case .summaries: return summaries != nil
+        case .rules: return rules != nil
+        case .settings: return settings != nil
+        case .catalog: return catalog != nil
+        case .agents: return agents != nil
+        }
+    }
+
+    /// A read of recorded history was refused: the daemon does not serve this connection as the
+    /// signed app (`ConnectionRecovery`).
+    public var refusedRecordedRead: Bool {
+        failures.contains { $0.key.isRecorded && $0.value.code == .notPermitted }
+    }
+}
+
+/// One read of the open questions.
+public enum AskPoll: Equatable, Sendable {
+    case asks([AskRequest])
+    case failed(IPCError)
 }
 
 public enum SnapshotFetcher {
-    /// Fast poll (every second; while questions are open, the ticks in between fetch only them):
-    /// status, open questions, alerts, live tail. Full poll (every ~10 s, or after a change) adds summaries, rules, settings
-    /// and the catalog. `hello` starts with the version handshake, so a mismatched daemon is
-    /// reported as such rather than as decoding errors.
+    /// Fast poll (every second): status, alerts, live tail. Full poll (every ~10 s, or after a change)
+    /// adds settings, the catalog, agents, summaries and rules. `hello` starts with the version
+    /// handshake, so a mismatched daemon is reported as such rather than as decoding errors.
+    ///
+    /// Only the handshake and the status decide whether the daemon can be read at all. Every other
+    /// read is tried on its own: the daemon refuses history to an app it does not recognise as the
+    /// signed one (a development or ad hoc build, or a wrong guess when the connection was accepted),
+    /// and that must not cost the settings, the catalog or anything else that is open to the user.
+    /// A read that gets no answer at all (timed out, connection lost) ends the poll there: the reads
+    /// after it would wait as long, and the next poll tries again. The questions are not read here.
     public static func fetch(_ client: IPCClient, liveAfter: Int64?, includeBenign: Bool, full: Bool, hello: Bool = false) -> Snapshot {
         var s = Snapshot()
         s.liveAfter = liveAfter
@@ -53,34 +105,60 @@ public enum SnapshotFetcher {
                 }
             }
             s.status = try client.status()
-            if case .asks(let a) = try client.call(.asks) { s.asks = a }
-            s.alerts = try client.alerts(AlertQuery(limit: 300))
-            if case .events(let e) = try client.call(.live(afterID: liveAfter, limit: 500, includeBenign: includeBenign)) {
-                s.newLive = e
-            }
-            if full {
-                s.summaries = try client.summaries(since: nil)
-                s.rules = try client.rules()
-                s.settings = try client.settings()
-                s.catalog = try client.catalog()
-                s.agents = try client.agents()
-            }
-        } catch let e as IPCError {
-            s.error = e
-        } catch let e as DecodingError {
-            // The daemon answered in a shape this app does not know.
-            s.error = IPCError(.versionMismatch, "\(e)")
         } catch {
-            s.error = IPCError(.unavailable, "\(error)")
+            s.error = ipcError(error)
+            return s
         }
+        var failures: [SnapshotPart: IPCError] = [:]
+        func read<T>(_ part: SnapshotPart, _ call: () throws -> T) -> T? {
+            guard !failures.values.contains(where: { $0.code == .unavailable }) else { return nil }
+            do {
+                return try call()
+            } catch {
+                failures[part] = ipcError(error)
+                return nil
+            }
+        }
+        // Open to the console user first: notifications are planned with the settings.
+        if full {
+            s.settings = read(.settings) { try client.settings() }
+            s.catalog = read(.catalog) { try client.catalog() }
+            s.agents = read(.agents) { try client.agents() }
+        }
+        s.alerts = read(.alerts) { try client.alerts(AlertQuery(limit: 300)) }
+        s.newLive = read(.live) { () throws -> [AnalyzedEvent] in
+            guard case .events(let e) = try client.call(.live(afterID: liveAfter, limit: 500, includeBenign: includeBenign)) else {
+                throw IPCError(.internalError, "unexpected response")
+            }
+            return e
+        }
+        if full {
+            s.summaries = read(.summaries) { try client.summaries(since: nil) }
+            s.rules = read(.rules) { try client.rules() }
+        }
+        s.failures = failures
         return s
     }
 
-    /// Only the open questions (`PollSchedule.Kind.asks`); nil when they cannot be fetched (the
-    /// next fast poll reports why).
-    public static func fetchAsks(_ client: IPCClient) -> [AskRequest]? {
-        guard case .asks(let a)? = try? client.call(.asks) else { return nil }
-        return a
+    /// The open questions, on the questions' own connection (every second, every 250 ms while any is
+    /// open). Polling them also tells the daemon an answering app is present.
+    public static func fetchAsks(_ client: IPCClient) -> AskPoll {
+        do {
+            guard case .asks(let a) = try client.call(.asks) else { return .failed(IPCError(.internalError, "unexpected response")) }
+            return .asks(a)
+        } catch {
+            return .failed(ipcError(error))
+        }
+    }
+
+    /// Any error from a call as the IPCError the app shows.
+    public static func ipcError(_ error: Error) -> IPCError {
+        switch error {
+        case let e as IPCError: return e
+        // The daemon answered in a shape this app does not know.
+        case let e as DecodingError: return IPCError(.versionMismatch, "\(e)")
+        default: return IPCError(.unavailable, "\(error)")
+        }
     }
 }
 
@@ -166,9 +244,10 @@ public struct MenuBarState: Equatable, Sendable {
         guard connected, let s = status else {
             // Brief §6 Error state: nothing is being recorded, or (connected) nothing the daemon
             // says can be read; the reason is shown next to it.
+            // Questions still read on their own connection are still shown (and counted).
             return MenuBarState(symbol: "exclamationmark.triangle",
                                 title: L10n.t(.modeError, language) + (connected ? "" : " — " + L10n.t(.daemonUnreachable, language)),
-                                unread: 0, connected: connected, language: language)
+                                unread: 0, connected: connected, openAsks: openAsks, language: language)
         }
         let symbol: String
         switch s.mode {
@@ -195,8 +274,14 @@ public final class AppModel {
     public private(set) var connected = false
     public private(set) var lastError: IPCError?
     public private(set) var alerts: [Alert] = []
-    /// Ask mode: questions waiting for an answer, oldest first. Empty while the daemon cannot be read.
+    /// Ask mode: questions waiting for an answer, oldest first. Set only from the questions' own
+    /// connection (`apply(asks:)`, and the reply to an answer); empty while that cannot read them.
     public private(set) var asks: [AskRequest] = []
+    /// Why the open questions cannot be read (nil while they can).
+    public private(set) var asksError: IPCError?
+    /// Reads whose last attempt failed (`SnapshotPart`): refused by the daemon, or not answered. Their
+    /// data is kept as last read.
+    public private(set) var failures: [SnapshotPart: IPCError] = [:]
     public private(set) var live = LiveFeed()
     public private(set) var summaries: [UsageSummary] = []
     public private(set) var rules: [Rule] = []
@@ -229,8 +314,7 @@ public final class AppModel {
         if let e = s.error {
             lastError = e
             connected = e.code != .unavailable
-            // Nobody can answer them through a daemon that does not answer (or cannot be read).
-            asks = []
+            // The questions are not touched: they come from their own connection (`apply(asks:)`).
             // The handshake's message (just set) reads better than a decoder dump.
             if e.code == .versionMismatch, versionProblem == nil { versionProblem = DisplayText.escaped(e.message, limit: 1000) }
             return
@@ -238,10 +322,12 @@ public final class AppModel {
         lastError = nil
         connected = true
         if let v = s.status { setStatus(v) }
-        asks = s.asks
-        alerts = s.alerts
+        for part in SnapshotPart.allCases where s.read(part) { failures[part] = nil }
+        failures.merge(s.failures) { $1 }
+        // A refused or failed read keeps what was last read (shown with `unavailableNote`).
+        if let v = s.alerts { alerts = v }
         // A batch fetched with an older cursor (the feed was reset meanwhile) is dropped.
-        if !feedPaused && s.liveAfter == live.lastID { live.append(s.newLive) }
+        if !feedPaused, s.liveAfter == live.lastID, let v = s.newLive { live.append(v) }
         if let v = s.summaries { summaries = v }
         if let v = s.rules { rules = v }
         if let v = s.settings { setSettings(v) }
@@ -256,8 +342,23 @@ public final class AppModel {
         case .settings(let v): setSettings(v)
         case .catalog(let v): catalog = v
         case .status(let v): setStatus(v)
-        case .asks(let v): asks = v
+        case .asks(let v):
+            asks = v
+            asksError = nil
         default: break
+        }
+    }
+
+    /// A read of the open questions (their own connection). Questions that cannot be read cannot be
+    /// answered either: none are listed then, and `asksProblemText` says why.
+    public func apply(asks poll: AskPoll) {
+        switch poll {
+        case .asks(let v):
+            asks = v
+            asksError = nil
+        case .failed(let e):
+            asks = []
+            asksError = e
         }
     }
 
@@ -319,8 +420,8 @@ public final class AppModel {
         }.map(\.element)
     }
 
-    /// How long until the next poll: questions are answered (and their notifications withdrawn)
-    /// within a quarter second while any is open.
+    /// How long until the next read of the questions: answered ones disappear (and their
+    /// notifications are withdrawn) within a quarter second while any is open.
     public var pollInterval: TimeInterval { PollSchedule.interval(openAsks: asks.count) }
 
     public var formatter: AlertFormatter {
@@ -371,6 +472,54 @@ public final class AppModel {
     /// "Program: ~/x/Terminal.app (not signed by an identified developer)" for a question or alert
     /// (`AlertFormatter.identityLine`): where the program really is and who signed it.
     public func identityLine(_ alert: Alert) -> String? { formatter.identityLine(alert) }
+
+    // MARK: - What cannot be read
+
+    /// Reads the daemon refuses this app: it does not serve it as the signed WhoRead app (a
+    /// development or ad hoc build, or a wrong guess when the connection was accepted). What is open
+    /// to any program of the console user (status, settings, catalog, questions) still works.
+    public var refusedParts: [SnapshotPart] {
+        SnapshotPart.allCases.filter { failures[$0]?.code == .notPermitted }
+    }
+
+    /// The open questions came without their file paths and command lines (`AskRequest.pathHidden`).
+    public var asksPathsHidden: Bool { asks.contains { $0.pathHidden } }
+
+    /// "Limited view: …" while the daemon does not serve this app as the signed WhoRead app: what is
+    /// missing, that questions still arrive and can be denied, and what allowing and the rest need.
+    /// Never an error state: the rest of the app keeps working.
+    public var limitedViewText: String? {
+        var missing = refusedParts.map { L10n.partName($0, language) }
+        if asksPathsHidden { missing.append(L10n.t(.limitedAskPaths, language)) }
+        guard !missing.isEmpty else { return nil }
+        return L10n.f(.limitedViewFormat, missing.joined(separator: language == .zhHans ? "、" : ", "), language: language)
+    }
+
+    /// Shown with a tab's data while its last read failed: refused (what it needs), or not answered.
+    /// The data shown is then what was read before, if anything. nil while the data is current.
+    public func unavailableNote(_ part: SnapshotPart) -> String? {
+        guard let e = failures[part] else { return nil }
+        if e.code == .notPermitted {
+            return L10n.f(.notShownFormat, L10n.partName(part, language), L10n.partCommand(part), language: language)
+        }
+        // The daemon is reachable (the status was read): a read without an answer timed out or lost its
+        // connection, which is not "not running".
+        let reason = e.code == .unavailable ? L10n.t(.errNoAnswer, language) : L10n.message(for: e, language)
+        return L10n.f(.cannotReadFormat, L10n.partName(part, language), reason, language: language)
+    }
+
+    /// Why the daemon does not answer this app at all, when it is not unreachable or another version
+    /// (both shown on their own): it serves only the user at the console, and root.
+    public var connectionProblemText: String? {
+        lastError?.code == .notPermitted ? L10n.t(.errNotConsoleUser, language) : nil
+    }
+
+    /// Why the open questions cannot be read, while the daemon is otherwise reachable.
+    public var asksProblemText: String? {
+        guard let e = asksError, connected else { return nil }
+        if e.code == .notPermitted { return L10n.t(.errNotConsoleUser, language) }
+        return L10n.f(.asksCannotReadFormat, L10n.message(for: e, language), language: language)
+    }
 
     // MARK: - Enforcement
 

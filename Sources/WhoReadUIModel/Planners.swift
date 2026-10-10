@@ -102,7 +102,10 @@ public final class NotificationPlanner: @unchecked Sendable {
 
     /// The first plan only records alerts from before launch (no burst of old notifications);
     /// alerts raised since launch notify even if the daemon was unreachable until now.
-    public func plan(_ alerts: [Alert], settings: NotificationSettings, formatter: AlertFormatter) -> [PlannedNotification] {
+    /// `alerts` nil: they were not read this time (refused, failed): nothing is planned or recorded, so
+    /// the first read that succeeds still only records what is older than the launch.
+    public func plan(_ alerts: [Alert]?, settings: NotificationSettings, formatter: AlertFormatter) -> [PlannedNotification] {
+        guard let alerts else { return [] }
         defer { seeded = true }
         var out: [PlannedNotification] = []
         for a in alerts.sorted(by: { $0.updatedAt < $1.updatedAt }) {
@@ -159,7 +162,7 @@ public final class NotificationPlanner: @unchecked Sendable {
             if let seen = askNotified[a.id], abs(seen.timeIntervalSince(a.firstAt)) < 1 { continue }
             plan.post.append(PlannedAskNotification(
                 identifier: NotificationPlanner.askIdentifier(a.id), askID: a.id, title: L10n.t(.notifAskTitle, formatter.language),
-                body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.asAlert),
+                body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.displayAlert(formatter.language)),
                        formatter.identityLine(a.asAlert), formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
                 categoryIdentifier: a.appleProgram ? NotificationPlanner.categoryAskApple : NotificationPlanner.categoryAsk,
                 actions: AskAnswers.actions(for: a)))
@@ -360,6 +363,23 @@ public struct RuleDraft: Equatable, Sendable {
                     includePlatformBinaries: includePlatformBinaries, expiresAt: edited?.expiresAt,
                     remainingUses: edited?.remainingUses, createdAt: edited?.createdAt ?? now, template: original?.template,
                     exceptions: exceptions, chainAgents: original?.chainAgents)
+    }
+}
+
+/// Saving a rule from the editor.
+public enum RuleSave {
+    /// Saves `rule` with what the daemon changes on its own taken from its current copy
+    /// (`keepingDaemonState`), read right before saving. When the daemon refuses that read (it does
+    /// not serve this app as the signed one), the rule is saved as built: such a peer may only add a
+    /// new deny or alert rule, which has no daemon state yet, and the daemon refuses anything else.
+    public static func save(_ rule: Rule, with client: IPCClient) throws -> IPCResponse {
+        let current: Rule?
+        do {
+            current = try client.rules().first { $0.id == rule.id }
+        } catch let e as IPCError where e.code == .notPermitted {
+            current = nil
+        }
+        return try client.call(.upsertRule(rule.keepingDaemonState(of: current)))
     }
 }
 

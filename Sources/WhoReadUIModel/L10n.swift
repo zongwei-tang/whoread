@@ -15,7 +15,10 @@ public enum L: String, CaseIterable, Sendable {
     // Ask mode: open questions (menu bar, Alerts tab, notifications)
     case asksTitle, asksWaitingFormat, asksMoreFormat, askDeniedIn, askNotHeld
     case askAllowOnce, askAlwaysAllow, askDeny, askAlwaysDeny, askTrustApple
-    case askAllowNotPermittedFormat, askGone, askAgentsFormat
+    case askAllowNotPermittedFormat, askGone, askAgentsFormat, askPathHidden, asksCannotReadFormat
+    // What cannot be read (limited view)
+    case limitedViewFormat, limitedAskPaths, notShownFormat, cannotReadFormat
+    case partAlerts, partLive, partSummaries, partRules, partSettings, partCatalog, partAgents
     // Tabs
     case tabLive, tabAlerts, tabApps, tabFiles, tabAgents, tabRules, tabSettings
     // Columns & common
@@ -67,7 +70,8 @@ public enum L: String, CaseIterable, Sendable {
     case opOpen, opClose, opRename, opClone, opCopyfile, opLink, opUnlink, opTruncate, opExchangedata, opReaddir, opCreate
     case opSetmode, opSetowner, opSetacl, opMount
     // Errors
-    case errNotPermitted, errUnavailable, errVersionMismatchFormat, errDaemonFormat, errAdminFormat
+    case errNotPermitted, errUnavailable, errVersionMismatchFormat, errDaemonFormat, errAdminFormat, errNotConsoleUser
+    case errNoAnswer
 }
 
 public enum L10n {
@@ -116,6 +120,22 @@ public enum L10n {
         .askAllowNotPermittedFormat: ("Not allowed: only the signed WhoRead app or an administrator can allow (this build is not signed). In Terminal: %@", "没有权限：只有已签名的 WhoRead 应用或管理员才能允许（当前版本未签名）。请在终端运行：%@"),
         .askGone: ("This question is no longer open (answered elsewhere or expired).", "这个问题已经关闭（已在别处回答或已过期）。"),
         .askAgentsFormat: ("AI agent in the chain: %@", "调用链中有 AI agent：%@"),
+        .askPathHidden: ("(file path hidden: only the signed WhoRead app or sudo can see it)", "（文件路径已隐藏：只有已签名的 WhoRead 应用或 sudo 可以查看）"),
+        .asksCannotReadFormat: ("Open questions cannot be read: %@", "无法读取等待回答的问题：%@"),
+
+        .limitedViewFormat: ("Limited view: the WhoRead monitor does not recognise this app as the signed WhoRead app, so it does not show it %@. Questions still arrive and you can deny them here. Allowing, and everything else, needs the signed WhoRead app or sudo in Terminal (for example: sudo whoread asks).",
+                             "受限视图：WhoRead 监控程序没有把这个应用识别为已签名的 WhoRead 应用，因此不向它提供%@。问题仍会出现，你可以在这里拒绝。允许访问以及其他内容需要已签名的 WhoRead 应用，或在终端使用 sudo（例如：sudo whoread asks）。"),
+        .limitedAskPaths: ("the file paths in questions", "问题中的文件路径"),
+        .notShownFormat: ("Not shown here: %@. The WhoRead monitor shows them only to the signed WhoRead app, or with sudo in Terminal (%@).",
+                          "这里不显示%@：WhoRead 监控程序只把它们提供给已签名的 WhoRead 应用，或在终端用 sudo 查看（%@）。"),
+        .cannotReadFormat: ("Could not read %@: %@", "无法读取%@：%@"),
+        .partAlerts: ("alerts", "告警"),
+        .partLive: ("the live feed", "实时记录"),
+        .partSummaries: ("the app, file and AI agent history", "应用、文件和 AI agent 的历史记录"),
+        .partRules: ("the rules", "规则"),
+        .partSettings: ("the settings", "设置"),
+        .partCatalog: ("the monitored paths", "监控路径"),
+        .partAgents: ("the list of AI agents", "AI agent 列表"),
 
         .tabLive: ("Live", "实时"),
         .tabAlerts: ("Alerts", "告警"),
@@ -339,6 +359,9 @@ public enum L10n {
         .errVersionMismatchFormat: ("The WhoRead app and daemon versions differ (%@). Update or restart the daemon.", "WhoRead 应用与守护进程版本不一致（%@）。请更新或重启守护进程。"),
         .errDaemonFormat: ("The daemon refused: %@", "守护进程拒绝了请求：%@"),
         .errAdminFormat: ("Administrator action failed: %@", "管理员操作失败：%@"),
+        .errNoAnswer: ("No answer from the WhoRead daemon.", "WhoRead 守护进程没有响应。"),
+        .errNotConsoleUser: ("The WhoRead monitor serves only the user logged in at the screen (and administrators). This app runs as another user, so it cannot show or answer questions. Use the WhoRead app of the user at the screen, or sudo whoread asks.",
+                             "WhoRead 监控程序只为当前在屏幕前登录的用户（以及管理员）服务。这个应用以其他用户身份运行，无法显示或回答问题。请使用屏幕前那个用户的 WhoRead 应用，或运行 sudo whoread asks。"),
     ]
 
     public static func mode(_ m: DaemonMode, _ language: Language = current) -> String {
@@ -413,6 +436,32 @@ public enum L10n {
         case .sourceCannotEnforce: return t(.reasonSourceCannotEnforce, language)
         // Latency trips are gone (enforcement is never switched off automatically); not shown.
         default: return r.rawValue
+        }
+    }
+
+    /// What a poll reads, as named in "not shown" and "could not read" notes.
+    public static func partName(_ part: SnapshotPart, _ language: Language = current) -> String {
+        switch part {
+        case .alerts: return t(.partAlerts, language)
+        case .live: return t(.partLive, language)
+        case .summaries: return t(.partSummaries, language)
+        case .rules: return t(.partRules, language)
+        case .settings: return t(.partSettings, language)
+        case .catalog: return t(.partCatalog, language)
+        case .agents: return t(.partAgents, language)
+        }
+    }
+
+    /// The command that shows the same data in Terminal.
+    public static func partCommand(_ part: SnapshotPart) -> String {
+        switch part {
+        case .alerts: return "sudo whoread alerts"
+        case .live: return "sudo whoread tail"
+        case .summaries: return "sudo whoread apps"
+        case .rules: return "sudo whoread rules"
+        case .settings: return "whoread settings"
+        case .catalog: return "whoread catalog"
+        case .agents: return "whoread agents"
         }
     }
 

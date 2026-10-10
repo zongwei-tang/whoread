@@ -77,9 +77,9 @@ final class AskUIModelTests: XCTestCase {
         let m = AppModel(language: language)
         var s = Snapshot()
         s.status = status
-        s.asks = asks
         s.settings = settings
         m.apply(s)
+        m.apply(asks: .asks(asks))
         return m
     }
 
@@ -101,18 +101,21 @@ final class AskUIModelTests: XCTestCase {
 
     // MARK: - Fetching and polling
 
-    func testEveryPollFetchesQuestions() throws {
+    func testQuestionsAreReadOnTheirOwn() throws {
         // The daemon answers `.asks` (an empty list until questions open).
-        XCTAssertNil(SnapshotFetcher.fetch(client, liveAfter: nil, includeBenign: false, full: false).error)
+        XCTAssertEqual(SnapshotFetcher.fetchAsks(client), .asks([]))
 
+        // The status and history poll does not read them: they have their own connection, so a slow
+        // or refused history read never delays or hides them.
         let open = [try ask(1), try ask(2, app: "security", category: "keychain", apple: true)]
         let asking = AskingClient(client, asks: open)
         let m = AppModel(language: .en)
         m.apply(SnapshotFetcher.fetch(asking, liveAfter: nil, includeBenign: false, full: true, hello: true))
-        XCTAssertEqual(asking.asksCalls, 1)
+        XCTAssertEqual(asking.asksCalls, 0)
+        XCTAssertEqual(m.asks, [])
+        m.apply(asks: SnapshotFetcher.fetchAsks(asking))
+        XCTAssertEqual(asking.asksCalls, 1, "polling them also tells the daemon an answering app is present")
         XCTAssertEqual(m.asks, open)
-        m.apply(SnapshotFetcher.fetch(asking, liveAfter: m.liveCursor, includeBenign: false, full: false))
-        XCTAssertEqual(asking.asksCalls, 2, "fast polls too: polling tells the daemon an answering app is present")
         XCTAssertEqual(m.pollInterval, 0.25)
         XCTAssertEqual(m.menuBar.openAsks, 2)
 
@@ -120,20 +123,21 @@ final class AskUIModelTests: XCTestCase {
         m.apply(response: .asks([open[1]]))
         XCTAssertEqual(m.asks.map(\.id), [2])
         asking.asks = []
-        m.apply(SnapshotFetcher.fetch(asking, liveAfter: m.liveCursor, includeBenign: false, full: false))
+        m.apply(asks: SnapshotFetcher.fetchAsks(asking))
         XCTAssertEqual(m.asks, [])
         XCTAssertEqual(m.pollInterval, 1)
 
         // A daemon that cannot be reached cannot take answers: nothing is listed.
         asking.asks = open
-        m.apply(SnapshotFetcher.fetch(asking, liveAfter: m.liveCursor, includeBenign: false, full: false))
+        m.apply(asks: SnapshotFetcher.fetchAsks(asking))
         XCTAssertEqual(m.asks.count, 2)
-        var down = Snapshot()
-        down.error = IPCError(.unavailable, "gone")
-        m.apply(down)
+        m.apply(asks: SnapshotFetcher.fetchAsks(FailingClient()))
         XCTAssertEqual(m.asks, [])
+        XCTAssertEqual(m.asksError?.code, .unavailable)
         XCTAssertEqual(m.pollInterval, 1)
-        XCTAssertNil(m.menuBar.badge)
+        // The status poll still answers here: the badge goes back to the unread alerts.
+        XCTAssertEqual(m.menuBar.openAsks, 0)
+        XCTAssertNotEqual(m.menuBar.labelSymbol, "questionmark.circle.fill")
     }
 
     func testPollCadence() {
@@ -153,33 +157,24 @@ final class AskUIModelTests: XCTestCase {
         XCTAssertTrue(schedule.isFullDue(now: t + 13))
     }
 
-    func testTicksBetweenFastPollsFetchOnlyQuestions() throws {
+    func testStatusAndHistoryLoopIsFastOrFull() throws {
+        // The questions have their own loop (`pollInterval`); this one runs once a second.
         var schedule = PollSchedule()
         let t = AskUIModelTests.base
-        XCTAssertEqual(schedule.kind(now: t, openAsks: 2), .full)
+        XCTAssertEqual(schedule.kind(now: t), .full)
         schedule.fullStarted(at: t)
-        // 250 ms ticks: questions only, status / alerts / live tail once a second.
-        XCTAssertEqual(schedule.kind(now: t + 0.25, openAsks: 2), .asks)
-        XCTAssertEqual(schedule.kind(now: t + 0.5, openAsks: 2), .asks)
-        XCTAssertEqual(schedule.kind(now: t + 0.75, openAsks: 2), .asks)
-        XCTAssertEqual(schedule.kind(now: t + 0.999, openAsks: 2), .fast, "a timer firing a little early still polls")
+        XCTAssertEqual(schedule.kind(now: t + 1), .fast)
         schedule.fastStarted(at: t + 1)
-        XCTAssertEqual(schedule.kind(now: t + 1.25, openAsks: 2), .asks)
-        XCTAssertEqual(schedule.kind(now: t + 2.1, openAsks: 2), .fast)
-        // No question open: every tick (once a second) is a fast poll, even one right after a change.
-        XCTAssertEqual(schedule.kind(now: t + 1.25, openAsks: 0), .fast)
+        XCTAssertEqual(schedule.kind(now: t + 2), .fast)
         // Full polls keep their 10 s, and come first until settings are known.
-        XCTAssertEqual(schedule.kind(now: t + 10, openAsks: 2), .full)
-        XCTAssertEqual(schedule.kind(now: t + 1.25, openAsks: 2, needsFull: true), .full)
+        XCTAssertEqual(schedule.kind(now: t + 10), .full)
+        XCTAssertEqual(schedule.kind(now: t + 2, needsFull: true), .full)
 
-        // The questions alone, from the daemon (empty list) and from a daemon with questions open.
-        XCTAssertEqual(SnapshotFetcher.fetchAsks(client), [])
         let open = [try ask(1)]
         let asking = AskingClient(client, asks: open)
-        XCTAssertEqual(SnapshotFetcher.fetchAsks(asking), open)
-        XCTAssertEqual(asking.asksCalls, 1, "polling them also tells the daemon an answering app is present")
-        // Unreachable: nil, left to the next fast poll to report.
-        XCTAssertNil(SnapshotFetcher.fetchAsks(FailingClient()))
+        XCTAssertEqual(SnapshotFetcher.fetchAsks(asking), .asks(open))
+        // Unreachable: the reason, so the questions' loop can say why none are listed.
+        XCTAssertEqual(SnapshotFetcher.fetchAsks(FailingClient()), .failed(IPCError(.unavailable, "gone")))
         let m = AppModel(language: .en)
         m.apply(response: .asks(open))
         XCTAssertEqual(m.asks, open)

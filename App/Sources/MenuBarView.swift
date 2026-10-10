@@ -17,19 +17,29 @@ struct MenuBarView: View {
                 Text(L10n.f(.errVersionMismatchFormat, problem)).font(.caption).foregroundStyle(.red)
             }
             Divider()
+            // Questions first, whatever the status poll says: they are read on their own connection.
+            if !model.asks.isEmpty {
+                openAsks
+                Divider()
+            } else if let problem = model.asksProblemText {
+                Text(problem).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Divider()
+            }
             if model.connected, let status = model.liveStatus {
-                if !model.asks.isEmpty {
-                    openAsks
-                    Divider()
+                // Not recognised as the signed app: what is missing, and that questions still work.
+                if let limited = model.limitedViewText {
+                    Text(limited).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
                 quickToggles(status)
                 Divider()
                 recentAlerts
             } else if model.connected {
-                // The daemon answers but its state cannot be read (another version): no stale
-                // switches, but enforcement can still be turned off.
+                // The daemon answers but its state cannot be read (another version, another user): no
+                // stale switches, but enforcement can still be turned off.
                 if model.versionProblem == nil, let e = model.lastError {
-                    Text(L10n.message(for: e)).font(.caption).foregroundStyle(.red)
+                    Text(model.connectionProblemText ?? L10n.message(for: e)).font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Button(L10n.t(.killSwitchAdmin)) { connection.engageKillSwitchWithAdminRights() }
                     .font(.caption)
@@ -116,7 +126,10 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(L10n.t(.recentAlerts)).font(.subheadline.weight(.semibold))
             let alerts = model.alerts.prefix(5)
-            if alerts.isEmpty {
+            // Refused or not read: never "No alerts".
+            if let note = model.unavailableNote(.alerts) {
+                Text(note).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            } else if alerts.isEmpty {
                 Text(L10n.t(.noAlerts)).foregroundStyle(.secondary)
             }
             ForEach(Array(alerts)) { alert in
