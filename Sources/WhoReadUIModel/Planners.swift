@@ -353,13 +353,15 @@ public struct RuleDraft: Equatable, Sendable {
         }
         // Editing keeps expiry, use count and creation time; a template only lends its provenance.
         // The chain scope (not shown in the editor) is kept: an answer that allowed an app without an
-        // AI agent must not become an allow for that app driven by any agent once edited.
+        // AI agent must not become an allow for that app driven by any agent once edited. So is whether
+        // it also covers chains whose starter is unknown.
         let edited = id != nil && original?.id == id ? original : nil
         return Rule(id: id ?? UUID().uuidString, name: name.isEmpty ? nil : name, enabled: enabled, enforce: enforce,
                     target: target, subject: subject, access: access, action: action,
                     includePlatformBinaries: includePlatformBinaries, expiresAt: edited?.expiresAt,
                     remainingUses: edited?.remainingUses, createdAt: edited?.createdAt ?? now, template: original?.template,
-                    exceptions: exceptions, chainAgents: original?.chainAgents)
+                    exceptions: exceptions, chainAgents: original?.chainAgents,
+                    coversUnknownAncestry: original?.coversUnknownAncestry ?? false)
     }
 }
 

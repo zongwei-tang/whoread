@@ -731,7 +731,8 @@ func cmdRules(_ c: IPCClient) throws {
         }
         // Answers to questions are scoped to the AI agents seen in the chain, and "allow once" expires:
         // without both, an approval for Terminal and one for Claude Code in Terminal look the same.
-        let scope = r.chainAgents.map { $0.isEmpty ? ", no AI agent in chain" : ", chain agents " + $0.joined(separator: ",") } ?? ""
+        let scope = r.chainAgents.map { $0.isEmpty ? ", no AI agent in chain" : ", chain agents " + $0.joined(separator: ",") }
+            .map { r.coversUnknownAncestry ? $0 + " (also unknown starter)" : $0 } ?? ""
         let state = (!r.enabled ? "off" : (r.action == .deny ? (r.enforce ? "ENFORCE" : "dry-run") : "on"))
             + (r.expiresAt.map { " until " + Format.time($0) } ?? "")
         return [r.id, state, r.action.rawValue, r.access.rawValue, target, subject + scope, r.name ?? ""]

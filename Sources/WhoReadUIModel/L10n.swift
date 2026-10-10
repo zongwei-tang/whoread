@@ -36,7 +36,7 @@ public enum L: String, CaseIterable, Sendable {
     case targetCategory, targetSeverity, targetPath, subjectSigned, subjectUnsigned, subjectApp, subjectAnyNonOwner
     case subjectAgentChain, exceptOwners, includePlatformBinaries, accessRead, accessWrite, accessAny
     case actionAllow, actionDeny, actionAlert, rulesEnforcementOffNote, ruleExceptionsFormat, rulesEmpty
-    case ruleChainNoAgent, ruleChainAgentsFormat
+    case ruleChainNoAgent, ruleChainAgentsFormat, ruleChainUnknownStarter
     // Settings
     case setMonitoredPaths, setProjectRoots, setProjectRootsNote, setAsk, setAskNote, setTrustApple, setTrustAppleNote
     case setRetention, setRetentionDays, setDetailDays, setNotifications, setNotificationsEnabled, setMinSeverity
@@ -213,6 +213,7 @@ public enum L10n {
         .rulesEmpty: ("No rules.", "没有规则。"),
         .ruleChainNoAgent: ("only without an AI agent in the chain", "仅限调用链中没有 AI agent"),
         .ruleChainAgentsFormat: ("only with these AI agents in the chain: %@", "仅限调用链中的这些 AI agent：%@"),
+        .ruleChainUnknownStarter: (" (also when who started the program is unknown)", "（启动者未知时也适用）"),
 
         .setMonitoredPaths: ("Monitored paths", "监控路径"),
         .setProjectRoots: ("Project roots", "Project roots"),
