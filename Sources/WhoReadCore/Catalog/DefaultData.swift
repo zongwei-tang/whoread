@@ -61,8 +61,12 @@ public struct DefaultData: Sendable {
     public static func locate(explicit: String?, executablePath: String?, trustedOwner: uid_t? = nil) throws -> (DefaultData, URL) {
         var errors: [String] = []
         for (index, dir) in searchDirectories(explicit: explicit, executablePath: executablePath).enumerated() {
-            let probe = dir.appendingPathComponent(catalogFile)
-            guard FileManager.default.fileExists(atPath: probe.path) else { continue }
+            let probe = dir.appendingPathComponent(catalogFile).path
+            // With an owner, a link at catalog.json counts as there and is refused below: followed, one
+            // that leads nowhere would make the directory look empty (attributesOfItem does not follow).
+            let present = trustedOwner == nil ? FileManager.default.fileExists(atPath: probe)
+                : (try? FileManager.default.attributesOfItem(atPath: probe)) != nil
+            guard present else { continue }
             do {
                 return (try load(directory: dir, trustedOwner: trustedOwner), dir)
             } catch let problem as TrustedFile.Untrusted where explicit != nil && index == 0 {

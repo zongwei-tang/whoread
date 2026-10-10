@@ -284,6 +284,22 @@ final class TrustedDefaultDataTests: XCTestCase {
         }
     }
 
+    // macos-4 variant: the search looked for catalog.json through links, so a link there that leads
+    // nowhere made the explicit directory look empty, and the next candidate was used without a word.
+    func testLinkAtTheExplicitCatalogStopsTheStartInsteadOfBeingSkipped() throws {
+        let d = try copyOfDefaults()
+        XCTAssertEqual(unlink(d + "/" + DefaultData.catalogFile), 0)
+        XCTAssertEqual(symlink(path("nowhere"), d + "/" + DefaultData.catalogFile), 0)
+        try copyOfDefaults("bin/WhoReadData")
+        XCTAssertThrowsError(try DefaultData.locate(explicit: d, executablePath: path("bin/whoreadd"), trustedOwner: me)) { error in
+            XCTAssertTrue("\(error)".contains("refusing the default data in \(d)"), "\(error)")
+            XCTAssertTrue("\(error)".contains("symbolic link"), "\(error)")
+        }
+        // A daemon running as a user goes on to the next candidate as before.
+        XCTAssertEqual(try DefaultData.locate(explicit: d, executablePath: path("bin/whoreadd"), trustedOwner: nil).1.path,
+                       path("bin/WhoReadData"))
+    }
+
     // macos-4 variant: the other candidates (in a bundle's Resources, next to the executable,
     // WHOREAD_DATA_DIR) are checked too; one that fails is skipped, never read.
     func testUntrustedSearchCandidateIsSkipped() throws {
