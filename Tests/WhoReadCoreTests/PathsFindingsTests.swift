@@ -2,7 +2,8 @@ import XCTest
 @testable import WhoReadCore
 
 // Regression tests for the path findings (files-1, files-2,
-// files-3, files-6, files-7). Each test names the finding it covers and replays its scenario.
+// files-3, files-6, files-7) and for paths inside nested prefixes. Each test names the finding it
+// covers and replays its scenario.
 
 private func activity(_ op: FileOperation, _ p: ProcessRecord, _ targets: [FileTarget], _ t: TimeInterval = 10) -> FileActivity {
     FileActivity(time: at(t), operation: op, process: p, targets: targets)
@@ -59,8 +60,8 @@ private func catalog(custom: [String] = [], extra: [CategorySpec] = []) throws -
 
 /// A harness whose analyzer (and rules) use a classifier over `catalog`, these homes and project roots.
 private func harness(rules: [Rule] = [], catalog: Catalog? = nil, homes: [String] = [home], projectRoots: [String] = [],
-                     symlinks: SymlinkResolver = NoSymlinkResolver()) throws -> Harness {
-    let h = try Harness(rules: rules)
+                     symlinks: SymlinkResolver = NoSymlinkResolver(), learningDays: Double = 7) throws -> Harness {
+    let h = try Harness(rules: rules, learningDays: learningDays)
     h.analyzer.replace(classifier: PathClassifier(catalog: catalog ?? h.data.catalog, normalizer: PathNormalizer(homeDirectories: homes),
                                                   projectRoots: projectRoots, symlinks: symlinks))
     return h
@@ -370,6 +371,155 @@ final class NestedCustomPrefixTests: XCTestCase {
         XCTAssertEqual(c.classify("/Users/alice/code/secret/server.pem")?.severity, .critical)
         // Moving that custom folder out carries the project's keys too.
         XCTAssertEqual(c.containingCategories(normalized: "/Users/alice/code/secret/certs").map(\.id), ["custom", "project-secrets"])
+    }
+}
+
+// MARK: - Nested prefixes: a path belongs to every category that accepts it
+
+final class NestedPrefixMembershipTests: XCTestCase {
+    private let key = "/Users/alice/.ssh/work/id_ed25519"
+    private let ask = AskPolicy(enabled: true, trustApplePrograms: false, benignChain: false)
+    private let terminalKey = "app:/system/applications/utilities/terminal.app"
+
+    private func read(_ p: ProcessRecord, _ path: String) -> FileActivity {
+        activity(.open, p, OperationSemantics.open(path: path, fflag: 1))
+    }
+
+    /// Terminal → zsh → `leaf`, no agent.
+    private func userShell(_ h: Harness, _ leaf: ProcessRecord) -> ProcessRecord {
+        h.spawn(h.spawn(P.terminal, P.zsh(500, parent: 100)), leaf)
+    }
+
+    private func answer(_ category: String) -> Rule {
+        Rule(id: "answer-\(category)", target: .category(category), subject: .responsible(key: terminalKey, teamID: nil),
+             access: .read, action: .allow, template: RuleTemplates.askAnswer, chainAgents: [])
+    }
+
+    private var workKeys: CategorySpec {
+        CategorySpec(id: "work-keys", name: LocalizedText(en: "Work keys", zhHans: "Work keys"), kind: .custom,
+                     severity: .critical, paths: ["~/.ssh/work"])
+    }
+
+    // A key in a custom folder inside ~/.ssh is ssh/critical and custom/high: a rule on either covers it.
+    func testAKeyInACustomFolderInsideSSHBelongsToBothCategories() throws {
+        let c = PathClassifier(catalog: try catalog(custom: ["~/.ssh/work"]), normalizer: PathNormalizer(homeDirectories: [home]))
+        XCTAssertEqual(c.classifications(key).map(\.categoryID), ["ssh", "custom"])
+        XCTAssertEqual(c.classifications(key).map(\.severity), [.critical, .high])
+        XCTAssertEqual(c.classify(key)?.categoryID, "ssh", "named by the more severe one, as before")
+        // ssh's medium config file is named by the custom folder, and is still an ssh file.
+        XCTAssertEqual(c.classifications("/Users/alice/.ssh/work/config").map(\.categoryID), ["custom", "ssh"])
+        XCTAssertEqual(c.classifications("/Users/alice/.ssh/id_ed25519").map(\.categoryID), ["ssh"], "not nested: one category")
+        XCTAssertEqual(c.classifications("/Users/alice/Documents/a.txt").map(\.categoryID), [])
+
+        let blockCustom = enforced(Rule(id: "block-custom", target: .category("custom"),
+                                        subject: .agentAncestor(agentIDs: nil, exceptOwners: false), access: .read, action: .deny))
+        let h = try harness(rules: [blockCustom], catalog: try catalog(custom: ["~/.ssh/work"]))
+        let cat = claudeShell(h, proc(700, "/bin/cat", ppid: 600, platform: true))
+        XCTAssertEqual(categories(h, read(cat, key)), ["ssh": .critical, "custom": .high])
+        XCTAssertEqual(authDecision(h, read(cat, key)).verdict, .deny, "the custom category's rule covers the key")
+        XCTAssertEqual(authDecision(h, read(cat, key)).ruleID, "block-custom")
+    }
+
+    // The files-6 tie case: a user category as severe as ssh named the keys and took them out of the
+    // ssh-category rules. Now they stay in both.
+    func testAUserCategoryOfTheSameSeverityLeavesTheKeysUnderSSHRules() throws {
+        let cat = try catalog(extra: [workKeys])
+        let c = PathClassifier(catalog: cat, normalizer: PathNormalizer(homeDirectories: [home]))
+        XCTAssertEqual(c.classifications(key).map(\.categoryID), ["work-keys", "ssh"])
+        let h = try harness(rules: [enforced(RuleTemplates.denyNonOwnersSSH())], catalog: cat)
+        let gcat = userShell(h, proc(501, "/opt/homebrew/bin/gcat", ppid: 500))
+        XCTAssertEqual(authDecision(h, read(gcat, key)).verdict, .deny)
+        XCTAssertEqual(authDecision(h, read(gcat, key)).ruleID, RuleTemplates.denyNonOwnersSSH().id)
+        // ssh owns the keys: the ssh rule leaves it alone.
+        let ssh = userShell(h, proc(502, "/usr/bin/ssh", ppid: 500, platform: true, signingID: "com.apple.openssh"))
+        XCTAssertEqual(authDecision(h, read(ssh, key)).verdict, .allow)
+    }
+
+    // `catalog add-path chrome ~/.ssh/browser`: a standard category nested in another one named the key
+    // a Chrome file at medium, so critical-file rules no longer covered it.
+    func testAStandardPrefixInsideAnotherOneDemotesNothing() throws {
+        var cat = try catalog()
+        let i = try XCTUnwrap(cat.categories.firstIndex { $0.id == "chrome" })
+        cat.categories[i].paths.append("~/.ssh/browser")
+        let h = try harness(rules: [blockCritical], catalog: cat)
+        let agentCat = claudeShell(h, proc(700, "/bin/cat", ppid: 600, platform: true))
+        let a = read(agentCat, "/Users/alice/.ssh/browser/id_ed25519")
+        XCTAssertEqual(h.analyzer.classifier.classify("/Users/alice/.ssh/browser/id_ed25519")?.categoryID, "chrome")
+        XCTAssertEqual(categories(h, a), ["chrome": .medium, "ssh": .critical])
+        XCTAssertEqual(authDecision(h, a).verdict, .deny)
+        XCTAssertEqual(authDecision(h, a).ruleID, blockCritical.id)
+    }
+
+    // A link-only prefix and a project root nested in other prefixes keep the outer categories too.
+    func testLinkTargetsAndProjectRootsKeepTheOuterCategories() throws {
+        let links = MapSymlinkResolver([:], links: [
+            "/Users/alice/.aws": [(link: "/Users/alice/.aws/credentials", target: "/Users/alice/Sync/creds")],
+        ])
+        let c = PathClassifier(catalog: try catalog(custom: ["~/Sync"]), normalizer: PathNormalizer(homeDirectories: [home]),
+                               projectRoots: ["~/Sync/app", "~/.aws/proj"], symlinks: links)
+        XCTAssertEqual(c.classifications("/Users/alice/Sync/creds").map(\.categoryID), ["aws", "custom"])
+        XCTAssertEqual(c.classifications("/Users/alice/Sync/app/.env").map(\.categoryID), ["project-secrets", "custom"])
+        XCTAssertEqual(c.classifications("/Users/alice/Sync/app/server.pem").map(\.severity), [.critical, .high])
+        XCTAssertEqual(c.classifications("/Users/alice/Sync/app/README.md").map(\.categoryID), ["custom"], "patterns still decide")
+        XCTAssertEqual(c.classifications("/Users/alice/.aws/proj/.env").map(\.categoryID), ["aws", "project-secrets"])
+        // A truncated path gets each category's worst severity.
+        XCTAssertEqual(c.classifications(normalized: "/Users/alice/Sync/app/x", truncated: true).map(\.severity), [.critical, .high])
+    }
+
+    // Ask mode: an answer about one category never decides another. The question names the most
+    // severe undecided one; once it is answered the other one is asked (a held access answered "allow"
+    // for the first is therefore denied, and the retry asks about the second).
+    func testAnAnswerForOneCategoryDoesNotDecideTheOther() throws {
+        let h = try harness(catalog: try catalog(custom: ["~/.ssh/work"]))
+        let cat = userShell(h, P.cat(501, parent: 500))
+        var d = authDecision(h, read(cat, key), ask: ask)
+        XCTAssertEqual(d.verdict, .ask)
+        XCTAssertEqual(d.askKey?.categoryID, "ssh")
+        h.rules.replace(rules: [answer("ssh")])
+        d = authDecision(h, read(cat, key), ask: ask)
+        XCTAssertEqual(d.verdict, .ask)
+        XCTAssertEqual(d.askKey?.categoryID, "custom")
+        h.rules.replace(rules: [answer("ssh"), answer("custom")])
+        XCTAssertEqual(authDecision(h, read(cat, key), ask: ask).verdict, .allow)
+        // Only the custom answer: still asked about ssh.
+        h.rules.replace(rules: [answer("custom")])
+        XCTAssertEqual(authDecision(h, read(cat, key), ask: ask).askKey?.categoryID, "ssh")
+    }
+
+    // Owners of the category the path is named by are owners of the whole path: ssh reading its key in
+    // a custom folder is not asked about the custom folder, and raises no alert for it.
+    func testOwnersOfTheNamingCategoryOwnTheWholePath() throws {
+        let h = try harness(catalog: try catalog(custom: ["~/.ssh/work"]), learningDays: 0)
+        let ssh = userShell(h, proc(502, "/usr/bin/ssh", ppid: 500, platform: true, signingID: "com.apple.openssh"))
+        let d = authDecision(h, read(ssh, key), ask: ask)
+        XCTAssertEqual(d.verdict, .allow)
+        XCTAssertEqual(d.reason, .owner)
+        let out = h.analyzer.handle(.file(read(ssh, key)))
+        XCTAssertEqual(out.events.map(\.categoryID).sorted(), ["custom", "ssh"])
+        XCTAssertTrue(out.events.allSatisfy(\.isOwner))
+        XCTAssertTrue(out.alerts.isEmpty)
+        // Not the other way round: in a user category named first, ssh owns only the ssh side.
+        let named = try harness(catalog: try catalog(extra: [workKeys]))
+        let ssh2 = userShell(named, proc(502, "/usr/bin/ssh", ppid: 500, platform: true, signingID: "com.apple.openssh"))
+        let asked = authDecision(named, read(ssh2, key), ask: ask)
+        XCTAssertEqual(asked.verdict, .ask)
+        XCTAssertEqual(asked.askKey?.categoryID, "work-keys")
+    }
+
+    // Monitor-only: one event and one alert per category.
+    func testEveryCategoryGetsItsOwnEventAndAlert() throws {
+        let h = try harness(catalog: try catalog(custom: ["~/.ssh/work"]), learningDays: 0)
+        let cat = userShell(h, P.cat(501, parent: 500))
+        let out = h.analyzer.handle(.file(read(cat, key)))
+        XCTAssertEqual(out.events.map(\.categoryID), ["ssh", "custom"])
+        XCTAssertEqual(out.events.map(\.severity), [.critical, .high])
+        XCTAssertEqual(Set(out.events.map(\.id)).count, 2)
+        XCTAssertEqual(out.alerts.map(\.alert.categoryID), ["ssh", "custom"])
+        // Moving the custom folder: each category once, both judged as the folder itself.
+        let mv = userShell(h, proc(503, "/bin/mv", ppid: 500, platform: true))
+        let moved = h.analyzer.classify(move(mv, "/Users/alice/.ssh/work", "/private/tmp/w"))
+        XCTAssertEqual(moved.filter(\.viaAncestor).count, 0)
+        XCTAssertEqual(moved.first?.categories.map(\.id), ["ssh", "custom"])
     }
 }
 

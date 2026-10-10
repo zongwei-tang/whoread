@@ -282,6 +282,11 @@ public final class PathClassifier: @unchecked Sendable {
         classify(normalized: normalizer.normalize(rawPath), truncated: truncated)
     }
 
+    /// Every category of a raw path (normalizes first); see `classifications(normalized:)`.
+    public func classifications(_ rawPath: String, truncated: Bool = false) -> [Classification] {
+        classifications(normalized: normalizer.normalize(rawPath), truncated: truncated)
+    }
+
     /// Terminals along the path, deepest first, with the depth (component count) at which each ends.
     private func terminals(_ folded: [String]) -> [(node: TrieNode, depth: Int)] {
         var node = root
@@ -312,17 +317,40 @@ public final class PathClassifier: @unchecked Sendable {
     /// - A project root inside another prefix (a cloud folder) keeps its `.env` (it wins ties), but a
     ///   project root inside `~/.aws` does not turn the credentials there into project-secrets/high
     ///   files.
+    ///
+    /// This is the category the path is named by. A path inside nested prefixes also belongs to the
+    /// other categories that accept it: `classifications` returns them all, and analysis and rules use
+    /// every one.
     public func classify(normalized path: String, truncated: Bool = false) -> Classification? {
+        memberships(path, truncated: truncated, all: false).first
+    }
+
+    /// Every category whose prefix contains the path and whose patterns accept it, each once at its
+    /// most severe prefix. The first is the category the path is named by (`classify`, whose owners
+    /// count as owners of the whole path); the others follow most severe first, then deepest prefix
+    /// first, then catalog order. An SSH key in a custom folder inside `~/.ssh` is ssh/critical and
+    /// custom/high: ssh rules keep covering it, and the custom category's rules cover it too. Nothing
+    /// is demoted or dropped, so a rule or an answer about one category never decides another.
+    public func classifications(normalized path: String, truncated: Bool = false) -> [Classification] {
+        memberships(path, truncated: truncated, all: true)
+    }
+
+    /// `classify` first; with `all`, then every other category that accepts the path (see
+    /// `classifications`).
+    private func memberships(_ path: String, truncated: Bool, all: Bool) -> [Classification] {
         let originalComponents = PathNormalizer.components(path)
         let folded = PathNormalizer.components(PathNormalizer.fold(path))
         // Case folding can change component content but never the "/" count (scalar split).
-        guard originalComponents.count == folded.count else { return nil }
+        guard originalComponents.count == folded.count else { return [] }
         let lastComponent = originalComponents.last ?? ""
         func better(_ a: Classification, _ b: Classification) -> Bool {
             if a.severity != b.severity { return a.severity > b.severity }
             return (categoryOrder[a.categoryID] ?? 0) < (categoryOrder[b.categoryID] ?? 0)
         }
 
+        var primary: Classification?
+        // Every acceptance, deepest prefix first (only with `all`).
+        var found: [(c: Classification, depth: Int)] = []
         // The best classification by prefixes that only add severity, so far (deeper ones first).
         var additive: (c: Classification, depth: Int, winsTies: Bool)?
         for (match, depth) in terminals(folded) {
@@ -340,6 +368,7 @@ public final class PathClassifier: @unchecked Sendable {
                 if let severity {
                     let c = Classification(categoryID: categoryID, severity: severity,
                                            prefix: match.terminalPath ?? "", relativePath: relative)
+                    if all { found.append((c, depth)) }
                     if let winsTies = addsSeverityOnly(spec, viaLink: match.viaLinkOnly.contains(categoryID)) {
                         if bestAdditive.map({ better(c, $0.c) }) ?? true { bestAdditive = (c, winsTies) }
                     } else if best.map({ better(c, $0) }) ?? true {
@@ -347,6 +376,7 @@ public final class PathClassifier: @unchecked Sendable {
                     }
                 }
             }
+            guard primary == nil else { continue }
             // A shallower one replaces a deeper one unless the deeper one is more severe (or as severe
             // and winning ties).
             if let b = bestAdditive {
@@ -356,12 +386,33 @@ public final class PathClassifier: @unchecked Sendable {
             if let best {
                 // On the same prefix, only a more severe one wins.
                 if let a = additive, a.c.severity > best.severity || (a.winsTies && a.depth > depth && a.c.severity == best.severity) {
-                    return a.c
+                    primary = a.c
+                } else {
+                    primary = best
                 }
-                return best
+                if !all { break }
             }
         }
-        return additive?.c
+        guard let first = primary ?? additive?.c else { return [] }
+        guard all, found.count > 1 else { return [first] }
+        // Each category once, at its most severe prefix (ties: the deepest, found first).
+        var others: [(c: Classification, depth: Int)] = []
+        var head = first
+        for f in found {
+            if f.c.categoryID == head.categoryID {
+                head.severity = max(head.severity, f.c.severity)
+            } else if let i = others.firstIndex(where: { $0.c.categoryID == f.c.categoryID }) {
+                if f.c.severity > others[i].c.severity { others[i] = f }
+            } else {
+                others.append(f)
+            }
+        }
+        others.sort { a, b in
+            if a.c.severity != b.c.severity { return a.c.severity > b.c.severity }
+            if a.depth != b.depth { return a.depth > b.depth }
+            return (categoryOrder[a.c.categoryID] ?? 0) < (categoryOrder[b.c.categoryID] ?? 0)
+        }
+        return [head] + others.map(\.c)
     }
 
     /// nil for a prefix that classifies what is below it whatever shallower prefixes say (a standard
