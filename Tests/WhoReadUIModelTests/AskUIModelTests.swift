@@ -300,6 +300,23 @@ final class AskUIModelTests: XCTestCase {
                        "The monitor stopped unexpectedly (stopped at 2026-10-05 01:00 while AUTH was subscribed). Enforcement stays as you set it.")
     }
 
+    func testAccessesTheKernelDroppedAreShown() {
+        // No event can show them (the kernel dropped the messages): the app says how many there were.
+        XCTAssertNil(model(status()).kernelDropsText)
+        var s = status()
+        s.sourceAuth = SourceAuthCounts(lateDenied: 4, defaultMutedPrograms: 3)
+        XCTAssertNil(model(s).kernelDropsText, "late denials are recorded as events")
+        s.sourceAuth = SourceAuthCounts(droppedDenied: 5)
+        let denied = model(s).kernelDropsText ?? ""
+        XCTAssertTrue(denied.contains("5 file accesses") && denied.contains("denied"), denied)
+        s.sourceAuth = SourceAuthCounts(droppedDenied: 1, droppedAllowed: 2)
+        let both = model(s, language: .zhHans).kernelDropsText ?? ""
+        XCTAssertTrue(both.contains("1 次") && both.contains("拒绝") && both.contains("2 次") && both.contains("放行"), both)
+        for key: L in [.authDroppedDeniedFormat, .authDroppedAllowedFormat] {
+            XCTAssertNotEqual(L10n.t(key, .en), L10n.t(key, .zhHans), "\(key) is translated")
+        }
+    }
+
     func testAWatchdogExitWhileOnlyMonitoringIsNotCalledAStopWhileBlocking() {
         // The daemon also reports a watchdog exit while it only monitored (file events were lost). The
         // app's wording around the daemon's note must not claim it could block then.
