@@ -346,6 +346,24 @@ final class QuestionsUIModelTests: XCTestCase {
         XCTAssertTrue(r.shouldReconnect(now: later + 2, refused: true))
     }
 
+    func testTask1VariantQuestionsConnectionIsCheckedBeforeAQuestionNeedsIt() throws {
+        // With no question open, nothing on the questions' connection shows whether the daemon took it
+        // for the app; the first "allow" would find out. One empty read of what was recorded tells.
+        XCTAssertEqual(SnapshotFetcher.isServedAsApp(signed), true)
+        XCTAssertEqual(SnapshotFetcher.isServedAsApp(unrecognised), false)
+        XCTAssertNil(SnapshotFetcher.isServedAsApp(FixedClient { _ in throw IPCError(.unavailable, "gone") }))
+        // That read returns nothing, whatever the live tail holds.
+        XCTAssertFalse(core.live.after(nil, limit: 10, includeBenign: true).isEmpty)
+        guard case .events(let none) = try signed.call(.live(afterID: Int64.max, limit: 0, includeBenign: true)) else { return XCTFail() }
+        XCTAssertTrue(none.isEmpty)
+        // It answers as "allow" would on the same connection.
+        let id = try openQuestion()
+        XCTAssertThrowsError(try unrecognised.call(.answerAsk(id: id, action: .allowOnce))) {
+            XCTAssertEqual(($0 as? IPCError)?.code, .notPermitted)
+        }
+        XCTAssertNoThrow(try signed.call(.answerAsk(id: id, action: .allowOnce)))
+    }
+
     // MARK: - task-1-variant: alerts first read late do not all notify at once
 
     func testTask1VariantAlertsReadAfterARefusalDoNotBurst() throws {
@@ -529,7 +547,8 @@ final class QuestionsUIModelTests: XCTestCase {
             for language in [Language.en, .zhHans] {
                 XCTAssertEqual(L10n.answerError(e, askID: id, action: action, language), L10n.t(.answerRuleLimit, language))
             }
-            XCTAssertTrue(L10n.answerError(e, askID: id, action: action, .en).contains("512"))
+            // The limit the text names is the daemon's.
+            XCTAssertTrue(L10n.answerError(e, askID: id, action: action, .en).contains("at most \(DaemonCore.maxRules) rules"))
             guard case .asks(let open) = SnapshotFetcher.fetchAsks(signed) else { return XCTFail() }
             XCTAssertEqual(open.map(\.id), [id], "still open")
             XCTAssertEqual(open.first?.holding, 1, "still holding the access")

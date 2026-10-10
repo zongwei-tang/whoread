@@ -151,6 +151,21 @@ public enum SnapshotFetcher {
         }
     }
 
+    /// Whether the daemon serves this connection as the signed app (or root): a read of what was
+    /// recorded that returns nothing (the live tail, none of it). Tried once on a new questions'
+    /// connection, so that one the daemon did not take for the app is reopened before a question needs
+    /// an "allow" on it. nil: no answer.
+    public static func isServedAsApp(_ client: IPCClient) -> Bool? {
+        do {
+            _ = try client.call(.live(afterID: Int64.max, limit: 0, includeBenign: false))
+            return true
+        } catch let e as IPCError where e.code == .notPermitted {
+            return false
+        } catch {
+            return nil
+        }
+    }
+
     /// Any error from a call as the IPCError the app shows.
     public static func ipcError(_ error: Error) -> IPCError {
         switch error {

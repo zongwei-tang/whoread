@@ -35,6 +35,8 @@ final class DaemonConnection {
     /// Reopen a connection the daemon did not take for the app (a wrong guess when it was accepted).
     @ObservationIgnored private var recovery = ConnectionRecovery()
     @ObservationIgnored private var askRecovery = ConnectionRecovery()
+    /// Whether the daemon serves the current questions' connection as the app (nil: not known yet).
+    @ObservationIgnored private var askClientServedAsApp: Bool?
     /// A full refresh was asked for while a poll was running: run it right after.
     @ObservationIgnored private var pendingFull = false
     /// Send `.hello` with the next poll: first poll, reconnect, new daemon instance.
@@ -138,10 +140,14 @@ final class DaemonConnection {
         guard !askInFlight else { return }
         askInFlight = true
         let client = askClient
+        let check = askClientServedAsApp == nil
         askQueue.async {
             let poll = SnapshotFetcher.fetchAsks(client)
+            // Once per connection, before any question needs an "allow" on it.
+            let served = check ? SnapshotFetcher.isServedAsApp(client) : nil
             Task { @MainActor in
                 self.askInFlight = false
+                if let served, client === self.askClient { self.askClientServedAsApp = served }
                 self.received(asks: poll)
             }
         }
@@ -151,13 +157,18 @@ final class DaemonConnection {
         model.apply(asks: poll)
         if case .failed(let e) = poll {
             // Banners stay: the questions may still be open, and a refused answer says so.
-            if e.code == .unavailable { reresolveService() }
+            if e.code == .unavailable {
+                // The next message may reach a new daemon instance: a new decision whether this is the app.
+                askClientServedAsApp = nil
+                reresolveService()
+            }
             // A reply this app cannot read: the next poll's handshake gives the reason in words.
             if e.code == .versionMismatch, model.versionProblem == nil { needsHello = true }
         } else {
             planAsks()
-            // Paths hidden: the daemon did not take this connection for the app.
-            if askRecovery.shouldReconnect(now: Date(), refused: model.asksPathsHidden) { reconnect(questions: true) }
+            // Paths hidden, or the check refused: the daemon did not take this connection for the app.
+            let refused = model.asksPathsHidden || askClientServedAsApp == false
+            if askRecovery.shouldReconnect(now: Date(), refused: refused) { reconnect(questions: true) }
         }
         armTimers()
     }
@@ -179,6 +190,7 @@ final class DaemonConnection {
         if questions {
             old = askClient
             askClient = fresh
+            askClientServedAsApp = nil
             askQueue.async { old.invalidate() }
         } else {
             old = client
@@ -201,9 +213,11 @@ final class DaemonConnection {
         }
         model.apply(snapshot)
         if model.daemonRestarts != daemonRestarts {
-            // Another daemon instance (maybe another version): handshake again.
+            // Another daemon instance (maybe another version): handshake again, and check again whether
+            // it takes the questions' connection for the app.
             daemonRestarts = model.daemonRestarts
             needsHello = true
+            askClientServedAsApp = nil
         }
         L10n.current = model.language
         if registeredLanguage != model.language {
