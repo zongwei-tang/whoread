@@ -613,6 +613,15 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "while read l; do echo \"$l\"; done < <(echo '\(R)') > ~/WhoReadTestVault/pgpass"])
         assertRedacted(["/bin/bash", "-c", "diff <(echo Hunter2pw) ~/WhoReadTestVault/n && curl -u admin:Hunter2pw https://x"],
                        ["/bin/bash", "-c", "diff <(echo \(R)) ~/WhoReadTestVault/n && curl -u admin:\(R) https://x"])
+        // As an option's value: the shell puts the pipe's path there (a client config with the password).
+        assertRedacted(["/bin/bash", "-c", "mysql --defaults-extra-file=<(printf '[client]\\npassword=%s\\n' Hunter2pw) -e 'select 1'"],
+                       ["/bin/bash", "-c", "mysql --defaults-extra-file=<(printf '\(R)' \(R)) -e 'select 1'"])
+        assertRedacted(["/bin/bash", "-c", "tool --password-file=<(echo Hunter2pw) --user bob"],
+                       ["/bin/bash", "-c", "tool --password-file=<(echo \(R)) --user bob"])
+        assertKept([
+            ["/bin/bash", "-c", "mysql --defaults-extra-file=<(cat my.cnf) -e 'select 1'"], ["/bin/bash", "-c", "ls --color=auto x=1"],
+            ["/bin/bash", "-c", "tool --input=<(sort a.txt) > out.txt"],
+        ])
     }
 
     /// A command line run by a shell, eval or ssh writes where that command's output goes:

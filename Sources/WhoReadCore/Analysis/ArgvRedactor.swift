@@ -486,9 +486,10 @@ public enum ArgvRedactor {
                 dataAt = i
                 continue
             }
-            // `cat <(echo pw)`: a command of its own whose output goes into a pipe.
-            if shellWord, t.hasPrefix("<(") || t.hasPrefix(">(") {
-                let name = String(t.drop { "<>(".contains($0) })
+            // `cat <(echo pw)`, `mysql --defaults-extra-file=<(printf …)`: a command of its own whose
+            // output goes into a pipe.
+            if shellWord, let open = processSubstitution(in: t) {
+                let name = String(t[open...].drop { "<>(".contains($0) })
                 resetCommand(at: i)
                 if !name.isEmpty { startProgram(basename(name), at: i) }
                 continue
@@ -1165,9 +1166,8 @@ public enum ArgvRedactor {
                                   redirect(in: attached)?.isStandardOutput == true || unquotedPipe(in: attached) != nil))
                     atCommand = false
                 }
-            } else if word.hasPrefix("<(") || word.hasPrefix(">(") || word.contains("$(") {
-                // `cat <(echo pw)`, `x$(echo`: a command inside an argument.
-                let start = word.hasPrefix("<(") || word.hasPrefix(">(") ? word.startIndex : word.range(of: "$(")!.lowerBound
+            } else if let start = processSubstitution(in: word) ?? word.range(of: "$(")?.lowerBound {
+                // `cat <(echo pw)`, `--config=<(echo pw)`, `x$(echo`: a command inside an argument.
                 program(String(openParentheses(word[start...], at: k)))
             }
             closeParentheses(closingParentheses(in: word), at: k)
@@ -1241,6 +1241,16 @@ public enum ArgvRedactor {
             if r.isStandardOutput { return true }
             if r.target.isEmpty && !r.duplicatesDescriptor { j += 1 }
         }
+    }
+
+    /// Where a process substitution starts in a word: at its front (`<(cmd`, `>(cmd`), or as the
+    /// value of an option or assignment (`--defaults-extra-file=<(printf`), which the shell also
+    /// replaces with the pipe's path.
+    static func processSubstitution(in word: String) -> String.Index? {
+        if word.hasPrefix("<(") || word.hasPrefix(">(") { return word.startIndex }
+        guard let eq = word.firstIndex(of: "=") else { return nil }
+        let value = word[word.index(after: eq)...]
+        return value.hasPrefix("<(") || value.hasPrefix(">(") ? value.startIndex : nil
     }
 
     /// The first pipe in a word outside quotes (`|` or `|&`; `||` is not one).
