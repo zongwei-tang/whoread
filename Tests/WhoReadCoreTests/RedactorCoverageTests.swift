@@ -68,6 +68,26 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "sqlplus -s /nolog <<EOF\nCONNECT system/\(R)@db\nALTER USER bob IDENTIFIED BY \(R);\nEOF"])
     }
 
+    /// Neo4j (`cypher-shell -p PW`, `neo4j-admin dbms set-initial-password PW`, Cypher's `ALTER CURRENT
+    /// USER SET PASSWORD FROM 'old' TO 'new'`) and SQL Server's `sp_addlogin` and `sp_password`, whose
+    /// passwords are positional arguments.
+    func testNeo4jAndSQLServerProcedurePasswords() {
+        assertRedacted(["cypher-shell", "-u", "neo4j", "-p", "Hunter2pw", "ALTER CURRENT USER SET PASSWORD FROM 'Old2pwxx' TO 'Hunter2pw'"],
+                       ["cypher-shell", "-u", "neo4j", "-p", R, "ALTER CURRENT USER SET PASSWORD FROM '\(R)' TO '\(R)'"],
+                       secrets: [secret, "Old2pwxx"])
+        assertRedacted(["neo4j-admin", "dbms", "set-initial-password", "Hunter2pw"], ["neo4j-admin", "dbms", "set-initial-password", R])
+        assertRedacted(["/bin/sh", "-c", "docker exec neo neo4j-admin set-initial-password --require-password-change Hunter2pw"],
+                       ["/bin/sh", "-c", "docker exec neo neo4j-admin set-initial-password --require-password-change \(R)"])
+        assertRedacted(["sqlcmd", "-Q", "EXEC sp_addlogin 'bob', 'Hunter2pw'"], ["sqlcmd", "-Q", "EXEC sp_addlogin 'bob', '\(R)'"])
+        assertRedacted(["sqlcmd", "-Q", "EXEC sp_password 'Old2pwxx', 'Hunter2pw', 'bob'"], ["sqlcmd", "-Q", "EXEC sp_password '\(R)', '\(R)', 'bob'"],
+                       secrets: [secret, "Old2pwxx"])
+        assertRedacted(["sqlcmd", "-Q", "EXEC sp_password NULL, 'Hunter2pw', 'sa'"], secrets: [secret])
+        assertKept([
+            ["cypher-shell", "-u", "neo4j", "MATCH (n) RETURN count(n)"], ["neo4j-admin", "dbms", "set-default-admin", "bob"],
+            ["sqlcmd", "-Q", "EXEC sp_who"], ["sqlcmd", "-Q", "EXEC sp_addlogin"], ["psql", "-c", "ALTER CURRENT_USER SET search_path = 'x'"],
+        ])
+    }
+
     /// Statements that connect with a password: an Oracle database link (`CONNECT TO user IDENTIFIED
     /// BY pw`, the password unquoted) and Db2's `CONNECT TO db USER u USING pw [NEW pw CONFIRM pw]`,
     /// also as the separate words of a `db2` command.

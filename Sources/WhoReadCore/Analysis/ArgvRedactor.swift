@@ -155,6 +155,8 @@ public enum ArgvRedactor {
         case "useradd", "usermod":
             // The password hash a new or changed account gets.
             return (["-p": .secret], [:])
+        case "cypher-shell":
+            return (["-p": .secret], [:])
         case "rabbitmqctl", "rabbitmq-diagnostics", "rabbitmq-plugins", "rabbitmq-queues", "rabbitmq-upgrade":
             return (["--erlang-cookie": .secret], [:])
         case "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport", "mongoimport":
@@ -753,7 +755,7 @@ public enum ArgvRedactor {
     static func positionalSecrets(_ program: String, tokens: [String], program p: Int, lineStarts: Set<Int>,
                                   shell: Bool) -> [Int: ValueRule] {
         let known: Set<String> = ["htpasswd", "htdbm", "mosquitto_passwd", "rabbitmqctl", "mysqladmin", "dscl", "networksetup",
-                                  "openssl", "db2"]
+                                  "openssl", "db2", "neo4j-admin", "neo4j"]
         guard known.contains(program) || redisClients.contains(program) || oracleClients.contains(program) else { return [:] }
         let words = commandWords(tokens, program: p, lineStarts: lineStarts, shell: shell)
         let text = words.map { word -> String in
@@ -811,6 +813,12 @@ public enum ArgvRedactor {
             for j in words.indices.dropLast() where ["password", "old-password"].contains(text[j].lowercased()) && !text[j + 1].hasPrefix("-") {
                 out[words[j + 1]] = .secret
             }
+        case "neo4j-admin", "neo4j":
+            // `neo4j-admin dbms set-initial-password [--require-password-change] PW` (also the 4.x
+            // `neo4j-admin set-initial-password PW`): the argument after the command's options.
+            guard let c = text.firstIndex(of: "set-initial-password"),
+                  let pw = text.indices.dropFirst(c + 1).first(where: { !text[$0].hasPrefix("-") }) else { break }
+            out[words[pw]] = .secret
         case "db2":
             // `db2 connect to DB user U using PW [new PW confirm PW]` (also `attach to NODE …`).
             let lower = text.map { $0.lowercased() }
@@ -1613,7 +1621,8 @@ public enum ArgvRedactor {
     /// is one literal here and read again when its own command line is redacted.
     static func redactSQLCredentials(_ s: String) -> String {
         let lower = s.lowercased()
-        guard lower.contains("password") || lower.contains("identified") || lower.contains("conn") || lower.contains("crypt") else { return s }
+        guard lower.contains("password") || lower.contains("identified") || lower.contains("conn") || lower.contains("crypt")
+                || lower.contains("sp_addlogin") else { return s }
         var scanner = SQLScanner(Array(s.unicodeScalars))
         // `CONNECT user/pw@db` is SQL*Plus, RMAN and DGMGRL syntax: it is read only where one of them
         // runs, so that `grep -rn connect src/net` keeps its path.
@@ -1831,7 +1840,7 @@ public enum ArgvRedactor {
         mutating func run() {
             var statement = Statement.none
             // Words left in which USER/ROLE/LOGIN/GROUP makes an ALTER or CREATE a user statement
-            // (`CREATE OR REPLACE USER`).
+            // (`CREATE OR REPLACE USER`, Cypher's `ALTER CURRENT USER`).
             var ddl = 0
             var previous = ""
             var setPasswordValueSeen = false
@@ -1857,7 +1866,7 @@ public enum ArgvRedactor {
                     defer { previous = k }
                     if ddl > 0 {
                         if ["USER", "ROLE", "LOGIN", "GROUP"].contains(k) { statement = .user; ddl = 0; continue }
-                        ddl = ["OR", "REPLACE"].contains(k) ? ddl - 1 : 0
+                        ddl = ["OR", "REPLACE", "CURRENT"].contains(k) ? ddl - 1 : 0
                         if ddl > 0 { continue }
                     }
                     // MySQL's `PASSWORD('x')` (`UPDATE mysql.user SET authentication_string =
@@ -1875,10 +1884,34 @@ public enum ArgvRedactor {
                         statement = .grant
                     case "PASSWORD", "OLD_PASSWORD":
                         if statement == .user || statement == .grant {
-                            value(equals: true)
+                            // Cypher: `ALTER CURRENT USER SET PASSWORD FROM 'old' TO 'new'`.
+                            if upper(peek()) == "FROM" {
+                                _ = next()
+                                value()
+                                if upper(peek()) == "TO" { _ = next(); value() }
+                            } else {
+                                value(equals: true)
+                            }
                         } else if previous == "SET" && k == "PASSWORD" {
                             statement = .setPassword
                             setPasswordValueSeen = false
+                        }
+                    case "SP_ADDLOGIN", "SP_PASSWORD":
+                        // SQL Server: `EXEC sp_addlogin 'login', 'pw'`, `EXEC sp_password 'old' | NULL,
+                        // 'new'`, by position (by name, `@passwd = 'pw'` is a setting like any other).
+                        let passwords: Set<Int> = k == "SP_ADDLOGIN" ? [1] : [0, 1]
+                        for argument in 0..<2 {
+                            let saved = i
+                            switch next(value: true) {
+                            case .literal(let r):
+                                if passwords.contains(argument) { secret(r) }
+                            case .word:
+                                break
+                            default:
+                                i = saved
+                            }
+                            guard i != saved, peek() == .punct(",") else { break }
+                            _ = next()
                         }
                     case "IDENTIFIED":
                         identified(bare: statement == .user || statement == .grant || statement == .connectTo)
