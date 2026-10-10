@@ -106,7 +106,8 @@ public final class PathClassifier: @unchecked Sendable {
                     // Links inside a dotfile directory (dotfile managers: ~/.aws/credentials -> ~/dotfiles/…):
                     // ES reports the resolved path, so the target must be monitored too.
                     if PathClassifier.walksForLinks(clean, homes: normalizer.homeDirectories) {
-                        for (link, target) in symlinks.symlinks(under: clean, maxDepth: 3, maxEntries: 2000) {
+                        for (link, target) in symlinks.symlinks(under: clean, maxDepth: PathClassifier.linkWalkMaxDepth,
+                                                                maxEntries: PathClassifier.linkWalkMaxEntries) {
                             let t = PathClassifier.stripTrailingSlash(normalizer.normalize(target))
                             if PathClassifier.isMonitorableTarget(t)
                                 && PathClassifier.isUsableLinkTarget(t, inside: clean, homes: normalizer.homeDirectories) {
@@ -152,6 +153,29 @@ public final class PathClassifier: @unchecked Sendable {
             let home = PathNormalizer.fold(stripTrailingSlash(h))
             return p.hasPrefix(home + "/.")
         }
+    }
+
+    /// How deep and how many entries a search for links goes in one directory (`SymlinkResolver`).
+    /// Agent and editor data nests deeper than dotfile managers do (`~/.codex/sessions/YYYY/MM/DD`);
+    /// the daemon also follows links that file events show, at any depth.
+    public static let linkWalkMaxDepth = 8
+    public static let linkWalkMaxEntries = 20_000
+
+    /// The directories `init` searches for links, in the order it does: every expanded catalog path
+    /// (project roots for that category) that `walksForLinks` accepts, each once.
+    public static func linkWalkDirectories(catalog: Catalog, normalizer: PathNormalizer, projectRoots: [String]) -> [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        for category in catalog.categories where category.enabled {
+            for pattern in category.kind == .projectRoots ? projectRoots : category.paths {
+                for expanded in normalizer.expand(pattern) {
+                    let clean = stripTrailingSlash(expanded)
+                    guard clean != "/" && !clean.isEmpty, walksForLinks(clean, homes: normalizer.homeDirectories) else { continue }
+                    if seen.insert(PathNormalizer.fold(clean)).inserted { out.append(clean) }
+                }
+            }
+        }
+        return out
     }
 
     /// A link target that may become a monitored prefix: never the root, a home, or a directory
