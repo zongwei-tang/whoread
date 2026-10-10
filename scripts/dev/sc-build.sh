@@ -8,11 +8,14 @@
 # next to its outputs, so this script works there. Outside such a sandbox `swift build` / `swift
 # test` remain the normal way.
 #
-# Usage: scripts/dev/sc-build.sh [build|test|all] [XCTest filter]
+# Usage: scripts/dev/sc-build.sh [build|test|all|app] [XCTest filter]
 #   build  libraries + whoreadd + whoread               (default)
 #   test   build, then build and run the four test bundles (optional filter, e.g. WhoReadCoreTests
 #          or WhoReadCoreTests.AnalyzerTests/testX)
-# Products: .build-sc/debug/{whoreadd,whoread,lib*.a,*.swiftmodule,*.xctest}
+#   app    build, then WhoRead.app (menu bar app, CLI helper, system extension) signed ad hoc and
+#          verified; [WHOREAD_ENTITLED=1] adds the restricted entitlements (SIP-disabled VM only).
+#          See scripts/dev/sc-app.sh.
+# Products: .build-sc/debug/{whoreadd,whoread,lib*.a,*.swiftmodule,*.xctest,WhoRead.app}
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MODE="${1:-build}"
@@ -127,5 +130,10 @@ runtests() {
 case "$MODE" in
   build) build ;;
   test|all) build; runtests ;;
-  *) echo "usage: $0 [build|test|all] [filter]" >&2; exit 2 ;;
+  app)
+    build
+    # shellcheck source=scripts/dev/sc-app.sh
+    . "$ROOT/scripts/dev/sc-app.sh"
+    app_bundle ;;
+  *) echo "usage: $0 [build|test|all|app] [filter]" >&2; exit 2 ;;
 esac
