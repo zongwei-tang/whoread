@@ -853,5 +853,30 @@ final class NativeLateDenialRecordingTests: XCTestCase {
         XCTAssertEqual(events.compactMap(\.ruleID), [], "no rule denied it")
         XCTAssertEqual(try core.store.alerts(AlertQuery()).count, 0, "nothing for the user to answer")
     }
+
+    func testALateDenialOfTwoCategoriesIsNotChargedToARuleAddedSince() throws {
+        // The daemon allowed the copy; a rule that denies one of its categories now (added meanwhile) did
+        // not decide it. Before, a denial of more than one category re-ran the rules per category, so the
+        // ssh event named that rule and raised a "blocked" alert.
+        let dir = TempDir()
+        var config = baseConfig(dir)
+        config.resolveOwners = false
+        let core = try DaemonCore(config: config, makeSource: { _ in FakeSource(canEnforce: true) })
+        try core.setRules([Rule(id: "no-ssh", enforce: true, target: .category("ssh"), subject: .anyNonOwner, access: .read, action: .deny)])
+        let cat = proc(602, "/opt/tools/cat", ppid: 1)
+        let copy = FileActivity(time: Date(timeIntervalSince1970: 1_760_000_102), operation: .clone, process: cat,
+                                targets: OperationSemantics.clone(source: "/Users/alice/.ssh/id_ed25519", destination: "/Users/alice/.aws/credentials"))
+        // The same access denied by the rule (for comparison): the rule is what blames ssh.
+        let ruled = core.analyzer.rules.evaluate(process: cat, chain: [], targets: core.analyzer.classify(copy).filter(\.isSensitive)
+            .map(\.evaluationTarget), enforcementActive: true, now: copy.time, consumeExceptions: false)
+        XCTAssertEqual(ruled.ruleID, "no-ssh")
+        core.pipeline.receive(.file(copy), context: .decided(NativeESSource.lateDenial))
+        core.writer.flush()
+        let events = try core.store.events(EventQuery(includeBenign: true))
+        XCTAssertEqual(Set(events.map(\.categoryID)), ["ssh", "aws"])
+        XCTAssertEqual(Set(events.map(\.decision)), [.denied])
+        XCTAssertEqual(events.compactMap(\.ruleID), [], "the kernel denied it, not the rule")
+        XCTAssertEqual(try core.store.alerts(AlertQuery()).count, 0)
+    }
 }
 #endif

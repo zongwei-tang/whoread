@@ -320,7 +320,9 @@ public final class Analyzer: @unchecked Sendable {
                         $0.category.id == asked ? d : RuleDecision(verdict: .deny, reason: .askUser, suppressAlert: true)
                     }
                 }
-            } else {
+            } else if d.reason != .deadlineMissed {
+                // (The kernel denied an access the daemon allowed: no rule did, and none is charged with
+                // it; every category keeps that decision.)
                 let own = groups.map {
                     rules.evaluate(process: process, chain: chain, targets: evaluationTargets($0), enforcementActive: true,
                                    now: time, consumeExceptions: false)
