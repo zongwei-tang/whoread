@@ -455,6 +455,28 @@ final class RedactorCoverageTests: XCTestCase {
         ])
     }
 
+    /// A variable set to a literal and then written (`PW='…'; echo "$PW" > FILE`, a heredoc body, a
+    /// here-string) holds what the file gets: its value is redacted with the data.
+    func testVariablesWrittenAsData() {
+        assertRedacted(["/bin/bash", "-c", "PW=\(pg)\necho \"machine h login bob password $PW\" >> ~/WhoReadTestVault/netrc"],
+                       ["/bin/bash", "-c", "PW=\(R)\necho \"\(R)\" >> ~/WhoReadTestVault/netrc"])
+        assertRedacted(["/bin/bash", "-c", "x=Hunter2pw; printf '%s\\n' \"$x\" | sudo tee ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "x=\(R); printf '\(R)' \"\(R)\" | sudo tee ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "export PW=Hunter2pw\ncat > ~/WhoReadTestVault/n <<EOF\npassword ${PW}\nEOF"],
+                       ["/bin/bash", "-c", "export PW=\(R)\ncat > ~/WhoReadTestVault/n <<EOF\n\(R) \(R)\nEOF"])
+        assertRedacted(["/bin/bash", "-c", "v=Hunter2pw; tee ~/WhoReadTestVault/n <<< \"$v\""],
+                       ["/bin/bash", "-c", "v=\(R); tee ~/WhoReadTestVault/n <<< \"\(R)\""])
+        assertRedacted(["/bin/bash", "-c", "local v=Hunter2pw; echo $v>~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "local v=\(R); echo \(R)>~/WhoReadTestVault/n"])
+        assertKept([
+            ["/bin/bash", "-c", "DIR=/tmp/x; ls \"$DIR\" > out.txt"], ["/bin/bash", "-c", "NAME=world; echo \"hello $NAME\""],
+            ["/bin/bash", "-c", "v=Hunter2pw; cat \"$v\" > out.txt"],
+        ])
+        // Single quotes do not expand; another variable is another value.
+        assertRedacted(["/bin/bash", "-c", "X=keep1; echo '$X' > f"], ["/bin/bash", "-c", "X=keep1; echo '\(R)' > f"], secrets: [])
+        assertRedacted(["/bin/bash", "-c", "X=keep1; echo $Y > f"], ["/bin/bash", "-c", "X=keep1; echo \(R) > f"], secrets: [])
+    }
+
     /// The command after `if`, `while`, `until`, `elif` and `!` is a program with its own rules.
     func testCommandsInConditionsKeepTheirFlagRules() {
         assertRedacted(["/bin/sh", "-c", "if curl -u admin:Hunter2pw https://x; then echo ok; fi"],

@@ -283,6 +283,15 @@ public enum ArgvRedactor {
         var execRedirect = outputRedirected
         // The command a container or remote tool runs (`docker exec db mysql …`), by where it starts.
         var launched: (start: Int, entrypoint: String?)?
+        // Shell variables set to a literal (`PW='x'`, `export PW=x`), by name: data that uses one
+        // (`echo "$PW" > FILE`, a heredoc body) is what the value is, so the value goes too.
+        var assignments: [String: [(index: Int, end: String)]] = [:]
+        func usedInData(_ word: String) {
+            guard shell, !assignments.isEmpty, word.contains("$"), !(isQuoted(word) && word.first == "'") else { return }
+            for name in variableReferences(in: word) {
+                for a in assignments[name] ?? [] { out[a.index] = name + "=" + placeholder + a.end }
+            }
+        }
         func resetCommand(at i: Int) {
             pending = nil; program = nil; expectProgram = true; skipNext = false
             flags = ([:], [:]); positional = [:]; launched = nil
@@ -324,6 +333,7 @@ public enum ArgvRedactor {
                         continue
                     }
                     if h.redactBody {
+                        usedInData(raw)
                         out[i] = placeholder
                         continue
                     }
@@ -374,9 +384,13 @@ public enum ArgvRedactor {
             }
             let (quote, t) = unquote(word)
             func emit(_ value: String) { out[i] = quote + value + quote + suffix }
+            if shell && quote.isEmpty && (expectProgram || declarations.contains(program ?? "")), let name = assignedVariable(t) {
+                assignments[name, default: []].append((i, suffix))
+            }
 
             // `for l in 'pw'; do echo "$l"; done > FILE`: the loop's words are what it writes.
             if groups.loopData.contains(i) {
+                usedInData(word)
                 emit(placeholder)
                 continue
             }
@@ -391,7 +405,7 @@ public enum ArgvRedactor {
             // A here-string is data, whatever it holds: `<<<'machine … password x'` is one word with
             // spaces in it.
             if shell && quote.isEmpty && t.hasPrefix("<<<") {
-                if t.count > 3 { emit("<<<" + placeholder) } else { hereString = true }
+                if t.count > 3 { usedInData(String(t.dropFirst(3))); emit("<<<" + placeholder) } else { hereString = true }
                 continue
             }
             let shellWord = shell && quote.isEmpty && !t.contains(where: \.isWhitespace)
@@ -403,6 +417,7 @@ public enum ArgvRedactor {
             }
             if hereString {
                 hereString = false
+                usedInData(word)
                 emit(placeholder)
                 continue
             }
@@ -415,6 +430,7 @@ public enum ArgvRedactor {
             }
             if shellWord, let r = redirect(in: t) {
                 if dataMode && !r.data.isEmpty {
+                    usedInData(r.data)
                     out[i] = placeholder + r.operatorAndTarget + suffix
                 } else if !r.data.isEmpty {
                     out[i] = redactToken(r.data) + r.operatorAndTarget + suffix
@@ -434,12 +450,14 @@ public enum ArgvRedactor {
                 // of its own.
                 if quote.isEmpty, let pipe = unquotedPipe(in: t) {
                     let before = String(t[..<pipe.lowerBound]), after = String(t[pipe.upperBound...])
+                    usedInData(before)
                     out[i] = (before.isEmpty ? "" : redactedData(before)) + String(t[pipe]) + redactToken(after) + suffix
                     resetCommand(at: i + 1)
                     if !after.isEmpty && !after.contains("=") { startProgram(basename(after), at: i) }
                     continue
                 }
                 // `(echo pw) > FILE`: the subshell's closing parenthesis is not data.
+                usedInData(word)
                 let parens = quote.isEmpty ? closingParentheses(in: t) : 0
                 emit(parens == t.count ? t : redactedData(String(t.dropLast(parens))) + String(repeating: ")", count: parens))
                 continue
@@ -784,6 +802,34 @@ public enum ArgvRedactor {
 
     /// Programs whose words are data (`echo pw > FILE`, `printf … | git credential approve`).
     static let dataWriters: Set<String> = ["echo", "printf", "print"]
+    /// Builtins that set shell variables (`export PW=x`).
+    static let declarations: Set<String> = ["export", "local", "declare", "typeset", "readonly"]
+
+    /// `NAME` for `NAME=value` with a literal value (not `$(…)`, `$OTHER` or a backquote: the value
+    /// is not in the command line then).
+    static func assignedVariable(_ t: String) -> String? {
+        guard let eq = t.firstIndex(of: "="), eq != t.startIndex else { return nil }
+        let name = t[..<eq], value = t[t.index(after: eq)...]
+        guard let first = name.first, first.isASCII && (first.isLetter || first == "_"),
+              name.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }),
+              !value.isEmpty, !value.contains("$"), !value.contains("`") else { return nil }
+        return String(name)
+    }
+
+    /// The variables a word expands: `$PW`, `${PW}`, `${PW:-x}`.
+    static func variableReferences(in word: String) -> Set<String> {
+        var names = Set<String>()
+        var rest = word[...]
+        while let dollar = rest.firstIndex(of: "$") {
+            var name = rest[rest.index(after: dollar)...]
+            if name.first == "{" { name = name.dropFirst() }
+            let identifier = name.prefix { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }
+            if let first = identifier.first, !first.isNumber { names.insert(String(identifier)) }
+            rest = name
+        }
+        return names
+    }
+
     /// Programs that run a command line given as one word, with their own output.
     static let commandLineRunners: Set<String> = ["sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "csh", "tcsh",
                                                   "eval", "su", "ssh"]
