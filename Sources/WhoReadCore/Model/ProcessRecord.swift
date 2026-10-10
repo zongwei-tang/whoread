@@ -141,7 +141,8 @@ public struct SigningCategory: RawRepresentable, Codable, Hashable, Sendable {
     public static let localSigning = SigningCategory(rawValue: 7)
     public static let rosetta = SigningCategory(rawValue: 8)
     public static let oopJIT = SigningCategory(rawValue: 9)
-    public static let none = SigningCategory(rawValue: 10)
+    /// ES_CS_VALIDATION_CATEGORY_NONE (named apart from Optional's `.none`).
+    public static let noPolicy = SigningCategory(rawValue: 10)
 }
 
 /// Code signing flags from `es_process_t.codesigning_flags`. Values from <kern/cs_blobs.h> (in the

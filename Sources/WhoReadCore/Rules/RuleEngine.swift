@@ -357,7 +357,7 @@ public final class RuleEngine: @unchecked Sendable {
 
                     switch c.rule.action {
                     case .deny:
-                        if case .anyNonOwner = c.rule.subject, process.isPlatformBinary, !c.rule.includePlatformBinaries {
+                        if case .anyNonOwner = c.rule.subject, process.isVerifiedPlatformBinary, !c.rule.includePlatformBinaries {
                             continue
                         }
                         // Exceptions carve the subject out of this rule.

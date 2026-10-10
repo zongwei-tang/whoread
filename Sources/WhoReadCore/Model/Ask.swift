@@ -87,9 +87,10 @@ public struct AskRequest: Codable, Hashable, Sendable, Identifiable {
 
 extension AskPolicy {
     /// An Apple program in a root-owned system location (a copied Apple binary keeps its platform flag,
-    /// so only the location tells a system tool from a copy).
+    /// so only the location tells a system tool from a copy), validated by the kernel as platform code
+    /// where it reports the category, and not controlled by another process.
     public static func isAppleProgram(_ p: ProcessRecord) -> Bool {
-        p.isPlatformBinary && IdentitySpec.isSystemLocation(p.executablePath)
+        p.isVerifiedPlatformBinary && IdentitySpec.isSystemLocation(p.executablePath)
     }
 
     /// What "trust Apple programs" covers, and when "allow all Apple programs" is offered: the leaf and

@@ -98,7 +98,19 @@ public struct IdentitySpec: Codable, Hashable, Sendable {
             if platformBinary && signingIDs.isEmpty && !IdentitySpec.isSystemLocation(p.executablePath) {
                 return false
             }
+            // Where the kernel reports a signing category it must be PLATFORM, and no other process may
+            // control the code (get-task-allow, debugged).
+            if platformBinary && !p.isVerifiedPlatformBinary { return false }
         }
+        // A pinned code identity stands for its vendor only for code signed for distribution (Developer
+        // ID, App Store) or Apple platform code: a debug or development build carries the same team and
+        // signing IDs, and another process of the user can control it. A pinned cdhash is the exact code,
+        // but not while someone else controls it. Location-only specs (Homebrew, npm) are not gated:
+        // anyone who can write there gets the same category as the honest tool.
+        if (!teamIDs.isEmpty || !signingIDs.isEmpty) && platformBinary != true {
+            if p.isPlatformBinary ? !p.isVerifiedPlatformBinary : !p.hasDistributionSignature { return false }
+        }
+        if !cdhashes.isEmpty && p.isControllable { return false }
         // A third-party bundle owner is only trusted once its team ID is known (resolved from
         // `codesign -dv` on this Mac): /Applications is writable by admin users.
         if !bundles.isEmpty && teamIDs.isEmpty && signingIDs.isEmpty && cdhashes.isEmpty && platformBinary != true

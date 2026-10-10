@@ -253,3 +253,112 @@ final class EsloggerIdentityFieldTests: XCTestCase {
         XCTAssertNotNil(target.codeSigningFlags)
     }
 }
+
+// MARK: - sdk-D4 / macos-2: code identity is trusted only for the kernel's signing categories
+
+final class SigningCategoryTrustTests: AncestryTestCase {
+    private let kubeConfig = "/Users/alice/.kube/config"
+    private let dockerTeam = "9BNSXJN65R"
+    private let noTrust = AskPolicy(enabled: true, trustApplePrograms: false, benignChain: false)
+
+    func signed(_ p: ProcessRecord, _ category: SigningCategory?, flags: UInt32? = nil) -> ProcessRecord {
+        var p = p
+        p.signingCategory = category
+        p.codeSigningFlags = flags
+        return p
+    }
+
+    /// The catalog with Docker Desktop's team resolved (what `resolve-owners` does on a Mac).
+    func dockerOwnedClassifier() -> PathClassifier {
+        var catalog = h.data.catalog
+        let i = catalog.categories.firstIndex { $0.id == "kube" }!
+        catalog.categories[i].owners = [IdentitySpec(label: "Docker Desktop", bundles: ["/Applications/Docker.app"], teamIDs: [dockerTeam])]
+        return PathClassifier(catalog: catalog, normalizer: h.normalizer)
+    }
+
+    func docker(_ category: SigningCategory?, flags: UInt32? = nil) -> ProcessRecord {
+        signed(proc(900, "/Applications/Docker.app/Contents/MacOS/com.docker.backend", ppid: 1, start: 0, signingID: "com.docker.docker",
+                    teamID: dockerTeam, originalPPID: 1), category, flags: flags)
+    }
+
+    /// A team-pinned third-party owner counts only when the kernel validated it as Developer ID or App
+    /// Store code that no other process controls. A development (Xcode debug) build of the same app has
+    /// the same team ID; so has an ad-hoc re-signed copy under local signing.
+    func testATeamPinnedOwnerNeedsADistributionSignature() {
+        let c = dockerOwnedClassifier()
+        XCTAssertTrue(c.isOwner(docker(nil), of: "kube"), "no category reported (older macOS): as before")
+        XCTAssertTrue(c.isOwner(docker(.developerID), of: "kube"))
+        XCTAssertTrue(c.isOwner(docker(.appStore), of: "kube"))
+        for category in [SigningCategory.development, .localSigning, .noPolicy, .invalid, .testFlight, .enterprise, .rosetta,
+                         SigningCategory(rawValue: 42)] {
+            XCTAssertFalse(c.isOwner(docker(category), of: "kube"), "category \(category.rawValue)")
+        }
+        XCTAssertFalse(c.isOwner(docker(.developerID, flags: CodeSigningFlag.getTaskAllow), of: "kube"), "get-task-allow")
+        XCTAssertFalse(c.isOwner(docker(.developerID, flags: CodeSigningFlag.debugged), of: "kube"), "debugged")
+        XCTAssertTrue(c.isOwner(docker(.developerID, flags: 0x2201_3b11), of: "kube"), "ordinary flags")
+    }
+
+    /// The same on the AUTH path: a development build reading the category is asked, not passed as owner.
+    func testADevelopmentBuildOfAnOwnerIsAskedNotPassed() {
+        let engine = RuleEngine(rules: [], classifier: dockerOwnedClassifier(), attributor: h.attributor)
+        func decide(_ p: ProcessRecord) -> RuleDecision {
+            let chain = h.tree.chain(for: p, at: at(1))
+            let c = h.classifier.classify(kubeConfig)!
+            return engine.evaluate(process: chain.first?.image ?? p, chain: chain,
+                                   targets: [EvaluationTarget(path: kubeConfig, access: .read,
+                                                             categories: [TargetCategory(id: c.categoryID, severity: c.severity)])],
+                                   enforcementActive: true, now: at(1), ask: noTrust)
+        }
+        XCTAssertEqual(decide(docker(.developerID)).reason, .owner)
+        var dev = docker(.development)
+        dev.pid = 901
+        XCTAssertEqual(decide(dev).verdict, .ask)
+    }
+
+    /// Apple trust ("trust Apple programs") and platform owners: the platform flag counts only when the
+    /// kernel's category is PLATFORM (where reported) and no other process controls the program.
+    func testApplePlatformTrustNeedsThePlatformCategory() {
+        let shell = h.spawn(P.terminal, P.zsh(500, parent: 100))
+        func cat(_ pid: Int32, _ category: SigningCategory?, flags: UInt32? = nil) -> ProcessRecord {
+            h.spawn(shell, signed(P.cat(pid, parent: 500), category, flags: flags), 1)
+        }
+        XCTAssertEqual(decide(cat(601, nil), 2).reason, .trustedApple)
+        XCTAssertEqual(decide(cat(602, .platform), 2).reason, .trustedApple)
+        XCTAssertEqual(decide(cat(603, .rosetta), 2).verdict, .ask)
+        XCTAssertEqual(decide(cat(604, .platform, flags: CodeSigningFlag.debugged), 2).verdict, .ask)
+
+        func ssh(_ pid: Int32, _ category: SigningCategory?, flags: UInt32? = nil) -> ProcessRecord {
+            signed(proc(pid, "/usr/bin/ssh", ppid: 500, start: 1, platform: true, signingID: "com.apple.openssh"), category, flags: flags)
+        }
+        XCTAssertTrue(h.classifier.isOwner(ssh(610, .platform), of: "ssh"))
+        XCTAssertFalse(h.classifier.isOwner(ssh(611, .noPolicy), of: "ssh"))
+        XCTAssertFalse(h.classifier.isOwner(ssh(612, .platform, flags: CodeSigningFlag.getTaskAllow), of: "ssh"))
+        XCTAssertEqual(decide(h.spawn(shell, ssh(613, .platform), 1), 2, ask: noTrust).reason, .owner)
+        XCTAssertEqual(decide(h.spawn(shell, ssh(614, .development), 1), 2, ask: noTrust).verdict, .ask)
+    }
+
+    /// The same gate for benign services, the never-block list and the platform exemption of
+    /// "any non-owner" deny rules.
+    func testBenignNeverBlockAndPlatformExemptionNeedThePlatformCategory() {
+        let worker = "/System/Library/Frameworks/CoreServices.framework/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared"
+        let benign = BenignClassifier(catalog: h.data.benign)
+        for (pid, category, expected) in [(705, nil, "spotlight"), (706, SigningCategory.platform, "spotlight"),
+                                          (707, SigningCategory.noPolicy, nil)] as [(Int32, SigningCategory?, String?)] {
+            let p = signed(proc(pid, worker, ppid: 1, start: 3, platform: true, originalPPID: 1), category)
+            XCTAssertEqual(benign.classify(chain: h.tree.chain(for: p, at: at(4))), expected, "category \(String(describing: category))")
+        }
+
+        let tccd = proc(80, "/System/Library/PrivateFrameworks/TCC.framework/Support/tccd", ppid: 1, platform: true)
+        XCTAssertTrue(NeverBlockList().contains(signed(tccd, .platform)))
+        XCTAssertTrue(NeverBlockList().contains(tccd))
+        XCTAssertFalse(NeverBlockList().contains(signed(tccd, .development)))
+
+        h.rules.replace(rules: [enforcedRule(RuleTemplates.denyNonOwnersSSH())])
+        let shell = h.spawn(P.terminal, P.zsh(500, parent: 100))
+        let off = AskPolicy.off
+        XCTAssertEqual(decide(h.spawn(shell, P.cat(620, parent: 500), 1), 2, ask: off).verdict, .allow,
+                       "platform binaries are exempt unless the rule opts in")
+        XCTAssertEqual(decide(h.spawn(shell, signed(P.cat(621, parent: 500), .platform, flags: CodeSigningFlag.debugged), 1), 2,
+                              ask: off).verdict, .deny, "not while another process controls it")
+    }
+}
