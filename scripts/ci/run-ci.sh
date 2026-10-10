@@ -36,7 +36,13 @@ stage() {
   else echo "## $name: FAIL (exit $rc, $((end - start)) s)" >> "$REPORT"; FAILED=1; fi
   {
     grep -E "$filter" "$log" | grep -v '^ *|' | awk '!seen[$0]++' | head -150
-    if [ $rc -ne 0 ]; then echo "--- last 40 lines"; tail -40 "$log"; fi
+    if [ $rc -ne 0 ]; then
+      # Compiler and linker diagnostics with their context (undefined symbols, the failing command).
+      echo "--- diagnostics"
+      grep -n -B3 -A15 -E "error:|Undefined symbols|ld: |duplicate symbol|clang: error|fatal error" "$log" | head -250
+      echo "--- last 40 lines"
+      tail -40 "$log"
+    fi
     echo
   } >> "$REPORT"
 }
