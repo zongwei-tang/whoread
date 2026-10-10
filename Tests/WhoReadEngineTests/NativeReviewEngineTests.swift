@@ -233,15 +233,17 @@ final class NativeWatchedHandlerReviewTests: XCTestCase {
     }
 
     func testStopWaitsLongerThanItsBoundedWaits() {
-        // closeAsks (held answers) and both gated deletes must fit, or the process exits before the
-        // clients are deleted by us.
+        // closeAsks (the broker, then the held answers) and both clients' drains and gated deletes must
+        // fit, or the process exits before the clients are deleted by us.
         XCTAssertGreaterThan(NativeESSource.stopWait, NativeESSource.stopWaitCovers)
-        XCTAssertEqual(NativeESSource.stopWaitCovers, NativeHeldMessages.denyAllWait + 2 * NativeESSource.deleteWait)
+        XCTAssertEqual(NativeESSource.stopWaitCovers,
+                       AskBroker.denyAllWait + NativeHeldMessages.denyAllWait + 2 * (NativeDrain.wait + NativeESSource.deleteWait))
     }
 }
 
 final class NativeGatedHandlerReviewTests: XCTestCase {
     func testAGatedHandlerKeepsDeleteWaitingAndRunsNothingAfterIt() {
+        // The process client's handler converts each message (record(), es_exec_arg) inside its gate.
         let gate = NativeClientGate()
         let message = UnsafeMutablePointer<es_message_t>.allocate(capacity: 1)
         defer { message.deallocate() }
@@ -250,8 +252,8 @@ final class NativeGatedHandlerReviewTests: XCTestCase {
         let release = DispatchSemaphore(value: 0)
         let lock = NSLock()
         var calls = 0
-        let handler = NativeESSource.gated(gate) { c, m in
-            XCTAssertEqual(c, client)
+        var delivered = 0
+        let handler = NativeESSource.converting(gate, { m -> Int in
             XCTAssertEqual(m, UnsafePointer(message))
             lock.lock()
             calls += 1
@@ -262,21 +264,68 @@ final class NativeGatedHandlerReviewTests: XCTestCase {
                 entered.signal()
                 release.wait()
             }
-        }
+            return 1
+        }, deliver: { value in
+            lock.lock()
+            delivered += value
+            lock.unlock()
+        })
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
             handler(client, UnsafePointer(message))
             done.signal()
         }
         entered.wait()
-        XCTAssertFalse(gate.close(waitAtMost: 0.05), "a handler still inside: es_delete_client must wait")
+        XCTAssertFalse(gate.close(waitAtMost: 0.05), "a conversion still inside: es_delete_client must wait")
         release.signal()
         XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
         XCTAssertTrue(gate.close(waitAtMost: 5))
         handler(client, UnsafePointer(message))
         lock.lock()
         XCTAssertEqual(calls, 1, "nothing runs once the client is being deleted")
+        XCTAssertEqual(delivered, 1, "and nothing is delivered")
         lock.unlock()
+    }
+
+    func testASlowDeliveryDoesNotKeepDeleteWaiting() {
+        // The process tree update (the sink) runs outside the gate: a slow analyzer must not make a delete
+        // give up on the client. Before, the whole handler ran inside the gate.
+        let gate = NativeClientGate()
+        let message = UnsafeMutablePointer<es_message_t>.allocate(capacity: 1)
+        defer { message.deallocate() }
+        let delivering = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let handler = NativeESSource.converting(gate, { _ in 7 }, deliver: { value in
+            XCTAssertEqual(value, 7)
+            delivering.signal()
+            release.wait()
+        })
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            handler(OpaquePointer(bitPattern: 0x10)!, UnsafePointer(message))
+            done.signal()
+        }
+        XCTAssertEqual(delivering.wait(timeout: .now() + 5), .success)
+        XCTAssertTrue(gate.close(waitAtMost: 0.5), "nothing is inside the gate while the sink runs")
+        release.signal()
+        XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
+    }
+
+    func testTheProcessHandlerIsTrackedForTheDrain() {
+        let activity = NativeHandlerActivity()
+        let message = UnsafeMutablePointer<es_message_t>.allocate(capacity: 1)
+        defer { message.deallocate() }
+        let inside = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let handler = NativeESSource.tracked(activity) { _, _ in
+            inside.signal()
+            release.wait()
+        }
+        DispatchQueue.global().async { handler(OpaquePointer(bitPattern: 0x10)!, UnsafePointer(message)) }
+        XCTAssertEqual(inside.wait(timeout: .now() + 5), .success)
+        XCTAssertFalse(activity.waitQuiet(0.01, waitAtMost: 0.1), "a call is running")
+        release.signal()
+        XCTAssertTrue(activity.waitQuiet(0.01, waitAtMost: 5))
     }
 }
 #endif

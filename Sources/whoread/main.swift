@@ -256,6 +256,7 @@ func cmdStatus(_ c: IPCClient) throws {
     out("  events:       \(s.counts.events) stored (+\(s.counts.aggregatedDays) days aggregated), \(s.eventsProcessed) since start, last \(Format.ago(s.lastEventAt))")
     out("  alerts:       \(s.unreadAlerts) unread of \(s.counts.alerts)")
     out("  coverage:     \(s.monitoredPrefixes) monitored prefixes, homes \(s.homeDirectories.map { DisplayText.escaped($0) }.joined(separator: ", "))")
+    if let m = s.sourceAuth?.mutedLine { out(m) }
     if let p = s.parser {
         out("  eslogger:     \(p.lines) lines read, \(p.events) events parsed, \(p.malformed) malformed, schema \(p.schemaVersions), kernel drops \(p.droppedByKernel)")
     }
@@ -279,6 +280,7 @@ func cmdStatus(_ c: IPCClient) throws {
         out("  WARNING: \(d) events dropped or merged by the source (analysis backlog full; denials were still enforced)")
     }
     if s.parser == nil, let k = s.sourceKernelDrops, k > 0 { out("  WARNING: \(k) events dropped by the kernel before the source saw them") }
+    s.sourceAuth?.warningLines.forEach(out)
     if let e = s.rulesLoadError { out("  WARNING: stored rules failed to load (\(DisplayText.escaped(e))); enforcement stays off") }
 }
 

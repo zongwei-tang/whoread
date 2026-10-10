@@ -309,10 +309,17 @@ public final class AskBroker: @unchecked Sendable {
         }
     }
 
-    /// Denies everything held (source stopping: ES clients are about to be deleted). Returns only
-    /// once every held access has been answered, including answers queued just before. The questions
-    /// stay listed.
-    public func denyAll() {
+    /// How long `denyAll` waits by default for the broker queue to answer.
+    public static let denyAllWait: TimeInterval = 1
+
+    /// Denies everything held (source stopping: ES clients are about to be deleted). The questions
+    /// stay listed. True once every held access has been answered, including answers queued just
+    /// before. False when the queue did not get to them within `timeout` (a response stuck on it): the
+    /// denials then run whenever it frees, and the caller must deny what it still holds by itself (the
+    /// native source does, before deleting its client). Never waits longer, so a stuck queue cannot
+    /// hold up a stop.
+    @discardableResult
+    public func denyAll(waitAtMost timeout: TimeInterval = AskBroker.denyAllWait) -> Bool {
         lock.lock()
         var held: [Held] = []
         for (id, var e) in entries where !e.held.isEmpty {
@@ -327,10 +334,15 @@ public final class AskBroker: @unchecked Sendable {
         let run = { for h in held { h.fire(.deny) } }
         if DispatchQueue.getSpecific(key: AskBroker.queueKey) == queueToken {
             run()
-        } else {
-            // Behind every response queued so far (resolve, timeouts in progress).
-            queue.sync(execute: run)
+            return true
         }
+        // Behind every response queued so far (resolve, timeouts in progress).
+        let done = DispatchSemaphore(value: 0)
+        queue.async {
+            run()
+            done.signal()
+        }
+        return done.wait(timeout: .now() + timeout) == .success
     }
 
     /// Forgets unanswered requests older than `requestLifetime` (maintenance).

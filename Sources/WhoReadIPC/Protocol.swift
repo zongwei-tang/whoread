@@ -166,6 +166,10 @@ public struct DaemonStatus: Codable, Sendable {
     /// ("fail-closed", "kill", "fail-open", "unknown"); nil for other sources or while no client exists.
     /// Optional, so older clients and daemons still decode the status.
     public var sourceDeadlineMissMode: String?
+    /// Native source: AUTH accesses the kernel denied although the daemon allowed them or never saw them,
+    /// and the default mute set. nil for other sources; optional, so older clients and daemons still
+    /// decode the status.
+    public var sourceAuth: SourceAuthCounts?
 
     public init(version: String, pid: Int32, startedAt: Date, mode: DaemonMode, source: SourceKind, sourceRunning: Bool,
                 sourceError: String?, sourceHint: String?, sourceCanEnforce: Bool, learning: Bool, learningEndsAt: Date,
@@ -175,7 +179,7 @@ public struct DaemonStatus: Codable, Sendable {
                 unreadAlerts: Int, lastEventAt: Date?, eventsProcessed: UInt64, writerDropped: UInt64, monitoredPrefixes: Int,
                 homeDirectories: [String], rulesLoadError: String? = nil, sourceDroppedEvents: UInt64? = nil,
                 sourceKernelDrops: UInt64? = nil, pendingAsks: Int? = nil, uncleanStop: String? = nil,
-                sourceDeadlineMissMode: String? = nil) {
+                sourceDeadlineMissMode: String? = nil, sourceAuth: SourceAuthCounts? = nil) {
         self.version = version
         self.pid = pid
         self.startedAt = startedAt
@@ -208,6 +212,55 @@ public struct DaemonStatus: Codable, Sendable {
         self.pendingAsks = pendingAsks
         self.uncleanStop = uncleanStop
         self.sourceDeadlineMissMode = sourceDeadlineMissMode
+        self.sourceAuth = sourceAuth
+    }
+}
+
+/// What the native source learns about AUTH outcomes from the kernel's side, since the daemon started.
+public struct SourceAuthCounts: Codable, Sendable, Equatable {
+    /// Accesses the daemon allowed but answered at or after their deadline, or whose answer es_respond
+    /// did not deliver, while the deadline miss mode was fail-closed (macOS 27): the kernel denied them.
+    /// Each is recorded as a denied event with no rule.
+    public var lateDenied: UInt64
+    /// AUTH messages the kernel dropped from a full queue (sequence-number gaps per event type) while
+    /// the mode was fail-closed: denied. Nothing is known about them, so they are not recorded as events.
+    public var droppedDenied: UInt64
+    /// The same in any other mode (kill before macOS 27): allowed.
+    public var droppedAllowed: UInt64
+    /// Program paths macOS mutes for the AUTH events WhoRead answers (the ES default mute set): their
+    /// accesses are recorded but can never be asked about or blocked. nil when it could not be read.
+    public var defaultMutedPrograms: Int?
+
+    public init(lateDenied: UInt64 = 0, droppedDenied: UInt64 = 0, droppedAllowed: UInt64 = 0, defaultMutedPrograms: Int? = nil) {
+        self.lateDenied = lateDenied
+        self.droppedDenied = droppedDenied
+        self.droppedAllowed = droppedAllowed
+        self.defaultMutedPrograms = defaultMutedPrograms
+    }
+
+    /// The `whoread status` line about the default mute set, if anything is muted.
+    public var mutedLine: String? {
+        guard let n = defaultMutedPrograms, n > 0 else { return nil }
+        return "  muted:        macOS sends no AUTH event for \(n) system program path\(n == 1 ? "" : "s") "
+            + "(its default mute set): seen, but never asked about or blocked"
+    }
+
+    /// The `whoread status` warnings for these counts (none when there is nothing to warn about).
+    public var warningLines: [String] {
+        var out: [String] = []
+        if lateDenied > 0 {
+            out.append("  WARNING: \(lateDenied) access\(lateDenied == 1 ? "" : "es") allowed too late: the answer missed the AUTH "
+                       + "deadline and the kernel denied \(lateDenied == 1 ? "it" : "them") (recorded as blocked, by no rule)")
+        }
+        if droppedDenied > 0 {
+            out.append("  WARNING: \(droppedDenied) AUTH access\(droppedDenied == 1 ? "" : "es") dropped by the kernel from a full "
+                       + "queue and denied (fail-closed); not recorded, nothing is known about \(droppedDenied == 1 ? "it" : "them")")
+        }
+        if droppedAllowed > 0 {
+            out.append("  WARNING: \(droppedAllowed) AUTH access\(droppedAllowed == 1 ? "" : "es") dropped by the kernel from a full "
+                       + "queue and allowed (kill mode); not recorded, nothing is known about \(droppedAllowed == 1 ? "it" : "them")")
+        }
+        return out
     }
 }
 
