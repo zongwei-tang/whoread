@@ -1928,8 +1928,9 @@ struct LinkFollowingResolver: SymlinkResolver {
             for d in level {
                 guard visited < maxEntries, let stream = opendir(d) else { continue }
                 // The file type comes with the entry on APFS and HFS+: no lstat per file. A directory
-                // is read whole (up to `maxEntries`) and sorted, so where the budget ends does not
-                // depend on the order the file system returns entries in.
+                // is read whole and sorted, so where the budget ends does not depend on the order the
+                // file system returns entries in; only one with more than `maxEntries` entries is read
+                // in part, in that order.
                 var entries: [(name: String, type: Int32)] = []
                 while entries.count < maxEntries, let e = readdir(stream) {
                     var entry = e.pointee
@@ -1970,7 +1971,9 @@ struct LinkFollowingResolver: SymlinkResolver {
 /// events showed since, at any depth (files-9). A classifier rebuild after a link change re-reads only
 /// these, so it costs in proportion to the number of links, not to the size of the directories. The
 /// full walk (at most `walkBudget` entries in all) runs at start, at every periodic rediscovery, and
-/// after events were lost. Thread-safe.
+/// after events were lost. A rebuild searches a directory again only when it was not searched yet or
+/// its real path changed since (it, or a directory above it, was made a link: what the walk found
+/// there is somewhere else now), sharing `walkBudget`. Thread-safe.
 final class LinkInventory: @unchecked Sendable {
     /// Entries one full walk looks at, over every directory (each also stops at
     /// PathClassifier.linkWalkMaxEntries).
@@ -1981,8 +1984,8 @@ final class LinkInventory: @unchecked Sendable {
     static let maxFollowed = 4096
 
     private let lock = NSLock()
-    /// Folded directory → the links the last walk found below it.
-    private var walked: [String: [String]] = [:]
+    /// Folded directory → the links the last walk found below it, and `roots(of:)` the directory then.
+    private var walked: [String: (links: [String], roots: [String])] = [:]
     /// Links file events showed, oldest first, with their folded paths.
     private var reported: [(path: String, key: String)] = []
     private var reportedKeys = Set<String>()
@@ -2001,19 +2004,20 @@ final class LinkInventory: @unchecked Sendable {
     /// Searches `dirs` again, in order, sharing `walkBudget`, and forgets what was found before. Call it
     /// outside the daemon's locks: it reads the disk.
     func walk(_ dirs: [String]) {
-        var found: [String: [String]] = [:]
+        var found: [String: (links: [String], roots: [String])] = [:]
         var roots: [String] = []
         var budget = LinkInventory.walkBudget
         for d in dirs {
             let key = PathNormalizer.fold(d)
             guard found[key] == nil else { continue }
+            let dirRoots = LinkInventory.roots(of: d)
             let r = LinkFollowingResolver.links(under: d, maxDepth: PathClassifier.linkWalkMaxDepth,
                                                 maxEntries: max(0, min(PathClassifier.linkWalkMaxEntries, budget)))
             budget -= r.visited
-            found[key] = r.links
-            roots += LinkInventory.roots(of: d)
+            found[key] = (r.links, dirRoots)
+            roots += dirRoots
         }
-        let foundKeys = Set(found.values.joined().map(PathNormalizer.fold))
+        let foundKeys = Set(found.values.flatMap(\.links).map(PathNormalizer.fold))
         lock.lock()
         walked = found
         self.roots = Set(roots)
@@ -2064,14 +2068,24 @@ final class LinkInventory: @unchecked Sendable {
     }
 
     /// The links below `dir` with their targets now, for the classifier: what the last walk found there
-    /// (walking it now if it has not been), plus reported links below it, below its real path too
-    /// (spelled below `dir`). Links that are gone are forgotten. At most `limit`.
+    /// (walking it now if it has not been, or if its real path changed since), plus reported links below
+    /// it, below its real path too (spelled below `dir`). Links that are gone are forgotten. At most
+    /// `limit`.
     func links(under dir: String, maxDepth: Int, maxEntries: Int, limit: Int,
                resolver: LinkFollowingResolver = LinkFollowingResolver()) -> [(link: String, target: String)] {
+        var budget = LinkInventory.walkBudget
+        return links(under: dir, maxDepth: maxDepth, maxEntries: maxEntries, limit: limit, resolver: resolver, budget: &budget)
+    }
+
+    /// `budget`: entries a walk of `dir` may still look at, shared by the directories one classifier
+    /// build walks. A walk it cut short is not kept (the next build walks again).
+    func links(under dir: String, maxDepth: Int, maxEntries: Int, limit: Int, resolver: LinkFollowingResolver,
+               budget: inout Int) -> [(link: String, target: String)] {
         guard limit > 0 else { return [] }
         let key = PathNormalizer.fold(dir)
+        let roots = LinkInventory.roots(of: dir)
         lock.lock()
-        let known = walked[key]
+        let known = walked[key].flatMap { $0.roots == roots ? $0.links : nil }
         let reportedNow = reported
         let readGeneration = generation
         lock.unlock()
@@ -2079,11 +2093,21 @@ final class LinkInventory: @unchecked Sendable {
             var st = stat()
             return lstat(p, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK
         }
-        let found = (known ?? LinkFollowingResolver.links(under: dir, maxDepth: maxDepth, maxEntries: maxEntries).links).filter(isLink)
+        var complete = true
+        let listed: [String]
+        if let known {
+            listed = known
+        } else {
+            let cap = max(0, min(maxEntries, budget))
+            let r = LinkFollowingResolver.links(under: dir, maxDepth: maxDepth, maxEntries: cap)
+            budget -= r.visited
+            complete = cap == maxEntries || r.visited < cap
+            listed = r.links
+        }
+        let found = listed.filter(isLink)
         var candidates = found
         var seen = Set(found.map(PathNormalizer.fold))
         var gone = Set<String>()
-        let roots = LinkInventory.roots(of: dir)
         let dirComponents = PathNormalizer.components(dir)
         for r in reportedNow {
             guard let root = roots.first(where: { r.key.hasPrefix($0 + "/") }) else { continue }
@@ -2095,7 +2119,7 @@ final class LinkInventory: @unchecked Sendable {
         }
         lock.lock()
         if generation == readGeneration {
-            walked[key] = found
+            if complete { walked[key] = (found, roots) }
             self.roots.formUnion(roots)
         }
         forgetReported { gone.contains($0.key) }
@@ -2128,11 +2152,13 @@ final class LinkInventory: @unchecked Sendable {
 }
 
 /// The resolver one classifier build uses: LinkFollowingResolver, with the links below each searched
-/// directory read from the LinkInventory, at most LinkInventory.maxFollowed in all.
+/// directory read from the LinkInventory, at most LinkInventory.maxFollowed in all. Directories the
+/// inventory walks anew share LinkInventory.walkBudget.
 final class InventoryLinkResolver: SymlinkResolver, @unchecked Sendable {
     private let inventory: LinkInventory
     private let resolver = LinkFollowingResolver()
     private var followed = 0
+    private var budget = LinkInventory.walkBudget
 
     init(_ inventory: LinkInventory) { self.inventory = inventory }
 
@@ -2140,7 +2166,7 @@ final class InventoryLinkResolver: SymlinkResolver, @unchecked Sendable {
 
     func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] {
         let found = inventory.links(under: dir, maxDepth: maxDepth, maxEntries: maxEntries,
-                                    limit: LinkInventory.maxFollowed - followed, resolver: resolver)
+                                    limit: LinkInventory.maxFollowed - followed, resolver: resolver, budget: &budget)
         followed += found.count
         return found
     }

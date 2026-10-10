@@ -814,6 +814,45 @@ final class LinkRediscoveryTests: XCTestCase {
         XCTAssertNotNil(waitFor(5) { core.analyzer.classifier.classify(self.real(target)) == nil })
     }
 
+    // files-9-walk-caps variant: a searched directory made a link to a folder that holds links (stow
+    // linking `~/.azure` to its package) kept what the last full search found there (nothing), so the
+    // links in the folder waited for the next one.
+    func testASearchedDirectoryMadeALinkIsSearchedAgain() throws {
+        let home = try makeHome()
+        let package = home + "/dotfiles/azure-pkg"
+        try FileManager.default.createDirectory(atPath: package + "/sub", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: home + "/vault", withIntermediateDirectories: true)
+        let target = home + "/vault/token.json"
+        XCTAssertTrue(touch(target))
+        XCTAssertEqual(symlink(target, package + "/sub/token.json"), 0)
+        try FileManager.default.removeItem(atPath: home + "/.azure")
+        let (core, _) = try linkCore(home: home)
+        let walks = core.linkInventory.fullWalks
+        XCTAssertNil(core.analyzer.classifier.classify(real(target)))
+        XCTAssertEqual(symlink(package, home + "/.azure"), 0)
+        operation(core, .create, OperationSemantics.create(path: home + "/.azure"))
+        XCTAssertNotNil(waitFor(5) { core.analyzer.classifier.classify(self.real(target))?.categoryID == "azure" })
+        XCTAssertEqual(core.linkInventory.fullWalks, walks, "only that directory was searched again")
+    }
+
+    // The same for a directory above searched ones (`~/.config` made a link): what is below them now
+    // is searched.
+    func testADirectoryAboveSearchedOnesMadeALinkIsSearchedAgain() throws {
+        let home = try makeHome()
+        let package = home + "/dotfiles/config-pkg"
+        try FileManager.default.createDirectory(atPath: package + "/gh", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: home + "/vault", withIntermediateDirectories: true)
+        let target = home + "/vault/hosts.yml"
+        XCTAssertTrue(touch(target))
+        XCTAssertEqual(symlink(target, package + "/gh/hosts.yml"), 0)
+        let (core, _) = try linkCore(home: home)
+        XCTAssertNil(core.analyzer.classifier.classify(real(target)))
+        try FileManager.default.removeItem(atPath: home + "/.config")
+        XCTAssertEqual(symlink(package, home + "/.config"), 0)
+        operation(core, .create, OperationSemantics.create(path: home + "/.config"))
+        XCTAssertNotNil(waitFor(5) { core.analyzer.classifier.classify(self.real(target))?.categoryID == "gh" })
+    }
+
     // The search goes breadth first in name order: the same tree gives the same links past the caps,
     // and the links nearest the top come first.
     func testTheSearchForLinksIsBreadthFirstAndStable() throws {
@@ -876,6 +915,31 @@ final class LinkRediscoveryTests: XCTestCase {
         let found = inventory.links(under: home + "/.azure", maxDepth: 8, maxEntries: 100, limit: 10)
         XCTAssertEqual(found.map(\.link), [deep + "/kept.json"])
         XCTAssertEqual(found.map(\.target), [real(target)])
+    }
+
+    // The directories one classifier build walks anew share one budget; a walk the budget cut short is
+    // not kept, so the next build walks that directory again.
+    func testWalksDuringARebuildShareABudget() throws {
+        let home = try makeHome()
+        let root = home + "/.azure"
+        try FileManager.default.createDirectory(atPath: root + "/a", withIntermediateDirectories: true)
+        for name in ["b", "c"] { XCTAssertTrue(touch(root + "/" + name)) }
+        XCTAssertTrue(touch(home + "/dotfiles/azure/x"))
+        XCTAssertEqual(symlink(home + "/dotfiles/azure/x", root + "/a/link"), 0)
+        let inventory = LinkInventory()
+        func links(_ budget: inout Int) -> [String] {
+            inventory.links(under: root, maxDepth: 8, maxEntries: 100, limit: 10, resolver: LinkFollowingResolver(), budget: &budget)
+                .map(\.link)
+        }
+        // The top level (a, b, c) uses it up.
+        var budget = 3
+        XCTAssertEqual(links(&budget), [])
+        XCTAssertEqual(budget, 0)
+        budget = 100
+        XCTAssertEqual(links(&budget), [root + "/a/link"], "walked again")
+        XCTAssertEqual(budget, 96)
+        XCTAssertEqual(links(&budget), [root + "/a/link"])
+        XCTAssertEqual(budget, 96, "kept: not walked again")
     }
 
     // files-9-dangling-missing-dir: a link whose target lies below directories that do not exist yet
