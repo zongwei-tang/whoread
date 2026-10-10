@@ -28,8 +28,8 @@ private func r1Core(_ dir: TempDir, _ configure: (inout DaemonConfiguration) -> 
     return (core, fake)
 }
 
-private func strictHandler(_ core: DaemonCore, verifier: PeerVerifier = NoAppPeers()) -> ServiceHandler {
-    let h = ServiceHandler(daemon: core, policy: .strict, peerVerifier: verifier)
+private func strictHandler(_ core: DaemonCore) -> ServiceHandler {
+    let h = ServiceHandler(daemon: core, policy: .strict)
     h.consoleUID = { 501 }
     return h
 }
@@ -169,14 +169,16 @@ final class PermissionRound1Tests: XCTestCase {
         let log = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
         XCTAssertTrue(log.contains("--app-requirement has no effect without --client-requirement"), log)
 
-        // isApp is only consulted for connections that passed the client requirement (a pid check alone is racy).
-        struct AlwaysApp: PeerVerifier { func isApp(pid: Int32) -> Bool { true } }
+        // The app is the connection the transport verified as the app (guard-1), and only one that also
+        // passed the client requirement; a pid is never looked up (it used to be: a pid check is racy).
         let dir2 = TempDir()
         let (core, _) = try r1Core(dir2)
-        let handler = strictHandler(core, verifier: AlwaysApp())
-        XCTAssertFalse(handler.isPrivileged(IPCPeer(pid: 99, euid: 501, isTrustedCode: false)))
-        XCTAssertTrue(handler.isPrivileged(IPCPeer(pid: 99, euid: 501, isTrustedCode: true)))
-        XCTAssertEqual(errorCode(handler.handle(.setPaused(true), peer: IPCPeer(pid: 99, euid: 501, isTrustedCode: false))), .notPermitted)
+        let handler = strictHandler(core)
+        XCTAssertFalse(handler.isPrivileged(IPCPeer(pid: 99, euid: 501, isTrustedCode: false, isApp: true)))
+        XCTAssertFalse(handler.isPrivileged(IPCPeer(pid: 99, euid: 501, isTrustedCode: true)))
+        XCTAssertTrue(handler.isPrivileged(IPCPeer(pid: 99, euid: 501, isTrustedCode: true, isApp: true)))
+        XCTAssertEqual(errorCode(handler.handle(.setPaused(true), peer: IPCPeer(pid: 99, euid: 501, isTrustedCode: false, isApp: true))),
+                       .notPermitted)
     }
 }
 

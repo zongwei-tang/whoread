@@ -4,7 +4,11 @@ import Foundation
 // XPC transport (macOS). One ObjC-visible method carries the JSON-encoded request and reply, so
 // the whole protocol stays in Swift `Codable` types and can be tested without XPC.
 //
-// NOT YET COMPILED: written on a Linux host. APIs used (NSXPCListener(machServiceName:),
+// Compiled on macOS, not yet run against the real Mach service. UNVERIFIED on device: that
+// setCodeSigningRequirement refuses each message whose sender does not meet the requirement (the
+// header says so). Inside the file-system sandbox this was built in, an in-process anonymous
+// connection was refused under every requirement, even `always`, so it could not be tested there.
+// APIs used (NSXPCListener(machServiceName:),
 // NSXPCConnection(machServiceName:options: .privileged), setCodeSigningRequirement (macOS 13+),
 // synchronousRemoteObjectProxyWithErrorHandler) are documented in
 // docs/research/eslogger-libproc-packaging.md §11.
@@ -31,14 +35,18 @@ private final class ExportedService: NSObject, WhoReadXPCProtocol {
 public final class XPCServer: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
     private let listener: NSXPCListener
     private let handler: IPCHandler
-    /// e.g. `anchor apple generic and certificate leaf[subject.OU] = "TEAMID"`. nil = accept any
-    /// local client (development only); the handler still sees the peer euid.
-    private let requirement: String?
+    /// Requirements per connection (client, or client and app); see `XPCPeerPolicy`.
+    private let policy: XPCPeerPolicy
+    /// A look at a new peer's pid: does it seem to be the app? Only picks which requirement XPC then
+    /// enforces on every message (XPCPeerPolicy); it never makes a peer the app by itself.
+    private let appCandidate: @Sendable (Int32) -> Bool
 
-    public init(machServiceName: String, handler: IPCHandler, codeSigningRequirement: String?) {
+    public init(machServiceName: String, handler: IPCHandler, policy: XPCPeerPolicy,
+                appCandidate: @escaping @Sendable (Int32) -> Bool = { _ in false }) {
         self.listener = NSXPCListener(machServiceName: machServiceName)
         self.handler = handler
-        self.requirement = codeSigningRequirement
+        self.policy = policy
+        self.appCandidate = appCandidate
         super.init()
         listener.delegate = self
     }
@@ -47,15 +55,15 @@ public final class XPCServer: NSObject, NSXPCListenerDelegate, @unchecked Sendab
     public func stop() { listener.invalidate() }
 
     public func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        var trusted = false
-        // Root may use any CLI build (`sudo whoread enforcement off` must always work; root can create
-        // the kill-switch file anyway). Everyone else must satisfy the requirement.
-        if let requirement, connection.effectiveUserIdentifier != 0 {
-            // The connection is invalidated by the system if the peer does not satisfy it.
-            connection.setCodeSigningRequirement(requirement)
-            trusted = true
+        let euid = connection.effectiveUserIdentifier
+        let pid = connection.processIdentifier
+        let looksLikeApp = euid != 0 && policy.recognisesApp && appCandidate(pid)
+        guard case .accept(let requirement, let peer) = policy.decide(euid: euid, pid: pid, looksLikeApp: looksLikeApp) else {
+            return false
         }
-        let peer = IPCPeer(pid: connection.processIdentifier, euid: connection.effectiveUserIdentifier, isTrustedCode: trusted)
+        // Before resume, and only once (a second call is an XPC error). The system checks every message
+        // on the connection against it and invalidates the connection on the first one that fails.
+        if let requirement { connection.setCodeSigningRequirement(requirement) }
         connection.exportedInterface = NSXPCInterface(with: WhoReadXPCProtocol.self)
         connection.exportedObject = ExportedService(handler: handler, peer: peer)
         connection.resume()

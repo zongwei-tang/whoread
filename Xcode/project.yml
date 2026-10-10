@@ -110,8 +110,12 @@ targets:
         NSSystemExtensionUsageDescription: "WhoRead watches who opens your sensitive files (SSH keys, cloud credentials, browser data) and can block access you did not allow."
         NSEndpointSecurityMachServiceName: "$(WHOREAD_MACH_SERVICE)"
         NSEndpointSecurityEarlyBoot: false
-        WhoReadClientRequirement: "anchor apple generic and certificate leaf[subject.OU] = \"$(DEVELOPMENT_TEAM)\""
-        WhoReadAppRequirement: "identifier \"$(BUNDLE_ID_PREFIX).whoread\" and anchor apple generic and certificate leaf[subject.OU] = \"$(DEVELOPMENT_TEAM)\""
+        # Who may connect over XPC (the embedded CLI and the app), and which peer is the app (the only
+        # non-root peer that may weaken protection). WHOREAD_SIGNING_ANCHOR differs per configuration
+        # (below). Keep `leaf[subject.OU] = "$(DEVELOPMENT_TEAM)"` as is: without a team it expands to
+        # `= ""`, and Extension/main.swift then drops both requirements.
+        WhoReadClientRequirement: '(identifier "$(BUNDLE_ID_PREFIX).whoread.cli" or identifier "$(BUNDLE_ID_PREFIX).whoread") and $(WHOREAD_SIGNING_ANCHOR) and certificate leaf[subject.OU] = "$(DEVELOPMENT_TEAM)"'
+        WhoReadAppRequirement: 'identifier "$(BUNDLE_ID_PREFIX).whoread" and $(WHOREAD_SIGNING_ANCHOR) and certificate leaf[subject.OU] = "$(DEVELOPMENT_TEAM)"'
     entitlements:
       path: ../Extension/WhoReadExtension.entitlements
       properties:
@@ -121,6 +125,17 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: "$(WHOREAD_EXTENSION_BUNDLE_ID)"
         PRODUCT_NAME: "$(WHOREAD_EXTENSION_BUNDLE_ID)"
         SKIP_INSTALL: YES
+        # Release (and any configuration but Debug): Developer ID only (Developer ID CA intermediate,
+        # Developer ID Application leaf), and never code that other processes of the user can control:
+        # no get-task-allow (debuggable), no library-validation or DYLD_* opt-outs (injectable).
+        # scripts/release/release.sh checks the exported app and CLI against the requirements.
+        WHOREAD_SIGNING_ANCHOR: 'anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and !(entitlement["com.apple.security.get-task-allow"] exists) and !(entitlement["com.apple.security.cs.disable-library-validation"] exists) and !(entitlement["com.apple.security.cs.allow-dyld-environment-variables"] exists)'
+      configs:
+        # Development path only: any certificate of the team, Apple Development included. Those builds
+        # carry get-task-allow, so code running as the user can debug the very app a Debug extension
+        # then trusts to weaken protection. Never rely on a Debug extension for protection.
+        Debug:
+          WHOREAD_SIGNING_ANCHOR: 'anchor apple generic'
 
   # Development daemon (LaunchDaemon form). Same engine; eslogger or native ES source.
   whoreadd:

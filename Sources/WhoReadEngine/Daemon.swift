@@ -32,22 +32,18 @@ public final class Daemon: @unchecked Sendable {
         }
         core = c
         lockFD = fd
-        var verifier: PeerVerifier = NoAppPeers()
-        #if os(macOS)
-        if let req = configuration.appRequirement { verifier = SignedAppPeerVerifier(requirement: req) }
-        #endif
         if configuration.appRequirement != nil && configuration.clientRequirement == nil {
             // isApp is only trusted for connections whose code signature was verified against the
             // client requirement; without one the app is never recognised.
             Log.error("--app-requirement has no effect without --client-requirement: the app cannot be recognised")
         }
-        handler = ServiceHandler(daemon: core, policy: configuration.permissive ? .permissive : .strict, peerVerifier: verifier)
+        handler = ServiceHandler(daemon: core, policy: configuration.permissive ? .permissive : .strict)
         killSwitch = KillSwitchWatcher(path: configuration.resolvedKillSwitchPath, state: core.enforcement)
     }
 
     /// Handler over a bare core (replay CLI, tests): permissive, no servers.
     public static func handlerForReplay(_ core: DaemonCore) -> ServiceHandler {
-        ServiceHandler(daemon: core, policy: .permissive, peerVerifier: NoAppPeers())
+        ServiceHandler(daemon: core, policy: .permissive)
     }
 
     /// flock on `daemon.lock` in the data directory; -1 for in-memory stores.
@@ -93,7 +89,11 @@ public final class Daemon: @unchecked Sendable {
         }
         #if os(macOS)
         if let name = config.machServiceName {
-            let server = XPCServer(machServiceName: name, handler: handler, codeSigningRequirement: config.clientRequirement)
+            let policy = XPCPeerPolicy(clientRequirement: config.clientRequirement, appRequirement: config.appRequirement)
+            policy.errors.forEach { Log.error($0) }
+            policy.warnings.forEach { Log.warning($0) }
+            let hint = policy.appCandidate
+            let server = XPCServer(machServiceName: name, handler: handler, policy: policy, appCandidate: { hint.isApp(pid: $0) })
             server.start()
             xpcServer = server
             // Lets the CLI find the service without flags (world-readable, not secret).

@@ -322,7 +322,7 @@ private func holdAccess(_ core: DaemonCore, _ a: FileActivity, _ answers: Answer
 }
 
 private func strictHandler(_ core: DaemonCore) -> ServiceHandler {
-    let h = ServiceHandler(daemon: core, policy: .strict, peerVerifier: NoAppPeers())
+    let h = ServiceHandler(daemon: core, policy: .strict)
     h.consoleUID = { 501 }
     return h
 }

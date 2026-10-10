@@ -19,7 +19,7 @@ private func r2Core(_ dir: TempDir, _ configure: (inout DaemonConfiguration) -> 
 }
 
 private func r2Handler(_ core: DaemonCore) -> ServiceHandler {
-    let h = ServiceHandler(daemon: core, policy: .strict, peerVerifier: NoAppPeers())
+    let h = ServiceHandler(daemon: core, policy: .strict)
     h.consoleUID = { 501 }
     return h
 }
@@ -198,7 +198,8 @@ final class RuleValidationRound2Tests: XCTestCase {
             XCTAssertEqual(r2Error(reply)?.code, .invalid, date)
         }
         XCTAssertFalse(core.rules.rules.contains { $0.id == "x1" })
-        let client = InProcessClient(handler: handler, peer: r2AgentPeer)
+        // The rule list is for root and the app (privacy-1: rules made from alerts name apps and files).
+        let client = InProcessClient(handler: handler, peer: r2RootPeer)
         XCTAssertNoThrow(try client.rules())
         XCTAssertNil(try r2Core(dir).status().rulesLoadError)
     }

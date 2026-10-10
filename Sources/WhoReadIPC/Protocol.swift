@@ -204,16 +204,21 @@ public struct DaemonStatus: Codable, Sendable {
 }
 
 /// Who is on the other end of a connection.
-public struct IPCPeer: Sendable {
+public struct IPCPeer: Sendable, Equatable {
+    /// For logs only: a pid names whoever holds it now, not the code that sent a message.
     public var pid: Int32?
     public var euid: UInt32?
     /// Passed the code-signing requirement (XPC) — i.e. it is our app or CLI.
     public var isTrustedCode: Bool
+    /// The WhoRead app: XPC checks every message on this connection, by the audit token it carries,
+    /// against the app's requirement (`XPCPeerPolicy`). Set only by the transport, never from a pid.
+    public var isApp: Bool
 
-    public init(pid: Int32?, euid: UInt32?, isTrustedCode: Bool) {
+    public init(pid: Int32?, euid: UInt32?, isTrustedCode: Bool, isApp: Bool = false) {
         self.pid = pid
         self.euid = euid
         self.isTrustedCode = isTrustedCode
+        self.isApp = isApp
     }
 
     public var isRoot: Bool { euid == 0 }
