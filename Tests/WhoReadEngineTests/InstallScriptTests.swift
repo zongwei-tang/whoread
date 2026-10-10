@@ -211,16 +211,74 @@ final class InstallScriptLogTests: XCTestCase {
         XCTAssertFalse(SafeFile.aclAllows(path: log, changing: false))
     }
 
-    // What an earlier install left (a 0755 directory and a 0644 log): kept, with its content, and
-    // closed to others.
-    func testEarlierInstallsLogIsKeptAndClosedToOthers() throws {
+    // An earlier install's 0755 directory with a log only its owner could read: both kept, the
+    // directory closed to others.
+    func testEarlierInstallsOwnerOnlyLogIsKept() throws {
         XCTAssertEqual(mkdir(logs, 0o755), 0)
         XCTAssertEqual(chmod(logs, 0o755), 0)
-        try SafeFile.replace(log, with: Data("earlier lines\n".utf8), mode: 0o644)
+        try SafeFile.replace(log, with: Data("earlier lines\n".utf8), mode: 0o600)
         let r = try privateLog()
         XCTAssertEqual(r.stderr, "")
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: log)), Data("earlier lines\n".utf8))
         XCTAssertEqual(entries(logs), ["whoreadd.log"])
+    }
+
+    // macos-3 variant: chmod 600 on an earlier install's 0644 log closes its path, not the file. A
+    // reader that opened it before keeps its descriptor, and launchd goes on appending to that very
+    // file, so every later alert reached that reader. The file is moved aside, with its lines.
+    func testEarlierLogOthersCouldReadIsMovedAsideNotReused() throws {
+        XCTAssertEqual(mkdir(logs, 0o755), 0)
+        XCTAssertEqual(chmod(logs, 0o755), 0)
+        try SafeFile.replace(log, with: Data("earlier lines\n".utf8), mode: 0o644)
+        let reader = try XCTUnwrap(FileHandle(forReadingAtPath: log))
+        defer { try? reader.close() }
+        XCTAssertEqual(reader.readDataToEndOfFile(), Data("earlier lines\n".utf8))
+
+        let r = try privateLog()
+        XCTAssertTrue(r.stderr.contains("readable by others (mode 644)"), r.stderr)
+        let aside = movedAside("whoreadd.log", in: logs)
+        XCTAssertEqual(aside.count, 1, "\(entries(logs))")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: logs + "/" + (aside.first ?? ""))),
+                       Data("earlier lines\n".utf8), "the earlier lines are kept")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: log)), Data())
+
+        // What the daemon writes next (launchd appends to the log path) does not reach that reader.
+        let fd = open(log, O_WRONLY | O_APPEND)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        XCTAssertEqual(Data("a new alert\n".utf8).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }, 12)
+        close(fd)
+        XCTAssertEqual(reader.readDataToEndOfFile(), Data())
+    }
+
+    // macos-3: whoever can add, remove or rename entries in the log directory's parent could swap the
+    // directory for a link after the checks, and launchd opens the log by path at every start. Then
+    // nothing is set up and nothing is moved: the parent has to be fixed first.
+    func testParentOthersCanChangeIsRefused() throws {
+        let call = #"private_log "$1" whoreadd.log "$(id -un)" "$(id -gn)""#
+        XCTAssertEqual(chmod(dir.url.path, 0o777), 0)
+        var r = try shell(call, [logs])
+        XCTAssertNotEqual(r.status, 0)
+        XCTAssertTrue(r.stderr.contains("\(dir.url.path) is writable by group or others"), r.stderr)
+        XCTAssertFalse(exists(logs))
+        // Sticky is not enough: others could make the directory before the script does.
+        XCTAssertEqual(chmod(dir.url.path, 0o1777), 0)
+        XCTAssertNotEqual(try shell(call, [logs]).status, 0)
+        XCTAssertFalse(exists(logs))
+
+        XCTAssertEqual(chmod(dir.url.path, 0o755), 0)
+        XCTAssertEqual(mkdir(logs, 0o755), 0)
+        try SafeFile.replace(log, with: Data("earlier lines\n".utf8), mode: 0o644)
+        try chmodACL(["+a", "everyone allow add_file,delete_child", dir.url.path])
+        r = try shell(call, [logs])
+        XCTAssertNotEqual(r.status, 0)
+        XCTAssertTrue(r.stderr.contains("access control list"), r.stderr)
+        XCTAssertEqual(entries(logs), ["whoreadd.log"], "nothing is moved aside")
+        XCTAssertEqual(mode(log), 0o644, "nothing is changed")
+
+        // An entry that only lets others list and read does not count.
+        try chmodACL(["-N", dir.url.path])
+        try chmodACL(["+a", "everyone allow list,search,readattr", dir.url.path])
+        try privateLog()
     }
 
     // macos-4 variant: `install -d` chowned an existing data directory to root (adopting whatever
