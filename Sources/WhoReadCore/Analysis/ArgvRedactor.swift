@@ -512,14 +512,16 @@ public enum ArgvRedactor {
                 if !name.isEmpty { startProgram(basename(name), at: i) }
                 continue
             }
-            if shellWord, let r = redirect(in: t) {
+            // A word of a command line holds whitespace only in quotes, which `redirect` skips:
+            // `echo 'a b'>FILE` and `sh -c '…'>FILE` have a redirect attached too.
+            if shell && quote.isEmpty, let r = redirect(in: t) {
                 if r.target.isEmpty && !r.duplicatesDescriptor { keepNext = true }
                 // `>FILE echo …`, and `echo>FILE …` (the program's own word).
                 if program == nil && r.isStandardOutput && !r.duplicatesDescriptor { outputBeforeProgram = true }
                 if program == "exec" && expectProgram && r.isStandardOutput && r.data.isEmpty { execRedirect = true }
                 if dataMode && !r.data.isEmpty {
                     usedInData(r.data)
-                    out[i] = (isExpansion(r.data) ? r.data : placeholder) + r.operatorAndTarget + suffix
+                    out[i] = (isExpansion(r.data) ? r.data : redactedData(r.data)) + r.operatorAndTarget + suffix
                     dataAt = i
                 }
                 guard !dataMode && !r.data.isEmpty else { continue }
@@ -991,7 +993,8 @@ public enum ArgvRedactor {
             if lineStarts.contains(k) { return false }
             if t == "|" || t == "|&" { return true }
             if isSeparator(t) { return false }
-            let word = !isQuoted(t) && !t.contains(where: \.isWhitespace)
+            // Whitespace in a word is quoted; `redirect` and `unquotedPipe` skip quotes (`'a b'>FILE`).
+            let word = !isQuoted(t)
             if word, let r = redirect(in: t), r.isStandardOutput { return true }
             if word, unquotedPipe(in: t) != nil { return true }
             if t.hasSuffix(";") && !t.hasSuffix("\\;") && !isQuoted(t) { return false }

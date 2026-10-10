@@ -749,9 +749,15 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "ldapsearch -x -w \(R)>out.ldif; security add-generic-password -a bob -s svc -w \(R)>/dev/null"])
         assertRedacted(["/bin/bash", "-c", "curl -u bob:Hunter2pw>out.html https://x"], ["/bin/bash", "-c", "curl -u bob:\(R)>out.html https://x"])
         assertRedacted(["/bin/bash", "-c", "echo>~/WhoReadTestVault/n Hunter2pw"], ["/bin/bash", "-c", "echo>~/WhoReadTestVault/n \(R)"])
+        // Also after a quoted word with spaces in it.
+        assertRedacted(["/bin/bash", "-c", "echo 'machine h login bob password Hunter2pw'>~/WhoReadTestVault/netrc"],
+                       ["/bin/bash", "-c", "echo '\(R)'>~/WhoReadTestVault/netrc"])
+        assertRedacted(["/bin/bash", "-c", "sh -c 'echo Hunter2pw'>~/WhoReadTestVault/n; eval 'sshpass -p Hunter2pw ssh h'>log"],
+                       ["/bin/bash", "-c", "sh -c 'echo \(R)'>~/WhoReadTestVault/n; eval 'sshpass -p \(R) ssh h'>log"])
         assertKept([
             ["/bin/bash", "-c", "ls -la>out.txt"], ["/bin/bash", "-c", "make>build.log 2>&1"], ["/bin/bash", "-c", "tool --key ~/.ssh/id_ed25519>f"],
             ["/bin/bash", "-c", "python3 run.py --token-file /etc/x>out"], ["/bin/bash", "-c", "sudo ls>out; time make>log"],
+            ["/bin/bash", "-c", "git commit -m 'fix the thing'>log.txt"], ["/bin/bash", "-c", "grep 'a b' file>out.txt; ls 'my dir'>out"],
         ])
         // In text that is not a command line (a connection string, YAML fed to a program), an operator
         // may be part of a value: what is glued to a redacted value goes with it.
