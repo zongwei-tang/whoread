@@ -611,15 +611,20 @@ public final class ProcessTree: @unchecked Sendable {
         // parent at all, so the chain does not reach launchd and grants no trust.
         guard let parentPID = ProcessTree.forkParentPID(of: p), parentPID != p.pid else { return nil }
         if parentPID == 1 { return launchdNode(at: time) }
-        let exact = ProcessTree.parentExecution(of: p)
+        var exact = ProcessTree.parentExecution(of: p)
 
         // A candidate that fits the start times but was only seen with other pidversions than the one
         // the source names: it may have exec'd since (an event not processed yet), or be an earlier
-        // holder of the pid whose exit was not seen yet. libproc tells which, below.
+        // holder of the pid whose exit was not seen yet. libproc tells which, below. Older candidates
+        // are not taken before it is settled.
         var unconfirmed: UInt64?
         if let ids = byPID[parentPID] {
-            if let exact, let id = ids.last(where: { $0 != selfID && nodes[$0]?.pidVersions.contains(exact.pidVersion) == true }) {
-                return id // the very execution the source names
+            if let token = exact, let id = ids.last(where: { $0 != selfID && nodes[$0]?.pidVersions.contains(token.pidVersion) == true }) {
+                // The very execution the source names, unless it started after the child: then the token
+                // names a later holder of the pid that adopted the child (a debugger that got the pid
+                // after the parent exited), and says nothing about who forked it.
+                if !ProcessTree.startedAfter(nodes[id]?.image.startTime, p.startTime) { return id }
+                exact = nil
             }
             for id in ids.reversed() where id != selfID {
                 guard let node = nodes[id] else { continue }
@@ -631,7 +636,7 @@ public final class ProcessTree: @unchecked Sendable {
                         continue // gone before the child existed
                     }
                 }
-                if exact != nil, !node.pidVersions.isEmpty {
+                if exact != nil, !node.pidVersions.isEmpty || unconfirmed != nil {
                     if unconfirmed == nil { unconfirmed = id }
                     continue
                 }

@@ -203,6 +203,41 @@ final class ParentTokenTests: AncestryTestCase {
         XCTAssertEqual(chain.nearestAgent, "claude-code")
         XCTAssertFalse(names(chain).contains("lldb"))
     }
+
+    /// The traced variant with a reused pid: the agent's shell (700) forked cat and exited; lldb, started
+    /// from the user's Terminal, got pid 700 next and attached to cat. cat's ppid and token now name
+    /// lldb, whose pid is cat's fork-time parent's. A process that started after cat did not fork it:
+    /// cat stays below the shell that did, with the agent above it.
+    func testATokenNamingALaterHolderOfTheParentPidIsNotTheParent() {
+        let sh = h.spawn(agentShell(), proc(700, "/bin/sh", ppid: 601, start: 3, platform: true, signingID: "com.apple.sh"), 3)
+        h.tree.exit(sh, at: at(5))
+        var lldb = proc(700, "/usr/bin/lldb", ppid: 530, start: 6, platform: true, signingID: "com.apple.lldb")
+        lldb.pidVersion = 7_100
+        lldb = h.spawn(h.spawn(P.terminal, P.zsh(530, parent: 100)), lldb, 6)
+        var cat = proc(701, "/bin/cat", ppid: 700, start: 4, platform: true, signingID: "com.apple.cat", originalPPID: 700)
+        cat.parentToken = token(700, lldb.pidVersion)
+
+        let chain = h.tree.chain(for: cat, at: at(7))
+        XCTAssertEqual(names(chain), ["cat", "sh", "zsh", "node", "zsh", "Terminal", "launchd"])
+        XCTAssertEqual(chain.nearestAgent, "claude-code")
+        XCTAssertEqual(decide(cat, 7).verdict, .deny)
+    }
+
+    /// Once the newest candidate for the parent pid is unconfirmed (the token names a pidversion it was
+    /// not seen with: the agent's shell exec'd again, not processed yet), an older candidate is not taken
+    /// instead. Here that is the user's zsh from the snapshot, which held pid 700 before and whose exit
+    /// was lost. libproc cannot say: the newest candidate stands, as it would without a token.
+    func testAnOlderCandidateIsNotTakenBeforeAnUnconfirmedNewerOne() {
+        h.tree.parentResolver = { _ in nil }
+        h.tree.seed([ProcessRecord(pid: 700, ppid: 500, executablePath: "/bin/zsh", isPlatformBinary: true, startTime: at(0))], at: at(0))
+        let sh = h.spawn(agentShell(), proc(700, "/bin/sh", ppid: 601, start: 3, platform: true, signingID: "com.apple.sh"), 3)
+        var cat = proc(701, "/bin/cat", ppid: 700, start: 4, platform: true, signingID: "com.apple.cat")
+        cat.parentToken = token(700, sh.pidVersion.map { $0 + 1 })
+
+        let chain = h.tree.chain(for: cat, at: at(5))
+        XCTAssertEqual(names(chain), ["cat", "sh", "zsh", "node", "zsh", "Terminal", "launchd"])
+        XCTAssertEqual(chain.nearestAgent, "claude-code")
+    }
 }
 
 // MARK: - sdk-D3/D4: what the eslogger parser reads from a process
