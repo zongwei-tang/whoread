@@ -548,6 +548,63 @@ final class NestedPrefixMembershipTests: XCTestCase {
         XCTAssertEqual(moved.filter(\.viaAncestor).count, 0)
         XCTAssertEqual(moved.first?.categories.map(\.id), ["ssh", "custom"])
     }
+
+    // A category that names a path only because a link leads into its folder lends its owners
+    // nothing: anyone can make such a link (`ln -s ~/.codex/sessions ~/.aws/s`), and that must not
+    // make the aws CLI an owner of the Codex sessions it then reads.
+    func testALinkOnlyNamingCategoryLendsNoOwners() throws {
+        let links = MapSymlinkResolver([:], links: [
+            "/Users/alice/.aws": [(link: "/Users/alice/.aws/s", target: "/Users/alice/.codex/sessions")],
+        ])
+        let session = "/Users/alice/.codex/sessions/2026/10/10/rollout.jsonl"
+        let c = PathClassifier(catalog: try catalog(), normalizer: PathNormalizer(homeDirectories: [home]), symlinks: links)
+        XCTAssertEqual(c.classifications(session).map(\.categoryID), ["aws", "codex-sessions"])
+        XCTAssertEqual(c.classifications(session).map(\.severity), [.critical, .high])
+        XCTAssertEqual(c.classifications(session).map(\.viaLink), [true, false])
+        XCTAssertEqual(c.classifications("/Users/alice/.aws/credentials").map(\.viaLink), [false])
+
+        let denySessions = enforced(Rule(id: "deny-nonowner-codex", target: .category("codex-sessions"), subject: .anyNonOwner,
+                                         access: .read, action: .deny, includePlatformBinaries: true))
+        let h = try harness(rules: [denySessions], symlinks: links, learningDays: 0)
+        let aws = userShell(h, proc(502, "/usr/local/aws-cli/aws", ppid: 500))
+        XCTAssertEqual(authDecision(h, read(aws, session)).verdict, .deny)
+        XCTAssertEqual(authDecision(h, read(aws, session)).ruleID, "deny-nonowner-codex")
+        h.rules.replace(rules: [])
+        let asked = authDecision(h, read(aws, session), ask: ask)
+        XCTAssertEqual(asked.verdict, .ask)
+        XCTAssertEqual(asked.askKey?.categoryID, "codex-sessions")
+        let out = h.analyzer.handle(.file(read(aws, session)))
+        XCTAssertEqual(out.events.first { $0.categoryID == "aws" }?.isOwner, true)
+        XCTAssertEqual(out.events.first { $0.categoryID == "codex-sessions" }?.isOwner, false)
+        XCTAssertEqual(out.alerts.map(\.alert.categoryID), ["codex-sessions"])
+    }
+
+    // An owner of the naming category also owns a category without owners of its own that holds the
+    // path, whatever its severity: ssh reading its medium config in a home on an external volume is
+    // not asked about the volume. (A plain folder stands in for the volumes prefix here.)
+    func testOwnersOfTheNamingCategoryOwnAnOwnerlessCategoryAroundIt() throws {
+        var cat = try catalog()
+        let i = try XCTUnwrap(cat.categories.firstIndex { $0.id == "volumes" })
+        cat.categories[i].paths = ["/Users/ext/"]
+        let bob = "/Users/ext/bob"
+        let config = bob + "/.ssh/config"
+        let c = PathClassifier(catalog: cat, normalizer: PathNormalizer(homeDirectories: [home, bob]))
+        XCTAssertEqual(c.classifications(config).map(\.categoryID), ["ssh", "volumes"])
+        XCTAssertEqual(c.classifications(config).map(\.severity), [.medium, .high])
+
+        let h = try harness(catalog: cat, homes: [home, bob], learningDays: 0)
+        let ssh = userShell(h, proc(502, "/usr/bin/ssh", ppid: 500, platform: true, signingID: "com.apple.openssh"))
+        let d = authDecision(h, read(ssh, config), ask: ask)
+        XCTAssertEqual(d.verdict, .allow)
+        XCTAssertEqual(d.reason, .owner)
+        let out = h.analyzer.handle(.file(read(ssh, config)))
+        XCTAssertEqual(out.events.map(\.categoryID), ["ssh", "volumes"])
+        XCTAssertTrue(out.events.allSatisfy(\.isOwner))
+        XCTAssertTrue(out.alerts.isEmpty)
+        // Anyone else is asked, about the volume first (the more severe).
+        let gcat = userShell(h, proc(503, "/opt/homebrew/bin/gcat", ppid: 500))
+        XCTAssertEqual(authDecision(h, read(gcat, config), ask: ask).askKey?.categoryID, "volumes")
+    }
 }
 
 // MARK: - files-3 / files-7: the eslogger prefilter

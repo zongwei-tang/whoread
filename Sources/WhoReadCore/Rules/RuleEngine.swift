@@ -17,9 +17,8 @@ public struct EvaluationTarget: Sendable {
     public var access: AccessSet
     public var categories: [TargetCategory]
     /// The category the path is named by (`PathClassifier.classify`), when it is one of several the
-    /// path belongs to: its owners count as owners for the path's other categories that are not more
-    /// severe (Chrome reading its cookies in a home on an external volume is their owner there too,
-    /// but ssh is no owner of a critical aws file that a medium ssh path was added inside).
+    /// path belongs to and not only through a link (`PathClassifier.ownerLendingCategory`): its owners
+    /// count as owners for some of the path's other categories (`PathClassifier.owns`).
     public var primaryCategory: TargetCategory?
 
     public init(path: String, access: AccessSet, categories: [TargetCategory], primaryCategory: TargetCategory? = nil) {
@@ -255,12 +254,10 @@ public final class RuleEngine: @unchecked Sendable {
             ownerCache[category] = v
             return v
         }
-        /// Owner of a category of a path: of the category itself, or of the category the path is
-        /// named by when that one is at least as severe.
+        /// Owner of a category of a path: of the category itself, or, for some, of the category the path
+        /// is named by (PathClassifier.owns).
         func owns(_ category: TargetCategory, _ primary: TargetCategory?) -> Bool {
-            if isOwner(category.id) { return true }
-            guard let primary, primary.id != category.id, primary.severity >= category.severity else { return false }
-            return isOwner(primary.id)
+            classifier.owns(category, namedBy: primary, isOwner: isOwner)
         }
         var responsibleCache: ResponsibleEntity??
         func responsible() -> ResponsibleEntity? {

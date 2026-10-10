@@ -174,7 +174,7 @@ public final class Analyzer: @unchecked Sendable {
             guard carriesOut || carriesIn else {
                 let categories = direct.map { TargetCategory(id: $0.categoryID, severity: $0.severity) }
                 out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false,
-                                            primaryCategory: categories.count > 1 ? categories[0] : nil))
+                                            primaryCategory: PathClassifier.ownerLendingCategory(direct, judgedAs: categories)))
                 continue
             }
             // The other end of the move. A move or clone puts the source's object at the destination,
@@ -232,7 +232,7 @@ public final class Analyzer: @unchecked Sendable {
             }
             if !categories.isEmpty || carried.isEmpty {
                 out.append(ClassifiedTarget(target: t, path: path, categories: categories, viaAncestor: false,
-                                            primaryCategory: categories.count > 1 ? categories[0] : nil))
+                                            primaryCategory: PathClassifier.ownerLendingCategory(direct, judgedAs: categories)))
             }
             if !carried.isEmpty {
                 // Most severe first (a question names the first of the most severe), else as found.
@@ -260,8 +260,8 @@ public final class Analyzer: @unchecked Sendable {
         public var path: String
         public var categories: [TargetCategory]
         public var viaAncestor: Bool
-        /// The category the path is named by (the first of `categories`), when it belongs to several:
-        /// its owners own the others that are not more severe (see EvaluationTarget).
+        /// The category the path is named by (the first of `categories`), when it belongs to several and
+        /// not only through a link: its owners own some of the others (PathClassifier.owns).
         public var primaryCategory: TargetCategory? = nil
         public var isSensitive: Bool { !categories.isEmpty }
         public var evaluationTarget: EvaluationTarget {
@@ -378,12 +378,12 @@ public final class Analyzer: @unchecked Sendable {
             let primary = group.targets[0]
             let access = group.targets.reduce(AccessSet()) { $0.union($1.target.access) }
             let other = classified.first { $0.path != primary.path }?.path
-            // As in the rules: an owner of the category each path is named by owns its other categories
-            // that are not more severe.
-            let isOwner = classifier.isOwner(process, of: group.category.id) || group.targets.allSatisfy { t in
-                guard let primary = t.primaryCategory, let own = t.categories.first(where: { $0.id == group.category.id }),
-                      primary.severity >= own.severity else { return false }
-                return classifier.isOwner(process, of: primary.id)
+            // As in the rules (PathClassifier.owns): an owner of the category a path is named by may own
+            // its other categories too.
+            let isOwner = group.targets.allSatisfy { t in
+                classifier.owns(t.categories.first { $0.id == group.category.id } ?? group.category, namedBy: t.primaryCategory) {
+                    classifier.isOwner(process, of: $0)
+                }
             }
             var event = AnalyzedEvent(
                 id: takeEventID(), time: time, operation: activity.operation, access: access,

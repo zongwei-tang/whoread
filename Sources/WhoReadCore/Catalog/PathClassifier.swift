@@ -8,6 +8,9 @@ public struct Classification: Hashable, Sendable, Codable {
     public var prefix: String
     /// Path below the prefix; empty when the path is the prefix itself.
     public var relativePath: String
+    /// The path is in the category only because a link the classifier followed leads into one of its
+    /// prefixes (anyone can make such a link in their own files).
+    public var viaLink: Bool = false
 }
 
 /// One concrete prefix after `~` expansion and symlink resolution.
@@ -350,11 +353,12 @@ public final class PathClassifier: @unchecked Sendable {
     }
 
     /// Every category whose prefix contains the path and whose patterns accept it, each once at its
-    /// most severe prefix. The first is the category the path is named by (`classify`; its owners also
-    /// own the others that are not more severe, see EvaluationTarget); the others follow most severe
-    /// first, then deepest prefix first, then catalog order. An SSH key in a custom folder inside `~/.ssh` is ssh/critical and
-    /// custom/high: ssh rules keep covering it, and the custom category's rules cover it too. Nothing
-    /// is demoted or dropped, so a rule or an answer about one category never decides another.
+    /// most severe prefix. The first is the category the path is named by (`classify`; unless it is
+    /// there only through a link, its owners also own some of the others, see `owns`); the others
+    /// follow most severe first, then deepest prefix first, then catalog order. An SSH key in a custom
+    /// folder inside `~/.ssh` is ssh/critical and custom/high: ssh rules keep covering it, and the
+    /// custom category's rules cover it too. Nothing is demoted or dropped, so a rule or an answer
+    /// about one category never decides another.
     public func classifications(normalized path: String, truncated: Bool = false) -> [Classification] {
         memberships(path, truncated: truncated, all: true)
     }
@@ -390,10 +394,11 @@ public final class PathClassifier: @unchecked Sendable {
                     severity = effectiveSeverity(spec: spec, relativePath: relative, fileName: lastComponent)
                 }
                 if let severity {
+                    let viaLink = match.viaLinkOnly.contains(categoryID)
                     let c = Classification(categoryID: categoryID, severity: severity,
-                                           prefix: match.terminalPath ?? "", relativePath: relative)
+                                           prefix: match.terminalPath ?? "", relativePath: relative, viaLink: viaLink)
                     if all { found.append((c, depth)) }
-                    if let winsTies = addsSeverityOnly(spec, viaLink: match.viaLinkOnly.contains(categoryID)) {
+                    if let winsTies = addsSeverityOnly(spec, viaLink: viaLink) {
                         if bestAdditive.map({ better(c, $0.c) }) ?? true { bestAdditive = (c, winsTies) }
                     } else if best.map({ better(c, $0) }) ?? true {
                         best = c
@@ -419,14 +424,18 @@ public final class PathClassifier: @unchecked Sendable {
         }
         guard let first = primary ?? additive?.c else { return [] }
         guard all, found.count > 1 else { return [first] }
-        // Each category once, at its most severe prefix (ties: the deepest, found first).
+        // Each category once, at its most severe prefix (ties: the deepest, found first); through a
+        // link only when no prefix of the category itself holds the path.
         var others: [(c: Classification, depth: Int)] = []
         var head = first
         for f in found {
             if f.c.categoryID == head.categoryID {
                 head.severity = max(head.severity, f.c.severity)
+                head.viaLink = head.viaLink && f.c.viaLink
             } else if let i = others.firstIndex(where: { $0.c.categoryID == f.c.categoryID }) {
+                let viaLink = others[i].c.viaLink && f.c.viaLink
                 if f.c.severity > others[i].c.severity { others[i] = f }
+                others[i].c.viaLink = viaLink
             } else {
                 others.append(f)
             }
@@ -553,6 +562,29 @@ public final class PathClassifier: @unchecked Sendable {
     public func isOwner(_ process: ProcessRecord, of categoryID: String) -> Bool {
         guard let spec = categoriesByID[categoryID] else { return false }
         return spec.owners.contains { $0.matches(process) }
+    }
+
+    /// Whether an owner counts as owner of `category` for a path that belongs to it: an owner of the
+    /// category itself, or of the category the path is named by (`naming`, see
+    /// `ownerLendingCategory`) when `category` is not more severe or has no owners of its own (a
+    /// volume, a custom folder). Chrome reading its cookies in a home on an external volume, or ssh its
+    /// config there, owns the volume side too; ssh is no owner of a critical aws file that a medium ssh
+    /// path was added inside. `isOwner` takes a category ID (callers cache it).
+    public func owns(_ category: TargetCategory, namedBy naming: TargetCategory?, isOwner: (String) -> Bool) -> Bool {
+        if isOwner(category.id) { return true }
+        guard let naming, naming.id != category.id else { return false }
+        guard naming.severity >= category.severity || categoriesByID[category.id]?.owners.isEmpty == true else { return false }
+        return isOwner(naming.id)
+    }
+
+    /// The category whose owners `owns` lets own a path's other categories: the first of
+    /// `classifications` (at the severity the caller judges it), when the path has several and is not
+    /// in that one only through a link. Anyone can link a folder of theirs into `~/.aws`; that must not
+    /// make the aws CLI an owner of what is in that folder.
+    public static func ownerLendingCategory(_ classifications: [Classification], judgedAs categories: [TargetCategory]) -> TargetCategory? {
+        guard categories.count > 1, let first = classifications.first, !first.viaLink,
+              categories[0].id == first.categoryID else { return nil }
+        return categories[0]
     }
 
     /// Which categories have at least one existing prefix. `exists` is injected (the daemon stats as root).
