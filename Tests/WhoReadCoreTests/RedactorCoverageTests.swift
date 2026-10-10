@@ -462,6 +462,19 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", #"bash -c "mysql -e \"CREATE USER 'bob'@'%' IDENTIFIED BY '\#(R)'\"""#])
         assertRedacted(["/bin/sh", "-c", #"echo 'machine h login bob password '\''Hunter2pw'\''' >> ~/WhoReadTestVault/netrc"#],
                        ["/bin/sh", "-c", #"echo "\#(R)" >> ~/WhoReadTestVault/netrc"#])
+        // Quoted pieces joined into one word are read as the one value the shell makes of them. A word
+        // that did not start with a quote is written back without the quotes it was read in.
+        assertRedacted(["/bin/sh", "-c", #"psql -c 'ALTER USER bob PASSWORD '"'Hunter2pw'""#],
+                       ["/bin/sh", "-c", #"psql -c "ALTER USER bob PASSWORD '\#(R)'""#])
+        assertRedacted(["/bin/sh", "-c", "tool password:'Hun''ter2pw'"], ["/bin/sh", "-c", "tool password:\(R)"], secrets: ["Hun", "ter2pw"])
+        assertRedacted(["/bin/sh", "-c", "PGPASSWORD='Hun'\"ter2pw\" psql -h db"], ["/bin/sh", "-c", "PGPASSWORD=\(R) psql -h db"],
+                       secrets: ["Hun", "ter2pw"])
+        assertRedacted(["/bin/sh", "-c", "git clone https://bob:'Hun''ter2pw'@host/x"], ["/bin/sh", "-c", "git clone https://bob:\(R)@host/x"],
+                       secrets: ["Hun", "ter2pw"])
+        // A single quote in a URL's password: the URL ends at the quote it is in, not at that one.
+        assertRedacted(["/bin/sh", "-c", #"git clone 'https://bob:Hun'\''ter2pw@host/x' && ls"#],
+                       ["/bin/sh", "-c", #"git clone "https://bob:\#(R)@host/x" && ls"#], secrets: ["Hun", "ter2pw"])
+        assertRedacted(["git", "clone", "https://bob:Hun'ter2pw@host/x"], ["git", "clone", "https://bob:\(R)@host/x"], secrets: ["Hun", "ter2pw"])
         // Nothing to redact: the word stays as written.
         assertKept([
             ["/bin/zsh", "-c", #"git commit -m 'Don'\''t log the password' && git log -1"#],
@@ -469,6 +482,10 @@ final class RedactorCoverageTests: XCTestCase {
             ["/bin/zsh", "-c", "-l", zsh + #"'grep -rn '\''IDENTIFIED BY'\'' migrations/'"# + tail],
             ["/bin/bash", "-c", #"echo $'a\tb' && ls"#],
             ["/bin/sh", "-c", "psql -c \"SELECT 'it''s'\""],
+            ["/bin/sh", "-c", "echo 'a'\"b\" && ls"], ["/bin/sh", "-c", "ls \"$HOME\"'/x y'"],
+            ["/bin/sh", "-c", "git commit -m 'fix: '\"quote\"' handling'"], ["/bin/sh", "-c", "grep -rn 'pass''word' src/"],
+            ["/bin/sh", "-c", "curl -s 'https://api.example.com/x?q=a' -H 'Accept: application/json'"],
+            ["/bin/sh", "-c", "echo \"see 'https://example.com/@user' and 'mail@example.com'\""],
         ])
     }
 

@@ -1341,7 +1341,7 @@ public enum ArgvRedactor {
         if !asWritten.isEmpty {
             let normalized = tokenize(read).filter { !$0.isSpace }.map(\.text)
             if normalized.count == words.count {
-                for (k, word) in asWritten where redacted[k] == normalized[k] { redacted[k] = word }
+                for (k, word) in asWritten { redacted[k] = redacted[k] == normalized[k] ? word : withoutNeedlessQuotes(redacted[k], written: word) }
             }
         }
         var rest = redacted[...]
@@ -1360,6 +1360,20 @@ public enum ArgvRedactor {
         t = redactSQLCredentials(t)
         t = replace(appleScriptPassword, in: t, with: "$1" + placeholder + "$3")
         return replace(escapedAppleScriptPassword, in: t, with: "$1" + placeholder + "$3")
+    }
+
+    /// `"--password=‹redacted›"` → `--password=‹redacted›`: a word read in double quotes (`doubleQuoted`)
+    /// and then redacted loses them again where nothing in it needs them, unless it was `written`
+    /// starting with a quote.
+    static func withoutNeedlessQuotes(_ word: String, written: String) -> String {
+        guard !(written.first == "'" || written.first == "\"" || written.hasPrefix("$'")) else { return word }
+        var core = word[...]
+        var end = ""
+        while core.hasSuffix(";") { core = core.dropLast(); end += ";" }
+        guard core.count > 2, core.first == "\"", core.last == "\"" else { return word }
+        let inner = core.dropFirst().dropLast()
+        guard inner.first != "=", inner.allSatisfy({ !$0.isASCII || $0.isLetter || $0.isNumber || "-_.,:/@%+=".contains($0) }) else { return word }
+        return String(inner) + end
     }
 
     /// `word` as one double-quoted word with the same value (`"it's"`), when it puts a single quote
@@ -1834,7 +1848,9 @@ public enum ArgvRedactor {
     /// //bob:pw@nas/share`): the password goes. Userinfo ends at the last "@" of the authority, so an
     /// "@" in the password or an e-mail address as the user name is covered. A "/" in the password
     /// ends the authority early (`bob:pa/ss@host`): when the authority is `user:x` with no "@" and x
-    /// is not a port, the password runs to the last "@" before the host's path.
+    /// is not a port, the password runs to the last "@" before the host's path. A URL right after a
+    /// quote ends at the same quote; elsewhere a quote is part of it (`bob:it's@host`, as the shell
+    /// reads `'https://bob:it'\''s@host'`).
     static func redactUserinfo(_ s: String) -> String {
         guard s.contains("//"), s.contains("@") else { return s }
         let u = Array(s.unicodeScalars)
@@ -1843,10 +1859,17 @@ public enum ArgvRedactor {
         while k + 1 < u.count {
             guard u[k] == "/", u[k + 1] == "/" else { k += 1; continue }
             defer { k += 2 }
-            let bare = k == 0 || " \t\n='\"(".unicodeScalars.contains(u[k - 1])
-            guard bare || hasScheme(u, colon: k - 1) else { continue }
+            let start: Int
+            if k == 0 || " \t\n='\"(".unicodeScalars.contains(u[k - 1]) {
+                start = k
+            } else if let scheme = schemeStart(u, colon: k - 1) {
+                start = scheme
+            } else {
+                continue
+            }
+            let opener = start > 0 && (u[start - 1] == "'" || u[start - 1] == "\"") ? u[start - 1] : nil
             var end = k + 2
-            while end < u.count && !u[end].properties.isWhitespace && u[end] != "'" && u[end] != "\"" { end += 1 }
+            while end < u.count && !u[end].properties.isWhitespace && u[end] != opener { end += 1 }
             if let r = userinfoPassword(u, from: k + 2, to: end), secrets.last.map({ $0.upperBound <= r.lowerBound }) ?? true {
                 secrets.append(r)
             }
@@ -1857,14 +1880,15 @@ public enum ArgvRedactor {
         return String(String.UnicodeScalarView(out))
     }
 
-    /// `https:` ends at `colon`: a letter, then letters, digits, `+`, `-` or `.`.
-    static func hasScheme(_ u: [Unicode.Scalar], colon: Int) -> Bool {
-        guard colon > 0, u[colon] == ":" else { return false }
+    /// Where the scheme that ends at `colon` starts (`https:`: a letter, then letters, digits, `+`,
+    /// `-` or `.`); nil when there is none.
+    static func schemeStart(_ u: [Unicode.Scalar], colon: Int) -> Int? {
+        guard colon > 0, u[colon] == ":" else { return nil }
         var j = colon
         while j > 0, u[j - 1].isASCII, u[j - 1].properties.isAlphabetic || ("0"..."9").contains(u[j - 1]) || "+-.".unicodeScalars.contains(u[j - 1]) {
             j -= 1
         }
-        return j < colon && u[j].properties.isAlphabetic
+        return j < colon && u[j].properties.isAlphabetic ? j : nil
     }
 
     /// The password of the URL whose authority starts at `start` (after `//`) and that ends at `end`.
@@ -2076,10 +2100,11 @@ public enum ArgvRedactor {
     }
 
     /// The value the shell gives a quoted word where `unquote` would leave quotes inside: a single
-    /// quote written into a single-quoted word (`'it'\''s'`, `'it'"'"'s'` → `it's`), and ANSI-C
+    /// quote written into a single-quoted word (`'it'\''s'`, `'it'"'"'s'` → `it's`), quoted pieces
+    /// joined (`password:'a''b'`, `'ALTER … '"'x'"` → `password:ab`, `ALTER … 'x'`), and ANSI-C
     /// quoting (`$'it\'s'`). Nil for any other word, which the rules read as written (`--password='x'`,
-    /// `{"k":"v"}`, SQL's `'bob'@'%'`), and for one with shell syntax outside quotes (`'a'\''b'>FILE`)
-    /// or an unclosed quote.
+    /// `{"k":"v"}`, SQL's `'bob'@'%'` and `'a''b'`), and for one with shell syntax outside quotes
+    /// (`'a'\''b'>FILE`) or an unclosed quote.
     static func shellWordValue(_ word: String) -> String? {
         guard word.contains("'") else { return nil }
         let chars = Array(word)
@@ -2135,7 +2160,9 @@ public enum ArgvRedactor {
             }
             parts += 1
         }
-        return (isQuoted(word) && parts > 1 && value.contains("'")) || ansi ? value : nil
+        // A word in one pair of single quotes with `''` inside (`'it''s'`) is left as written: in SQL
+        // text (`psql -c "… PASSWORD 'a''b'"`) that is an escaped quote, not two shell words joined.
+        return (parts > 1 && (!isQuoted(word) || value.contains("'"))) || ansi ? value : nil
     }
 
     static func basename(_ s: String) -> String {
