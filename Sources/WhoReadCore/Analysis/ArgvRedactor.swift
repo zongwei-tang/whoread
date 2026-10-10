@@ -494,7 +494,15 @@ public enum ArgvRedactor {
                         continue
                     }
                 }
-                if !t.contains("="), let rule = flags.next[t] ?? genericRule(forFlag: t) {
+                if !t.contains("="), let colon = t.firstIndex(of: ":") {
+                    // `-Password:x`, `--password:x` (PowerShell and .NET style). The name before the
+                    // colon decides (`--auth-type:bearer` names no secret).
+                    let flag = String(t[..<colon])
+                    if let rule = genericRule(forFlag: flag) {
+                        emit(flag + ":" + apply(rule, to: String(t[t.index(after: colon)...]), depth: depth))
+                        continue
+                    }
+                } else if !t.contains("="), let rule = flags.next[t] ?? genericRule(forFlag: t) {
                     pending = rule
                     continue
                 }
@@ -1529,12 +1537,14 @@ public enum ArgvRedactor {
         if t.hasPrefix("pass:") && t.count > 5 { return "pass:" + placeholder }
         let t = redactQuotedPairs(t)
         // `password:PW`, `api_key:PW`: a secret's name, a colon and the value in one word (`tmux -t
-        // session:1`, `read:packages` and `HEAD:password.txt` are not: only strong names count).
+        // session:1`, `read:packages` and `HEAD:password.txt` are not: only strong names count). Also
+        // a Windows-style option (`sqlpackage /TargetPassword:PW`).
         if let colon = t.firstIndex(of: ":"), colon != t.startIndex {
             let key = String(t[..<colon]), value = String(t[t.index(after: colon)...])
-            if !value.isEmpty, !value.hasPrefix("//"), !value.contains(placeholder),
-               key.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "_.-".contains($0)) }),
-               namesSecret(String(key.drop { $0 == "-" })), !refersToSecret(key),
+            let name = key.hasPrefix("/") ? String(key.dropFirst()) : key
+            if !value.isEmpty, !value.hasPrefix("//"), !value.contains(placeholder), !name.isEmpty,
+               name.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || "_.-".contains($0)) }),
+               namesSecret(String(name.drop { $0 == "-" })), !refersToSecret(name),
                !looksLikePath(value), !switchValues.contains(value.lowercased()) {
                 return key + ":" + placeholder
             }
@@ -1681,6 +1691,13 @@ public enum ArgvRedactor {
         let authority = pathStart(start)
         if let at = (start..<authority).last(where: { u[$0] == "@" }) {
             guard let colon = (start..<at).first(where: { u[$0] == ":" }), colon + 1 < at else { return nil }
+            // `user:pa@ss/word@host`: an "@" inside the first path segment (not at its start, as in
+            // `/@scope`) is where a password with "@" and "/" in it ends. A URL with a password and
+            // such a segment (`/me@x.com`) loses its host too.
+            if authority < end && u[authority] == "/" {
+                let segment = (authority + 1)..<pathStart(authority + 1)
+                if let later = segment.last(where: { u[$0] == "@" }), later > segment.lowerBound { return (colon + 1)..<later }
+            }
             return (colon + 1)..<at
         }
         // No "@" before the first "/": `user:pa/ss@host`, unless that is `host:port/…@…` or IPv6.
@@ -1775,7 +1792,8 @@ public enum ArgvRedactor {
     /// A positional argument naming a secret setting: `aws_secret_access_key`, `//host/:_authToken`.
     /// Plain words ("password" in a commit message) do not count.
     static func isSecretKeyName(_ t: String) -> Bool {
-        guard !t.contains("="), !t.isEmpty, !t.contains("://"),
+        // Not a hidden file (`.htpasswd`) or a jq path (`.db.password`).
+        guard !t.contains("="), !t.isEmpty, !t.hasPrefix("."), !t.contains("://"),
               (!t.contains("/") && !looksLikePath(t)) || t.contains(":") else { return false }
         guard t.contains(where: { "_.:".contains($0) }) else { return false }
         let part = t.split(whereSeparator: { "/:.".contains($0) }).last.map(String.init) ?? ""

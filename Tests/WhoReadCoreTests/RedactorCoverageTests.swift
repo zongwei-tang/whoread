@@ -250,6 +250,35 @@ final class RedactorCoverageTests: XCTestCase {
         ])
     }
 
+    /// PowerShell and .NET options give a value after a colon: `-Password:PW`, `--password:PW`,
+    /// `sqlpackage /TargetPassword:PW`. Before, `--password:PW` kept PW and redacted the next word.
+    func testPasswordOptionsWithAColon() {
+        assertRedacted(["tool", "--password:Hunter2pw", "next"], ["tool", "--password:\(R)", "next"])
+        assertRedacted(["pwsh", "-Command", "Connect-Db -Server db -Password:Hunter2pw -User bob"],
+                       ["pwsh", "-Command", "Connect-Db -Server db -Password:\(R) -User bob"])
+        assertRedacted(["sqlpackage", "/Action:Publish", "/TargetUser:sa", "/TargetPassword:Hunter2pw", "/SourceFile:app.dacpac"],
+                       ["sqlpackage", "/Action:Publish", "/TargetUser:sa", "/TargetPassword:\(R)", "/SourceFile:app.dacpac"])
+        // An attached value that holds a colon is still the attached flag's (`mysql -pPW`).
+        assertRedacted(["mysql", "-uroot", "-pHun:ter2pw"], ["mysql", "-uroot", "-p\(R)"], secrets: ["ter2pw"])
+        assertKept([
+            ["tool", "--auth-type:bearer", "next"], ["tool", "--secret-name:prod", "next"], ["msbuild", "/t:Build", "/v:m"],
+            ["docker", "run", "-v", "/secret:/data", "img"], ["tool", "--password:", "next"],
+        ])
+    }
+
+    /// A hidden file (`.htpasswd`) or a jq path (`.db.password`) is not the name of a setting whose
+    /// value follows: the next word is kept.
+    func testHiddenFilesAndJqPathsDoNotNameASetting() {
+        assertKept([
+            ["ls", "-la", ".htpasswd", "README.md"], ["htpasswd", "-v", ".htpasswd", "bob"], ["jq", ".password", "config.json"],
+            ["jq", "-r", ".db.password", "config.json"], ["/bin/zsh", "-c", "cat .pgpass.example | head"],
+        ])
+        assertRedacted(["aws", "configure", "set", "aws_secret_access_key", "Hunter2pw"],
+                       ["aws", "configure", "set", "aws_secret_access_key", R])
+        assertRedacted(["npm", "config", "set", "//registry.npmjs.org/:_authToken", "Hunter2pw"],
+                       ["npm", "config", "set", "//registry.npmjs.org/:_authToken", R])
+    }
+
     func testUnquotedKeysWithQuotedValues() {
         // JavaScript objects (mongosh --eval, node -e) and YAML.
         assertRedacted(["mongosh", "--eval", "db.createUser({user: 'bob', pwd: 'Hunter2pw', roles: []})"],
@@ -295,6 +324,13 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/sh", "-c", "git clone 'https://bob:\(R)@host/x' && ls"], secrets: ["ter2pw"])
         assertRedacted(["redis-cli", "-u", "redis://:Hun@ter2pw@cache:6379/0"], ["redis-cli", "-u", "redis://:\(R)@cache:6379/0"],
                        secrets: ["ter2pw"])
+        // "@" and then "/" in the password: the "@" in the first path segment ends it.
+        assertRedacted(["mongosh", "mongodb+srv://bob:Hun@ter/2pw@cluster0.x.mongodb.net/db?retryWrites=true"],
+                       ["mongosh", "mongodb+srv://bob:\(R)@cluster0.x.mongodb.net/db?retryWrites=true"], secrets: ["Hun", "2pw"])
+        assertRedacted(["git", "clone", "https://bob:Hun@ter/2pw@host/o/r.git"], ["git", "clone", "https://bob:\(R)@host/o/r.git"],
+                       secrets: ["ter", "2pw"])
+        // The price of that: a URL with a password and an "@" in its first path segment loses its host.
+        assertRedacted(["curl", "https://bob:Hunter2pw@host/me@example.com"], ["curl", "https://bob:\(R)@example.com"])
         // A user name that is an e-mail address.
         assertRedacted(["curl", "ftp://bob@example.com:Hunter2pw@ftp.example.com/f"], ["curl", "ftp://bob@example.com:\(R)@ftp.example.com/f"])
         // No scheme (`mount -t smbfs //user:pw@host/share`).
@@ -304,6 +340,7 @@ final class RedactorCoverageTests: XCTestCase {
             ["git", "clone", "ssh://git@github.com/o/r.git"], ["git", "clone", "git@github.com:o/r.git"],
             ["npm", "view", "http://localhost:4873/@scope/pkg"], ["curl", "https://user@host:8443/x@y"],
             ["curl", "https://medium.com/@user/post"], ["curl", "http://[::1]:8080/@x"], ["ls", "//server/share"],
+            ["git", "clone", "https://bob@host/@scope/x"], ["curl", "https://host/me@x.com/y"],
             ["curl", "https://host/path?next=a:b@c"], ["curl", "http://localhost:3000/users/@me"],
             ["open", "https://example.com/search?q=a&page=2"], ["echo", "see // comment@here"],
         ])
