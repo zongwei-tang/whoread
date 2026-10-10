@@ -552,6 +552,10 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/sh", "-c", "exec 1>>~/WhoReadTestVault/pgpass; printf '\(R)' '\(R)'"])
         assertRedacted(["/bin/bash", "-c", "exec &> ~/WhoReadTestVault/n\nls\necho Hunter2pw"],
                        ["/bin/bash", "-c", "exec &> ~/WhoReadTestVault/n\nls\necho \(R)"])
+        // `1<>FILE` opens FILE for reading and writing as standard output.
+        assertRedacted(["/bin/bash", "-c", "exec 1<>~/WhoReadTestVault/n; echo Hunter2pw"], ["/bin/bash", "-c", "exec 1<>~/WhoReadTestVault/n; echo \(R)"])
+        assertRedacted(["/bin/bash", "-c", "echo Hunter2pw 1<> ~/WhoReadTestVault/n"], ["/bin/bash", "-c", "echo \(R) 1<> ~/WhoReadTestVault/n"])
+        assertKept([["/bin/bash", "-c", "exec <>/dev/null; echo hello"], ["/bin/bash", "-c", "exec 0<>/dev/null; echo hello"]])
         // Process substitution: echo writes into a pipe; the command around it goes on as before.
         assertRedacted(["/bin/bash", "-c", "cat <(echo \(pg)) > ~/WhoReadTestVault/pgpass"],
                        ["/bin/bash", "-c", "cat <(echo '\(R)') > ~/WhoReadTestVault/pgpass"])

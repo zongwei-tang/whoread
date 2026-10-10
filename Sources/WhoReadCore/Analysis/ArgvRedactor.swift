@@ -1231,7 +1231,7 @@ public enum ArgvRedactor {
     }
 
     /// Finds the first unquoted `>` in `t`. A descriptor number right before it (`2>`) belongs to
-    /// the operator, so do `&` (`&>`) and a following `>`, `|` or `&` (`>>`, `>|`, `>&`).
+    /// the operator, so do `&` (`&>`) or `<` (`1<>`) and a following `>`, `|` or `&` (`>>`, `>|`, `>&`).
     static func redirect(in t: String) -> Redirect? {
         var quote: Character?
         var escaped = false
@@ -1247,7 +1247,10 @@ public enum ArgvRedactor {
         guard let gt = at else { return nil }
         var data = String(t[..<gt])
         var descriptor = ""
-        if data.hasSuffix("&") {
+        // `1<>FILE` opens FILE for reading and writing on descriptor 1 (with no number, on standard input).
+        let readWrite = data.hasSuffix("<")
+        if readWrite { data.removeLast() }
+        if data.hasSuffix("&") && !readWrite {
             data.removeLast()
             descriptor = "&"
         } else if !data.isEmpty && data.allSatisfy(\.isNumber) {
@@ -1261,9 +1264,9 @@ public enum ArgvRedactor {
             end = t.index(after: end)
         }
         let target = String(t[end...])
-        let isOut = descriptor.isEmpty || descriptor == "1" || descriptor == "&"
-        return Redirect(data: data, operatorAndTarget: descriptor + String(t[gt...]), target: target, isStandardOutput: isOut,
-                        duplicatesDescriptor: dup)
+        let isOut = readWrite ? descriptor == "1" : descriptor.isEmpty || descriptor == "1" || descriptor == "&"
+        return Redirect(data: data, operatorAndTarget: descriptor + (readWrite ? "<" : "") + String(t[gt...]), target: target,
+                        isStandardOutput: isOut, duplicatesDescriptor: dup)
     }
 
     /// `EOF` for `EOF`, `-EOF`, `'EOF'`, `"EOF"`.
