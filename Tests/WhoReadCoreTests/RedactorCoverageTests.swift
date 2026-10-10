@@ -726,6 +726,32 @@ final class RedactorCoverageTests: XCTestCase {
         assertRedacted(["/bin/bash", "-c", "echo $1Hunter2pw > ~/WhoReadTestVault/n"], ["/bin/bash", "-c", "echo \(R) > ~/WhoReadTestVault/n"])
     }
 
+    /// Data that writes the positional parameters is what they are: the arguments of a function's
+    /// calls (`f() { echo "$1"; }; f PW > FILE`) and of `sh -c '…' NAME ARGS…`. `printf -v NAME` sets
+    /// NAME to what it would have written.
+    func testArgumentsAndPrintfVariablesWrittenAsData() {
+        assertRedacted(["/bin/bash", "-c", "f() { echo \"$1\"; }; f Hunter2pw > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "f() { echo \"$1\"; }; f \(R) > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "save() { printf '%s\\n' \"$@\" >> ~/WhoReadTestVault/n; }\nsave bob Hunter2pw"],
+                       ["/bin/bash", "-c", "save() { printf '\(R)' \"$@\" >> ~/WhoReadTestVault/n; }\nsave \(R) \(R)"])
+        assertRedacted(["/bin/bash", "-c", "f() { for l in \"$@\"; do echo \"$l\"; done > ~/WhoReadTestVault/n; }; f a Hunter2pw"],
+                       ["/bin/bash", "-c", "f() { for l in \"$@\"; do echo \"$l\"; done > ~/WhoReadTestVault/n; }; f \(R) \(R)"])
+        assertRedacted(["/bin/bash", "-c", "f() { eval 'echo \"$1\" > ~/WhoReadTestVault/n'; }; f Hunter2pw"],
+                       ["/bin/bash", "-c", "f() { eval 'echo \"$1\" > ~/WhoReadTestVault/n'; }; f \(R)"])
+        assertRedacted(["/bin/bash", "-c", "sh -c 'echo \"$1\" > ~/WhoReadTestVault/n' _ Hunter2pw"],
+                       ["/bin/bash", "-c", "sh -c 'echo \"$1\" > ~/WhoReadTestVault/n' _ \(R)"])
+        assertRedacted(["sh", "-c", "printf '%s' \"$1\" | tee ~/WhoReadTestVault/n", "sh", "Hunter2pw"],
+                       ["sh", "-c", "printf '\(R)' \"$1\" | tee ~/WhoReadTestVault/n", "sh", R])
+        assertRedacted(["/bin/bash", "-c", "printf -v line '%s:%s' bob Hunter2pw; echo \"$line\" >> ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "printf -v line '\(R)' \(R) \(R); echo \"$line\" >> ~/WhoReadTestVault/n"])
+        assertKept([
+            ["/bin/bash", "-c", "f() { echo \"$1\"; }; f hello"], ["/bin/bash", "-c", "f() { cat \"$1\"; }; f notes.txt > out.txt"],
+            ["/bin/bash", "-c", "sh -c 'echo \"$1\"' _ hello"], ["/bin/bash", "-c", "sh -c 'cat \"$1\" > out.txt' _ in.txt"],
+            ["/bin/bash", "-c", "find . -name '*.txt' -exec sh -c 'wc -l \"$1\"' _ {} \\;"],
+            ["/bin/bash", "-c", "printf -v d '%s' notes; ls \"$d\" > out.txt"], ["/bin/bash", "-c", "f() { echo \"$0\" > out.txt; }; f x"],
+        ])
+    }
+
     /// Loops whose words name each other's variables: each variable is followed once. Following every
     /// path instead took minutes for ten such loops (the analyzer would stall on one command line).
     func testLoopsNamingEachOtherAreFollowedOnce() {

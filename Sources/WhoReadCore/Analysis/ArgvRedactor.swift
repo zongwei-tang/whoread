@@ -52,6 +52,14 @@ public enum ArgvRedactor {
         /// Left as written: a word whose name would otherwise make the next word a secret
         /// (`rabbitmqctl change_password USER PW`: the next word is the user).
         case keep
+        /// Data a command writes (a function's or a shell's arguments that it writes to a file).
+        case data
+    }
+
+    /// What a command line's data used, for the command that runs it: `arguments` when it wrote
+    /// the positional parameters (`sh -c 'echo "$1" > FILE' NAME PW`).
+    final class DataUses {
+        var arguments = false
     }
 
     /// Flags whose next argument is a secret, for every program.
@@ -287,7 +295,7 @@ public enum ArgvRedactor {
     /// the command line writes goes to a file or a pipe (`sh -c '…' > FILE`). `glued`: indices of
     /// tokens written right after the one before, with no space (`b` and `;` in `a;b`).
     static func redactSequence(_ tokens: [String], firstIsProgram: Bool, depth: Int = 0, lineStarts: Set<Int> = [],
-                               outputRedirected: Bool = false, glued: Set<Int> = []) -> [String] {
+                               outputRedirected: Bool = false, glued: Set<Int> = [], uses: DataUses? = nil) -> [String] {
         var out = tokens
         // `Password=a;b` in a connection string, `password: a&b` in a heredoc fed to a program: text
         // that is not a command line may hold an operator in a value. A word glued by one to a value
@@ -328,17 +336,30 @@ public enum ArgvRedactor {
         // Shell variables set to a literal (`PW='x'`, `export PW=x`), by name: data that uses one
         // (`echo "$PW" > FILE`, a heredoc body) is what the value is, so the value goes too.
         var assignments: [String: [(index: Int, end: String)]] = [:]
+        // `printf -v NAME FORMAT ARGS…`: the words NAME is set to, by name.
+        var printedVariables: [String: [Int]] = [:]
+        // Functions whose data uses their arguments (`f() { echo "$1" > FILE; }`): a call's arguments
+        // are what it writes (`f PW`).
+        var argumentWriters = Set<String>()
+        var at = 0
+        /// Data that uses the positional parameters (`"$1"`, `"$@"`): inside a function, its
+        /// arguments; elsewhere, those of the command line (`sh -c '…' NAME ARGS…`, via `uses`).
+        func usesArguments() {
+            if let f = groups.functionBodies.first(where: { $0.body.contains(at) }) { argumentWriters.insert(f.name) } else { uses?.arguments = true }
+        }
         func usedInData(_ word: String) {
-            guard shell, !(assignments.isEmpty && groups.loopVariables.isEmpty) else { return }
+            guard shell, word.contains("$") else { return }
             // Each variable once: loops whose words name each other's variables are a graph, not a tree.
             var seen = Set<String>()
             func use(_ word: String) {
                 guard word.contains("$"), !(isQuoted(word) && word.first == "'") else { return }
+                // `echo "$1"`, and `for l in "$@"; do echo "$l"; done`.
+                if referencesArguments(word) { usesArguments() }
                 for name in variableReferences(in: word) where seen.insert(name).inserted {
                     for a in assignments[name] ?? [] { out[a.index] = name + "=" + placeholder + a.end }
-                    // `for l in 'pw'; do echo "$l" >> FILE; done`: the loop's words. One that is a
-                    // variable itself (`for l in "$PW"`) passes the use on.
-                    for k in groups.loopVariables[name] ?? [] {
+                    // `for l in 'pw'; do echo "$l" >> FILE; done`: the loop's words, and the words of
+                    // `printf -v l …`. One that is a variable itself (`for l in "$PW"`) passes the use on.
+                    for k in (groups.loopVariables[name] ?? []) + (printedVariables[name] ?? []) {
                         var core = tokens[k], end = ""
                         while core.count > 1 && core.hasSuffix(";") && !core.hasSuffix("\\;") && !isQuoted(core) {
                             core.removeLast()
@@ -368,9 +389,21 @@ public enum ArgvRedactor {
                     || writesOutput(tokens, after: i, lineStarts: lineStarts)
                 dataSeen = false
             }
+            guard shell, name == "printf" || argumentWriters.contains(name) else { return }
+            let words = commandWords(tokens, program: i, lineStarts: lineStarts, shell: shell)
+            if name == "printf" {
+                // `printf -v NAME FORMAT ARGS…` sets NAME to what it would have written.
+                if let v = words.firstIndex(where: { unquote(tokens[$0]).1 == "-v" }), v + 1 < words.count {
+                    printedVariables[unquote(tokens[words[v + 1]]).1, default: []] += words[(v + 2)...]
+                }
+            } else {
+                // `f PW > FILE` for `f() { echo "$1"; }`: the arguments are the data.
+                for k in words { positional[k] = .data }
+            }
         }
         for i in tokens.indices {
             let raw = tokens[i]
+            at = i
             if i == 0 && firstIsProgram {
                 startProgram(basename(raw), at: 0)
                 continue
@@ -562,6 +595,10 @@ public enum ArgvRedactor {
 
             if let rule = positional[i] {
                 pending = nil
+                if rule == .data {
+                    usedInData(word)
+                    dataAt = i
+                }
                 emit(apply(rule, to: t, depth: depth))
                 continue
             }
@@ -582,7 +619,17 @@ public enum ArgvRedactor {
                 let writes = shell && commandLineRunners.contains(program ?? "")
                     && (execRedirect || outputBeforeProgram || groups.redirected.contains(i)
                         || writesOutput(tokens, after: commandStart, lineStarts: lineStarts))
-                emit(depth < maxNesting ? redactCommandLine(t, depth: depth + 1, outputRedirected: writes) : redactToken(t))
+                let inner = DataUses()
+                emit(depth < maxNesting ? redactCommandLine(t, depth: depth + 1, outputRedirected: writes, uses: inner) : redactToken(t))
+                if inner.arguments, let p = program, commandLineRunners.contains(p) {
+                    if p == "eval" {
+                        // eval runs it with the arguments of the function or shell it is in.
+                        usesArguments()
+                    } else if !["ssh", "su"].contains(p) {
+                        // `sh -c 'echo "$1" > FILE' NAME PW`: the words after the name ($0) are $1….
+                        for k in commandWords(tokens, program: i, lineStarts: lineStarts, shell: shell).dropFirst() { positional[k] = .data }
+                    }
+                }
                 continue
             }
             if expectProgram {
@@ -972,6 +1019,18 @@ public enum ArgvRedactor {
         return String(name)
     }
 
+    /// A word that expands the positional parameters: `$1`…`$9`, `${1}`, `"$@"`, `$*` (not `$0`).
+    static func referencesArguments(_ word: String) -> Bool {
+        var rest = word[...]
+        while let dollar = rest.firstIndex(of: "$") {
+            var after = rest[rest.index(after: dollar)...]
+            if after.first == "{" { after = after.dropFirst() }
+            if let c = after.first, ("1"..."9").contains(c) || c == "@" || c == "*" { return true }
+            rest = after
+        }
+        return false
+    }
+
     /// The variables a word expands: `$PW`, `${PW}`, `${PW:-x}`.
     static func variableReferences(in word: String) -> Set<String> {
         var names = Set<String>()
@@ -1029,6 +1088,9 @@ public enum ArgvRedactor {
         /// The words a `for` loop's variable takes, by its name: data that uses the variable (`for l in
         /// 'pw'; do echo "$l" >> FILE; done`) is what they are.
         var loopVariables: [String: [Int]] = [:]
+        /// Function bodies, innermost first where they nest: data inside one that uses `"$1"` is
+        /// what the function's calls pass it.
+        var functionBodies: [(name: String, body: ClosedRange<Int>)] = []
     }
 
     /// Finds the compound commands of a command line: `{ … }`, `( … )`, `$( … )`, `<( … )`, loops,
@@ -1063,7 +1125,10 @@ public enum ArgvRedactor {
         var execRedirect: Int?
 
         func close(_ frame: Frame, at end: Int, tail: String) {
-            if let name = frame.function { functions[name, default: []].append(frame.start...end) }
+            if let name = frame.function {
+                functions[name, default: []].append(frame.start...end)
+                result.functionBodies.append((name, frame.start...end))
+            }
             guard frame.kind != .capture else { return }
             guard frame.kind == .substitution || outputLeaves(tokens, after: end, tail: tail, lineStarts: lineStarts) else { return }
             result.redirected.formUnion(frame.start...end)
@@ -1410,7 +1475,7 @@ public enum ArgvRedactor {
 
     /// A command line in one element: headers first (they span tokens), then token by token.
     /// `outputRedirected`: see `redactSequence`.
-    static func redactCommandLine(_ line: String, depth: Int = 1, outputRedirected: Bool = false) -> String {
+    static func redactCommandLine(_ line: String, depth: Int = 1, outputRedirected: Bool = false, uses: DataUses? = nil) -> String {
         if let header = redactWholeHeader(line) { return header }
         // Words that put a single quote inside single quotes (`'… PASSWORD '\''pw'\'''`, as commands
         // are quoted for `sh -c` or `eval`) or use ANSI-C quoting are read as the same value in double
@@ -1461,7 +1526,7 @@ public enum ArgvRedactor {
             }
         }
         var redacted = redactSequence(words, firstIsProgram: false, depth: depth, lineStarts: lineStarts,
-                                      outputRedirected: outputRedirected, glued: glued)
+                                      outputRedirected: outputRedirected, glued: glued, uses: uses)
         if !asWritten.isEmpty {
             let normalized = tokenize(read).filter { !$0.isSpace }.map(\.text)
             if normalized.count == words.count {
@@ -2104,6 +2169,8 @@ public enum ArgvRedactor {
             return String(first) + placeholder
         case .keep:
             return value
+        case .data:
+            return value.isEmpty || isExpansion(value) ? value : placeholder
         }
     }
 
