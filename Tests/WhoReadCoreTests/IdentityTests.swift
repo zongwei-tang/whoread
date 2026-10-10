@@ -298,6 +298,19 @@ final class SigningCategoryTrustTests: AncestryTestCase {
         XCTAssertTrue(c.isOwner(docker(.developerID, flags: 0x2201_3b11), of: "kube"), "ordinary flags")
     }
 
+    /// A location-only owner (Homebrew's OpenSSH) is ad hoc signed like anything else written there, so
+    /// the signing category says nothing about it. But a process that another one controls (attached by
+    /// a debugger, or built with get-task-allow) is nobody's owner, whatever its location.
+    func testALocationOnlyOwnerIsNotAnOwnerWhileAnotherProcessControlsIt() {
+        func ssh(_ category: SigningCategory?, flags: UInt32?) -> ProcessRecord {
+            signed(proc(920, "/opt/homebrew/Cellar/openssh/9.9p1/bin/ssh", ppid: 1, start: 0, originalPPID: 1), category, flags: flags)
+        }
+        XCTAssertTrue(h.classifier.isOwner(ssh(nil, flags: nil), of: "ssh"))
+        XCTAssertTrue(h.classifier.isOwner(ssh(.localSigning, flags: 0x2_0002), of: "ssh"), "ad hoc, linker-signed: as before")
+        XCTAssertFalse(h.classifier.isOwner(ssh(.localSigning, flags: 0x2_0002 | CodeSigningFlag.debugged), of: "ssh"))
+        XCTAssertFalse(h.classifier.isOwner(ssh(nil, flags: CodeSigningFlag.getTaskAllow), of: "ssh"))
+    }
+
     /// The same on the AUTH path: a development build reading the category is asked, not passed as owner.
     func testADevelopmentBuildOfAnOwnerIsAskedNotPassed() {
         let engine = RuleEngine(rules: [], classifier: dockerOwnedClassifier(), attributor: h.attributor)
