@@ -407,8 +407,9 @@ public final class AppModel {
         return L10n.f(.slowResponsesFormat, parts.joined(separator: language == .zhHans ? "，" : ", "), language: language)
     }
 
-    /// The daemon's previous instance stopped while it could block (killed for a missed deadline,
-    /// a crash, power loss). Enforcement was left as the user set it.
+    /// The daemon's previous instance stopped uncleanly (killed for a missed deadline, a crash, power
+    /// loss, or exited by its watchdog, also while only monitoring; the daemon's note says which).
+    /// Enforcement was left as the user set it.
     public var uncleanStopText: String? {
         liveStatus?.uncleanStop.map { L10n.f(.uncleanStopFormat, $0, language: language) }
     }

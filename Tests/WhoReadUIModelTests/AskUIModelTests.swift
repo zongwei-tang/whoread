@@ -297,7 +297,24 @@ final class AskUIModelTests: XCTestCase {
         // Shown in Settings while the daemon reports it.
         XCTAssertNil(model(status()).uncleanStopText)
         XCTAssertEqual(model(stopped).uncleanStopText,
-                       "The monitor stopped unexpectedly while it could block (stopped at 2026-10-05 01:00 while AUTH was subscribed). Enforcement stays as you set it.")
+                       "The monitor stopped unexpectedly (stopped at 2026-10-05 01:00 while AUTH was subscribed). Enforcement stays as you set it.")
+    }
+
+    func testAWatchdogExitWhileOnlyMonitoringIsNotCalledAStopWhileBlocking() {
+        // The daemon also reports a watchdog exit while it only monitored (file events were lost). The
+        // app's wording around the daemon's note must not claim it could block then.
+        let monitoring = status(uncleanStop: "the previous daemon was exited by its watchdog: its event handler was stuck in one "
+                                + "call for 130 s (monitoring only: the file events behind it were not recorded); found at start "
+                                + "2026-10-05T01:00:00Z")
+        for language in [Language.en, .zhHans] {
+            let notice = NotificationPlanner().plan(status: monitoring, language: language).first?.body ?? ""
+            let shown = model(monitoring, language: language).uncleanStopText ?? ""
+            for text in [notice, shown] {
+                XCTAssertTrue(text.contains("monitoring only"), text)
+                XCTAssertFalse(text.contains("could block"), text)
+                XCTAssertFalse(text.contains("可拦截"), text)
+            }
+        }
     }
 
     // MARK: - Menu bar and status

@@ -241,7 +241,7 @@ public enum L10n {
         .slowResponsesFormat: ("Slow responses: %@. Enforcement stays as you set it.", "响应变慢：%@。拦截保持你的设置。"),
         .slowMissesFormat: ("%ld missed kernel deadlines", "错过内核期限 %ld 次"),
         .slowP99Format: ("p99 %@ ms (warning above %@ ms)", "p99 %@ 毫秒（超过 %@ 毫秒提醒）"),
-        .uncleanStopFormat: ("The monitor stopped unexpectedly while it could block (%@). Enforcement stays as you set it.", "监控程序在可拦截状态下意外停止（%@）。拦截保持你的设置。"),
+        .uncleanStopFormat: ("The monitor stopped unexpectedly (%@). Enforcement stays as you set it.", "监控程序意外停止（%@）。拦截保持你的设置。"),
 
         .onbTitle: ("Welcome to WhoRead", "欢迎使用 WhoRead"),
         .onbIntro: ("WhoRead shows which app read your SSH keys, cloud credentials, browser data and other sensitive files — and who started it. Everything stays on this Mac. File contents are never read.", "WhoRead 告诉你哪个应用读了你的 SSH 密钥、云凭证、浏览器数据等敏感文件，以及是谁启动了它。所有数据只留在这台 Mac 上，从不读取文件内容。"),

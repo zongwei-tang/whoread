@@ -130,9 +130,11 @@ public final class NotificationPlanner: @unchecked Sendable {
         return out
     }
 
-    /// The daemon's previous instance stopped while it could block (likely killed by the kernel for
-    /// a missed deadline). Enforcement was left as the user set it; tell them once (the daemon keeps
-    /// reporting it while that instance runs). Posted whatever the notification settings say.
+    /// The daemon's previous instance stopped uncleanly: while it could block (likely killed by the
+    /// kernel for a missed deadline), or exited by its watchdog, which the daemon also reports when it
+    /// only monitored (the daemon's note says which). Enforcement was left as the user set it; tell
+    /// them once (the daemon keeps reporting it while that instance runs). Posted whatever the
+    /// notification settings say.
     public func plan(status: DaemonStatus, language: Language) -> [SystemNotice] {
         defer { lastUncleanStop = status.uncleanStop }
         guard let stop = status.uncleanStop, stop != lastUncleanStop else { return [] }
