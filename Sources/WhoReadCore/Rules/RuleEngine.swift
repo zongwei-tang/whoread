@@ -425,7 +425,9 @@ public final class RuleEngine: @unchecked Sendable {
         }
         if asking {
             // Every (path, category) with a requested read or write needs a decision. An owner only
-            // counts with no AI agent in the chain: an agent can drive ssh or git to read a key.
+            // counts with no AI agent in the chain: an agent can drive ssh or git to read a key. A
+            // chain that does not reach launchd (ancestry unknown or cut short) may hide one.
+            let ancestryKnown = chain.reachesLaunchd
             var undecided: [(target: Int, category: Int)] = []
             var byOwner = false
             // ES caches an AUTH_OPEN allow for this executable and file whatever the later open's
@@ -436,7 +438,7 @@ public final class RuleEngine: @unchecked Sendable {
                 for (ci, category) in t.categories.enumerated() {
                     if allowedKinds[ti][ci] != .readWrite { staticAllow = false }
                     if allowed[ti][ci].isSuperset(of: needed) { continue }
-                    if chainAgents.isEmpty && isOwner(category.id) {
+                    if chainAgents.isEmpty && ancestryKnown && isOwner(category.id) {
                         byOwner = true
                         continue
                     }

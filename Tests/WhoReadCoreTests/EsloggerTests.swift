@@ -244,13 +244,17 @@ final class FixtureReplayTests: XCTestCase {
             func find(_ pid: Int32, _ suffix: String) -> AnalyzedEvent? {
                 events.first { $0.process.pid == pid && $0.path.hasSuffix(suffix) }
             }
+            // Schema v2 has no original_ppid: a process reporting ppid 1 may have been reparented, so
+            // its ancestry is unknown there (no launchd at the top, Spotlight not folded).
+            let knowsOrigin = shape != "schema-v2-synthetic"
+            let top = knowsOrigin ? ["launchd"] : []
             // cat, python3, node each produce a record with the right chain.
             let cat = try XCTUnwrap(find(501, "/ssh/id_ed25519"), shape)
-            XCTAssertEqual(cat.chainDisplay, "launchd → Terminal → zsh → cat", shape)
+            XCTAssertEqual(cat.chain.map(\.name), top + ["Terminal", "zsh", "cat"], shape)
             XCTAssertEqual(cat.categoryID, "test-vault")
             XCTAssertEqual(cat.severity, .critical)
             let py = try XCTUnwrap(find(502, "/aws/credentials"), shape)
-            XCTAssertEqual(py.chain.map(\.name), ["launchd", "Terminal", "zsh", "Python"], shape)
+            XCTAssertEqual(py.chain.map(\.name), top + ["Terminal", "zsh", "Python"], shape)
             XCTAssertEqual(py.responsible.displayName, "Terminal", "\(shape): framework helper app is not an app")
             let node = try XCTUnwrap(find(503, "/ssh/id_ed25519"), shape)
             XCTAssertEqual(node.responsible.displayName, "Terminal")
@@ -262,7 +266,7 @@ final class FixtureReplayTests: XCTestCase {
             let orphan = try XCTUnwrap(find(603, "/ssh/id_ed25519"), shape)
             XCTAssertEqual(orphan.agentID, "claude-code", "\(shape): original_ppid or tree link")
             // Spotlight folded.
-            XCTAssertEqual(find(700, "/notes/todo.txt")?.benignServiceID, "spotlight", shape)
+            XCTAssertEqual(find(700, "/notes/todo.txt")?.benignServiceID, knowsOrigin ? "spotlight" : nil, shape)
             // Firmlinked spelling classified.
             XCTAssertTrue(events.contains { $0.path == "/Users/alice/WhoReadTestVault/ssh/id_ed25519" && $0.process.pid == 500 }, shape)
             // Exfil ops recorded.

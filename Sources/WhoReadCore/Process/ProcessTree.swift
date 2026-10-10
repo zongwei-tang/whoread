@@ -4,13 +4,55 @@ import Foundation
 public struct ProcessNode: Sendable, Hashable {
     public let id: UInt64
     public var image: ProcessRecord
-    /// Parent at fork time. Not updated when the process is reparented to launchd.
+    /// Parent at fork time. Not updated when the process is reparented to launchd. nil while that
+    /// parent is unknown: the chain then stops here instead of reaching launchd.
     public var parentID: UInt64?
     /// Agent ID of the current image, if it is a known AI agent.
-    public var agentID: String?
+    public var agentID: String? {
+        didSet { if agentID != nil { everAgent = true } }
+    }
     public var exitedAt: Date?
     public var lastSeen: Date
     var childCount: Int
+    /// The image comes from a libproc snapshot (seed or parent resolver), not from an event: it has
+    /// no code signing data and its platform flag is guessed from the path. The next event replaces it.
+    var fromSnapshot: Bool
+    /// What lies above this node (see `Ancestry`).
+    var ancestry: Ancestry
+    /// An ancestor between this node and its parent was evicted by the node cap (`prune`): the chain
+    /// through here skips it, so it does not count as reaching launchd.
+    var ancestorEvicted = false
+    /// Some image of this process was an AI agent. Its descendants may have recorded it as their only
+    /// mark for that agent (see `recordedAncestors`), so the node cap never evicts it while it has
+    /// children, even after an exec to something else.
+    var everAgent = false
+}
+
+/// What lies above a node, so that a chain query costs the same however deep the tree is: a process
+/// running as the user can nest fork-and-exit generations by the tens of thousands (exited ancestors
+/// stay as tombstones while they have children). Recorded from the parent when the node is linked;
+/// recomputed for a whole subtree when an ancestor is relinked or unlinked, or turns out to be an AI
+/// agent. Each mark is a node and its distance above this node; the node is read back at query time.
+struct Ancestry: Sendable, Hashable {
+    struct Mark: Sendable, Hashable {
+        var id: UInt64
+        var distance: Int
+    }
+
+    struct AgentMark: Sendable, Hashable {
+        var mark: Mark
+        var agentID: String
+        var teamID: String?
+    }
+
+    /// Nearest ancestor inside an `.app` bundle or that is an AI agent (Attributor steps 1-2).
+    var attributable: Mark?
+    /// AI agent ancestors, nearest first, one per agent and team.
+    var agents: [AgentMark] = []
+    /// Nearest ancestor that is not a platform binary (Attributor step 3).
+    var nonPlatform: Mark?
+    /// Topmost known ancestor below launchd (Attributor step 4).
+    var top: Mark?
 }
 
 /// In-memory process tree, seeded from a libproc snapshot and maintained from fork/exec/exit.
@@ -18,6 +60,8 @@ public struct ProcessNode: Sendable, Hashable {
 /// Children link to parents by internal node ID, not pid, so chains survive reparenting to
 /// launchd and pid reuse. Exited processes stay as tombstones for `tombstoneTTL` (and while
 /// they still have children) so late file events and descendants still resolve their ancestry.
+/// A parent is the process that forked the child (`originalPPID`); a process whose fork-time parent
+/// is unknown is left unlinked (ancestry unknown), never attached to launchd.
 ///
 /// Thread-safe. All lookups are memory-only; `parentResolver` (libproc in the daemon) is the only
 /// escape hatch and does syscalls, never disk or XPC.
@@ -27,17 +71,29 @@ public final class ProcessTree: @unchecked Sendable {
     private let lock = NSLock()
     private var nodes: [UInt64: ProcessNode] = [:]
     private var byPID: [Int32: [UInt64]] = [:]
+    private var children: [UInt64: Set<UInt64>] = [:]
+    /// Unlinked nodes whose fork-time parent pid the resolver could not give: it is dead, so whoever
+    /// holds that pid later started after the child too. Not asked again on every AUTH decision.
+    private var unresolvable: [UInt64: Int32] = [:]
     private var nextID: UInt64 = 1
     private let detector: AgentDetector
     private let normalizePath: @Sendable (String) -> String
+    /// While seeding: links do not refresh descendants; everything is recomputed once at the end.
+    private var deferAncestry = false
 
     public var tombstoneTTL: TimeInterval
+    /// How deep the parent resolver may recurse for one lookup.
     public var maxDepth: Int
     public var maxNodes: Int
+    /// Links a chain query walks. Past it, the chain continues with the nodes `Ancestry` recorded for
+    /// the rest (agents, the responsible app, the topmost process) and does not end at launchd.
+    public var chainLimit: Int
     public var parentResolver: ParentResolver?
 
     /// Start times closer than this are considered equal (sources round differently).
     static let startTimeTolerance: TimeInterval = 0.002
+    /// Distinct agent ancestors (agent, team) a node records. Bounded by the agent catalog in practice.
+    static let maxAgentMarks = 32
 
     public init(
         detector: AgentDetector,
@@ -45,6 +101,7 @@ public final class ProcessTree: @unchecked Sendable {
         tombstoneTTL: TimeInterval = 600,
         maxDepth: Int = 64,
         maxNodes: Int = 100_000,
+        chainLimit: Int = 64,
         parentResolver: ParentResolver? = nil
     ) {
         self.detector = detector
@@ -52,6 +109,7 @@ public final class ProcessTree: @unchecked Sendable {
         self.tombstoneTTL = tombstoneTTL
         self.maxDepth = maxDepth
         self.maxNodes = maxNodes
+        self.chainLimit = max(1, chainLimit)
         self.parentResolver = parentResolver
     }
 
@@ -67,21 +125,25 @@ public final class ProcessTree: @unchecked Sendable {
 
     // MARK: - Mutations
 
-    /// Builds the initial tree from a snapshot of running processes.
+    /// Builds the initial tree from a snapshot of running processes (libproc: no fork-time parent, so
+    /// a process reparented to launchd stays unlinked until an event tells who started it).
     public func seed(_ records: [ProcessRecord], at time: Date) {
         lock.lock(); defer { lock.unlock() }
         var created: [UInt64] = []
         for r in records {
             let r = normalized(r)
             if currentNodeID(for: r, at: time) != nil { continue }
-            created.append(createNode(r, parentID: nil, at: time))
+            created.append(createNode(r, at: time, fromSnapshot: true))
         }
+        deferAncestry = true
         for id in created {
             guard let node = nodes[id], node.parentID == nil else { continue }
             if let parent = findParentNode(for: node.image, excluding: id, at: time, allowResolver: false) {
                 link(child: id, to: parent)
             }
         }
+        deferAncestry = false
+        rebuildAncestry()
     }
 
     public func fork(parent: ProcessRecord, child: ProcessRecord, at time: Date) {
@@ -90,11 +152,16 @@ public final class ProcessTree: @unchecked Sendable {
         let child = normalized(child)
         if let existing = currentNodeID(for: child, at: time), nodes[existing]?.exitedAt == nil || child.startTime != nil {
             // A file event from the child raced ahead of the fork event.
-            update(existing, with: child, at: time)
-            if nodes[existing]?.parentID != parentID { link(child: existing, to: parentID) }
+            update(existing, with: child, at: time, fromSnapshot: false)
+            if nodes[existing]?.parentID != parentID {
+                link(child: existing, to: parentID)
+            } else {
+                // Linked by that file event, perhaps before the parent's exec was seen (see exec()).
+                refreshAncestry(of: existing)
+            }
             return
         }
-        let id = createNode(child, parentID: nil, at: time)
+        let id = createNode(child, at: time, fromSnapshot: false)
         link(child: id, to: parentID)
     }
 
@@ -108,9 +175,15 @@ public final class ProcessTree: @unchecked Sendable {
         if image.originalPPID == nil { image.originalPPID = node.image.originalPPID }
         node.image = image
         node.agentID = detector.detect(image)
+        node.fromSnapshot = false
         node.lastSeen = time
         node.exitedAt = nil
         nodes[id] = node
+        // What a process records about its ancestors is taken from its parent when it is linked. A
+        // file event can link it before the process client has delivered its parent's exec (an agent
+        // starting up). The process client delivers that exec before this process's own fork and exec,
+        // so re-reading the parent here, O(1), brings it up to date; descendants follow at their own.
+        refreshAncestry(of: id)
     }
 
     public func exit(_ process: ProcessRecord, at time: Date) {
@@ -149,30 +222,24 @@ public final class ProcessTree: @unchecked Sendable {
         if nodes.count > maxNodes {
             // Hard cap: evict childless tombstones first; exited ancestors are spliced out (their
             // children re-linked to the grandparent) so no live chain is cut, and exited agents with
-            // live descendants are never evicted.
+            // live descendants are never evicted (nor a process that was one before an exec). Descendants keep their recorded ancestry; marks of
+            // evicted nodes are skipped when read. A chain with a spliced-out link is incomplete: it
+            // never counts as reaching launchd (an exited app's helper is not all-Apple).
             let excess = nodes.count - maxNodes
             let victims = nodes.values
-                .filter { $0.exitedAt != nil && !($0.agentID != nil && $0.childCount > 0) }
+                .filter { $0.exitedAt != nil && !($0.everAgent && $0.childCount > 0) }
                 .sorted { a, b in
                     let ka = a.childCount > 0 ? 1 : 0, kb = b.childCount > 0 ? 1 : 0
                     if ka != kb { return ka < kb }
                     return a.exitedAt! < b.exitedAt!
                 }
                 .prefix(excess)
-            var children: [UInt64: [UInt64]] = [:]
-            if victims.contains(where: { $0.childCount > 0 }) {
-                for (id, n) in nodes { if let p = n.parentID { children[p, default: []].append(id) } }
-            }
             for v in victims {
                 guard let current = nodes[v.id] else { continue }
                 for c in children[v.id] ?? [] where nodes[c]?.parentID == v.id {
-                    nodes[c]?.parentID = current.parentID
-                    if let gp = current.parentID {
-                        nodes[gp]?.childCount += 1
-                        children[gp, default: []].append(c)
-                    }
+                    setParent(c, current.parentID)
+                    nodes[c]?.ancestorEvicted = true
                 }
-                nodes[v.id]?.childCount = 0
                 remove(v.id)
                 removed += 1
             }
@@ -182,7 +249,9 @@ public final class ProcessTree: @unchecked Sendable {
 
     // MARK: - Queries
 
-    /// Chain for an acting process, leaf first, ending at launchd (or wherever ancestry is lost).
+    /// Chain for an acting process, leaf first, ending at launchd, or wherever ancestry is lost. At
+    /// most `chainLimit` links are walked; a longer chain continues with the nodes its ancestry
+    /// recorded (agents, responsible app, topmost process), in chain order, and does not end at launchd.
     public func chain(for process: ProcessRecord, at time: Date) -> [ProcessNode] {
         lock.lock(); defer { lock.unlock() }
         let id = observeLocked(normalized(process), at: time, depth: 0)
@@ -216,28 +285,88 @@ public final class ProcessTree: @unchecked Sendable {
 
     private func chainLocked(from id: UInt64) -> [ProcessNode] {
         var out: [ProcessNode] = []
-        var visited = Set<UInt64>()
         var current: UInt64? = id
-        // No depth cap: `visited` guarantees termination, and capping would let 70 nested shells hide
-        // the agent at the top of the chain.
-        while let c = current, let node = nodes[c], !visited.contains(c) {
-            visited.insert(c)
+        while let c = current, let node = nodes[c] {
+            if node.image.isSystemRoot {
+                out.append(node)
+                return out
+            }
+            if out.count == chainLimit {
+                // Cut short (no walk proportional to the depth an attacker can build). Capping without
+                // the recorded ancestry would let 70 nested shells hide the agent at the top.
+                return out + recordedAncestors(of: out[out.count - 1], excluding: Set(out.map(\.id)))
+            }
             out.append(node)
             current = node.parentID
         }
         return out
     }
 
-    private func observeLocked(_ p: ProcessRecord, at time: Date, depth: Int) -> UInt64 {
+    /// The nodes `node`'s ancestry recorded, nearest first, without launchd. An agent ancestor keeps
+    /// the identity it had when recorded: only the nearest instance of each agent (and team) is
+    /// recorded, so if it could shed that identity by exec (`exec -a claude /bin/sh` looks like Claude
+    /// Code; it forks deep, then execs /bin/sh), the farther, real agent it stood in for would be lost.
+    private func recordedAncestors(of node: ProcessNode, excluding walked: Set<UInt64>) -> [ProcessNode] {
+        let a = node.ancestry
+        var marks = a.agents.map(\.mark)
+        for m in [a.attributable, a.nonPlatform, a.top] { if let m { marks.append(m) } }
+        marks.sort { $0.distance < $1.distance }
+        var recordedAgent: [UInt64: Ancestry.AgentMark] = [:]
+        for agent in a.agents { recordedAgent[agent.mark.id] = agent }
+        var seen = walked
+        var out: [ProcessNode] = []
+        for m in marks where seen.insert(m.id).inserted {
+            guard var n = nodes[m.id], !n.image.isSystemRoot else { continue }
+            if let agent = recordedAgent[m.id], n.agentID != agent.agentID || n.image.teamID != agent.teamID {
+                n.agentID = agent.agentID
+                n.image.teamID = agent.teamID
+            }
+            out.append(n)
+        }
+        return out
+    }
+
+    /// What a child of `parent` has above it.
+    private func ancestry(below parent: ProcessNode) -> Ancestry {
+        if parent.image.isSystemRoot { return Ancestry() }
+        var a = parent.ancestry
+        func up(_ m: Ancestry.Mark) -> Ancestry.Mark { Ancestry.Mark(id: m.id, distance: m.distance + 1) }
+        a.attributable = a.attributable.map(up)
+        a.nonPlatform = a.nonPlatform.map(up)
+        a.top = a.top.map(up) ?? Ancestry.Mark(id: parent.id, distance: 1)
+        a.agents = a.agents.map { Ancestry.AgentMark(mark: up($0.mark), agentID: $0.agentID, teamID: $0.teamID) }
+        let here = Ancestry.Mark(id: parent.id, distance: 1)
+        if parent.agentID != nil || parent.image.outermostAppBundle != nil { a.attributable = here }
+        if !parent.image.isPlatformBinary { a.nonPlatform = here }
+        if let agent = parent.agentID {
+            let team = parent.image.teamID
+            a.agents.removeAll { $0.agentID == agent && $0.teamID == team }
+            a.agents.insert(Ancestry.AgentMark(mark: here, agentID: agent, teamID: team), at: 0)
+            if a.agents.count > ProcessTree.maxAgentMarks { a.agents.removeLast(a.agents.count - ProcessTree.maxAgentMarks) }
+        }
+        return a
+    }
+
+    private func observeLocked(_ p: ProcessRecord, at time: Date, depth: Int, fromSnapshot: Bool = false) -> UInt64 {
         if let id = currentNodeID(for: p, at: time) {
-            update(id, with: p, at: time)
+            let learnsOrigin = nodes[id]?.image.originalPPID == nil && p.originalPPID != nil
+            update(id, with: p, at: time, fromSnapshot: fromSnapshot)
+            if learnsOrigin, let node = nodes[id], let parent = node.parentID,
+               nodes[parent]?.image.pid != ProcessTree.forkParentPID(of: node.image) {
+                // Linked before the fork-time parent was known (libproc reports the current ppid, which
+                // for a traced process is its debugger): look again.
+                setParent(id, nil)
+                refreshAncestry(of: id)
+                refreshAncestry(below: id)
+            }
             if nodes[id]?.parentID == nil, p.pid > 1,
-               let parent = findParentNode(for: p, excluding: id, at: time, allowResolver: depth < maxDepth) {
+               let parent = findParentNode(for: nodes[id]?.image ?? p, excluding: id, at: time,
+                                           allowResolver: depth < maxDepth, depth: depth) {
                 link(child: id, to: parent)
             }
             return id
         }
-        let id = createNode(p, parentID: nil, at: time)
+        let id = createNode(p, at: time, fromSnapshot: fromSnapshot)
         if p.pid > 1, let parent = findParentNode(for: p, excluding: id, at: time, allowResolver: depth < maxDepth, depth: depth) {
             link(child: id, to: parent)
         }
@@ -260,8 +389,9 @@ public final class ProcessTree: @unchecked Sendable {
         return nil
     }
 
-    private func update(_ id: UInt64, with p: ProcessRecord, at time: Date) {
+    private func update(_ id: UInt64, with p: ProcessRecord, at time: Date, fromSnapshot: Bool) {
         guard var node = nodes[id] else { return }
+        let wasAgent = node.agentID != nil
         let sameImage = node.image.executablePath == p.executablePath
             && (node.image.pidVersion == nil || p.pidVersion == nil || node.image.pidVersion == p.pidVersion)
         if sameImage {
@@ -270,7 +400,15 @@ public final class ProcessTree: @unchecked Sendable {
             if merged.argv == nil { merged.argv = node.image.argv }
             // Keep the fork-time parent relationship facts.
             if node.image.originalPPID != nil { merged.originalPPID = node.image.originalPPID }
+            // A platform flag guessed from the path (libproc) never outlives the one an event reports,
+            // and never overrides it.
+            if node.fromSnapshot && !fromSnapshot {
+                merged.isPlatformBinary = p.isPlatformBinary
+            } else if !node.fromSnapshot && fromSnapshot {
+                merged.isPlatformBinary = node.image.isPlatformBinary
+            }
             node.image = merged
+            node.fromSnapshot = node.fromSnapshot && fromSnapshot
             if node.agentID == nil, merged.argv != nil || merged.teamID != nil {
                 node.agentID = detector.detect(merged)
             }
@@ -280,42 +418,53 @@ public final class ProcessTree: @unchecked Sendable {
             if image.startTime == nil { image.startTime = node.image.startTime }
             node.image = image
             node.agentID = detector.detect(image)
+            node.fromSnapshot = fromSnapshot
         }
         node.lastSeen = time
         nodes[id] = node
+        if sameImage && !wasAgent && node.agentID != nil && node.childCount > 0 {
+            // Only now recognised as an agent (code identity arrived after a snapshot): what it
+            // started must carry it.
+            refreshAncestry(below: id)
+        }
     }
 
-    private func createNode(_ p: ProcessRecord, parentID: UInt64?, at time: Date) -> UInt64 {
+    private func createNode(_ p: ProcessRecord, at time: Date, fromSnapshot: Bool) -> UInt64 {
         let id = nextID
         nextID += 1
+        let agentID = detector.detect(p)
         nodes[id] = ProcessNode(
-            id: id, image: p, parentID: nil, agentID: detector.detect(p),
-            exitedAt: nil, lastSeen: time, childCount: 0)
+            id: id, image: p, parentID: nil, agentID: agentID,
+            exitedAt: nil, lastSeen: time, childCount: 0, fromSnapshot: fromSnapshot, ancestry: Ancestry(),
+            everAgent: agentID != nil)
         byPID[p.pid, default: []].append(id)
         if byPID[p.pid]!.count > 8 {
             // Keep only recent instances per pid in the index; older ones stay reachable via links.
             byPID[p.pid]!.removeFirst(byPID[p.pid]!.count - 8)
         }
-        if let parentID { link(child: id, to: parentID) }
         return id
+    }
+
+    /// The pid of the process that forked `p`; nil when unknown. ppid alone only says who adopted it:
+    /// launchd for a reparented process (libproc has no fork-time parent), a debugger for a traced one.
+    static func forkParentPID(of p: ProcessRecord) -> Int32? {
+        if let original = p.originalPPID { return original > 0 ? original : nil }
+        return p.ppid > 1 ? p.ppid : nil
     }
 
     private func findParentNode(
         for p: ProcessRecord, excluding selfID: UInt64, at time: Date, allowResolver: Bool, depth: Int = 0
     ) -> UInt64? {
-        var parentPID = p.ppid
-        if parentPID == 1, let original = p.originalPPID, original > 1 {
-            parentPID = original
-        }
-        guard parentPID > 0, parentPID != p.pid else { return nil }
+        // Unknown (reparented, or the original parent was never seen and cannot be resolved): no
+        // parent at all, so the chain does not reach launchd and grants no trust.
+        guard let parentPID = ProcessTree.forkParentPID(of: p), parentPID != p.pid else { return nil }
         if parentPID == 1 { return launchdNode(at: time) }
 
         if let ids = byPID[parentPID] {
             for id in ids.reversed() where id != selfID {
                 guard let node = nodes[id] else { continue }
                 if let childStart = p.startTime {
-                    if let parentStart = node.image.startTime,
-                       parentStart.timeIntervalSince(childStart) > ProcessTree.startTimeTolerance {
+                    if ProcessTree.startedAfter(node.image.startTime, childStart) {
                         continue // started after the child: a reused pid, not the parent
                     }
                     if let exited = node.exitedAt, exited.addingTimeInterval(ProcessTree.startTimeTolerance) < childStart {
@@ -325,39 +474,125 @@ public final class ProcessTree: @unchecked Sendable {
                 return id
             }
         }
-        if allowResolver, let resolver = parentResolver, let record = resolver(parentPID), record.pid == parentPID {
-            return observeLocked(normalized(record), at: time, depth: depth + 1)
+        if allowResolver, unresolvable[selfID] != parentPID, let resolver = parentResolver {
+            if let record = resolver(parentPID), record.pid == parentPID, !ProcessTree.startedAfter(record.startTime, p.startTime) {
+                // libproc reports whoever holds the pid now: one that started after the child reused it.
+                return observeLocked(normalized(record), at: time, depth: depth + 1, fromSnapshot: true)
+            }
+            if nodes[selfID] != nil { unresolvable[selfID] = parentPID }
         }
-        // Reparented and the original parent is unknown: at least end the chain at launchd.
-        if p.ppid == 1 { return launchdNode(at: time) }
         return nil
+    }
+
+    /// `start` is later than `childStart` (beyond rounding): a process holding the parent's pid that
+    /// cannot be the parent.
+    private static func startedAfter(_ start: Date?, _ childStart: Date?) -> Bool {
+        guard let start, let childStart else { return false }
+        return start.timeIntervalSince(childStart) > startTimeTolerance
     }
 
     /// Chains end at launchd. Synthesized if the snapshot did not include it.
     private func launchdNode(at time: Date) -> UInt64 {
         if let id = byPID[1]?.last, nodes[id] != nil { return id }
         let record = ProcessRecord(pid: 1, ppid: 0, executablePath: "/sbin/launchd", isPlatformBinary: true)
-        return createNode(record, parentID: nil, at: time)
+        return createNode(record, at: time, fromSnapshot: false)
     }
 
     private func link(child: UInt64, to parent: UInt64) {
-        guard child != parent, nodes[child] != nil, nodes[parent] != nil else { return }
-        // Refuse links that would create a cycle.
-        var cursor: UInt64? = parent
+        guard child != parent, let c = nodes[child], nodes[parent] != nil, c.parentID != parent else { return }
+        if c.childCount == 0 {
+            // A childless node cannot close a cycle: O(1), whatever the depth (forks hold the lock the
+            // AUTH path needs).
+            setParent(child, parent)
+            refreshAncestry(of: child)
+            return
+        }
+        if deferAncestry {
+            // Seeding: every ancestry is recomputed once at the end; only refuse a cycle.
+            if isAncestor(child, of: parent) { return }
+            setParent(child, parent)
+            return
+        }
+        // Relinking a node with descendants: refuse a link below them, then update what they record.
+        let below = descendants(of: child)
+        if below.set.contains(parent) { return }
+        setParent(child, parent)
+        refreshAncestry(of: child)
+        refreshAncestry(of: below.order)
+    }
+
+    private func isAncestor(_ ancestor: UInt64, of id: UInt64) -> Bool {
+        var cursor: UInt64? = id
         var steps = 0
         while let c = cursor, steps <= nodes.count {
-            if c == child { return }
+            if c == ancestor { return true }
             cursor = nodes[c]?.parentID
             steps += 1
         }
-        if let old = nodes[child]?.parentID { nodes[old]?.childCount -= 1 }
+        return false
+    }
+
+    private func setParent(_ child: UInt64, _ parent: UInt64?) {
+        if let old = nodes[child]?.parentID {
+            nodes[old]?.childCount -= 1
+            children[old]?.remove(child)
+            if children[old]?.isEmpty == true { children[old] = nil }
+        }
         nodes[child]?.parentID = parent
-        nodes[parent]?.childCount += 1
+        if let parent {
+            nodes[parent]?.childCount += 1
+            children[parent, default: []].insert(child)
+        }
+    }
+
+    /// Descendants of `id` (not `id` itself), parents before children.
+    private func descendants(of id: UInt64) -> (order: [UInt64], set: Set<UInt64>) {
+        var order: [UInt64] = []
+        var seen: Set<UInt64> = [id]
+        var i = 0
+        var frontier = Array(children[id] ?? [])
+        while true {
+            for c in frontier where seen.insert(c).inserted { order.append(c) }
+            guard i < order.count else { break }
+            frontier = Array(children[order[i]] ?? [])
+            i += 1
+        }
+        seen.remove(id)
+        return (order, seen)
+    }
+
+    private func refreshAncestry(of id: UInt64) {
+        guard let node = nodes[id] else { return }
+        let parent = node.parentID.flatMap { nodes[$0] }
+        let a = parent.map(ancestry(below:)) ?? Ancestry()
+        nodes[id]?.ancestry = a
+    }
+
+    private func refreshAncestry(of ordered: [UInt64]) {
+        for id in ordered { refreshAncestry(of: id) }
+    }
+
+    /// After `id` was unlinked or became an agent. O(subtree), once per such change.
+    private func refreshAncestry(below id: UInt64) {
+        if deferAncestry { return }
+        refreshAncestry(of: descendants(of: id).order)
+    }
+
+    /// Recomputes every node's ancestry, roots first. O(n); used after seeding.
+    private func rebuildAncestry() {
+        let roots = nodes.values.filter { n in n.parentID.map { nodes[$0] == nil } ?? true }.map(\.id)
+        for r in roots {
+            refreshAncestry(of: r)
+            refreshAncestry(of: descendants(of: r).order)
+        }
     }
 
     private func remove(_ id: UInt64) {
-        guard let node = nodes.removeValue(forKey: id) else { return }
-        if let parent = node.parentID { nodes[parent]?.childCount -= 1 }
+        guard let node = nodes[id] else { return }
+        if node.parentID != nil { setParent(id, nil) }
+        nodes.removeValue(forKey: id)
+        children[id] = nil
+        unresolvable[id] = nil
         if var ids = byPID[node.image.pid] {
             ids.removeAll { $0 == id }
             byPID[node.image.pid] = ids.isEmpty ? nil : ids
@@ -368,6 +603,11 @@ public final class ProcessTree: @unchecked Sendable {
 extension Array where Element == ProcessNode {
     /// Nearest agent in the chain (leaf first), including the leaf itself.
     public var nearestAgent: String? { first(where: { $0.agentID != nil })?.agentID }
+
+    /// The chain reaches launchd: every ancestor is known. A chain whose ancestry was lost (a parent
+    /// never seen and not resolvable, a reparented process whose fork-time parent is unknown, a link
+    /// spliced out by the node cap) or cut short (`ProcessTree.chainLimit`) does not.
+    public var reachesLaunchd: Bool { last?.image.isSystemRoot == true && !contains(where: \.ancestorEvicted) }
 
     /// "launchd → Terminal → zsh → cat"
     public func displayString(separator: String = " → ") -> String {

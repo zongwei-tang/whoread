@@ -35,8 +35,11 @@ public enum ProcessSnapshot {
         #endif
     }
 
-    /// Path heuristic for Apple-signed system binaries (corrected by the first real event).
+    /// Path heuristic for Apple-signed system binaries (replaced by the first real event): only
+    /// SIP-protected system locations. `/System/Volumes/Data/…` is the writable data volume (`/Users`,
+    /// `/private/tmp`…) under another spelling, which libproc may report.
     public static func looksLikePlatformBinary(_ path: String) -> Bool {
+        if PathNormalizer.fold(path).hasPrefix("/system/volumes/data/") { return false }
         for p in ["/System/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/bin/", "/sbin/", "/usr/lib/"] where path.hasPrefix(p) {
             return true
         }

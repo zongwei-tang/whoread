@@ -47,14 +47,12 @@ public struct BenignClassifier: Sendable {
 
     /// Returns the benign service ID if the leaf is a benign service *and* it was started by
     /// launchd or by other benign services. A benign binary launched by a shell, an app or an
-    /// agent is not benign — it is attributed and alerted like anything else.
+    /// agent is not benign — it is attributed and alerted like anything else. Ancestry that is
+    /// unknown or cut short (the chain does not reach launchd) is not benign either.
     public func classify(chain: [ProcessNode]) -> String? {
         guard let leaf = chain.first, let service = service(for: leaf.image) else { return nil }
         let ancestors = chain.dropFirst()
-        if ancestors.isEmpty {
-            // Parent unknown: only trust it if the process itself reports launchd as parent.
-            return leaf.image.ppid == 1 ? service.id : nil
-        }
+        guard !ancestors.isEmpty, chain.reachesLaunchd else { return nil }
         for node in ancestors {
             if node.image.isSystemRoot { continue }
             if self.service(for: node.image) == nil { return nil }

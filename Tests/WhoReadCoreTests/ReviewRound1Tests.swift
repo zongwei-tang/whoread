@@ -496,8 +496,12 @@ final class ProcessTreeRound1Tests: XCTestCase {
         }
         let cat = h.spawn(parent, P.cat(2000, parent: parent.pid))
         let chain = h.tree.chain(for: cat, at: at(1))
-        XCTAssertEqual(chain.count, 75, "cat + 70 bash + node + zsh + Terminal + launchd")
+        // The nearest 64 links are walked (dos-3: the cost must not grow with depth); the rest is what
+        // their ancestry recorded: the agent (also the responsible one) and the topmost process.
+        XCTAssertEqual(chain.map(\.image.name), ["cat"] + Array(repeating: "bash", count: 63) + ["node", "Terminal"],
+                       "cat + 63 bash walked, then node (agent) and Terminal (top) recorded")
         XCTAssertEqual(chain.nearestAgent, "claude-code")
+        XCTAssertFalse(chain.reachesLaunchd, "cut short: never trusted as an all-Apple or benign chain")
 
         let out = h.open(cat, sshKey, 2)
         let e = try XCTUnwrap(out.events.first)

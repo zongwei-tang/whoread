@@ -96,13 +96,16 @@ extension AskPolicy {
     /// every ancestor up to launchd are Apple programs in system locations, and no AI agent is in the
     /// chain. Checking only the leaf would let any app read files through /bin/cat or /bin/sh
     /// (`Zoom → sh → cat`); with the whole chain, `Terminal → zsh → cat` counts and that does not.
-    /// `chain` is leaf first, as ProcessTree.chain returns it; empty = the leaf alone is known.
+    /// `chain` is leaf first, as ProcessTree.chain returns it. A chain that does not reach launchd is
+    /// never trusted: an ancestor that is unknown (parent never seen, reparented process whose original
+    /// parent is gone) or beyond a cut-short chain could be anything, an AI agent included.
     public static func isTrustableAppleProgram(_ process: ProcessRecord, chain: [ProcessNode]) -> Bool {
-        guard isAppleProgram(process) else { return false }
+        guard isAppleProgram(process), chain.reachesLaunchd else { return false }
         for node in chain {
             if node.agentID != nil { return false }
-            if node.image.pid == 1 { continue }  // launchd
-            if !isAppleProgram(node.image) { return false }
+            if node.image.isSystemRoot { continue }  // launchd
+            // A libproc image (no event seen from it yet) has a platform flag guessed from its path.
+            if node.fromSnapshot || !isAppleProgram(node.image) { return false }
         }
         return true
     }
