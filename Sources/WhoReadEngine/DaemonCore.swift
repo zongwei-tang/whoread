@@ -325,6 +325,8 @@ public final class DaemonCore: @unchecked Sendable {
     private let normalizerBox: LockedBox<PathNormalizer>
     private var lastRetention = Date.distantPast
     private var lastRediscovery = Date()
+    /// Guarded by `lock`: the tree's agent generation last saved (`persistAgentAncestry`).
+    private var savedAgentGeneration: UInt64?
     /// Where an operation may change a followed link, for the current classifier (files-9).
     private let linkWatch: LockedBox<LinkWatch>
     private let linkSink: LinkWatchingSink
@@ -681,8 +683,9 @@ public final class DaemonCore: @unchecked Sendable {
         }
 
         init(_ a: Alert) {
+            // The whole chain's agents (the stored chain keeps the nearest 64 links only).
             key = AskKey(responsibleKey: a.responsible.key, categoryID: a.categoryID, access: a.accesses,
-                         chainAgents: Array(Set(a.chain.compactMap(\.agentID))))
+                         chainAgents: a.scopeAgents, ancestryKnown: a.ancestryKnown ?? true)
             responsible = a.responsible
             appleProgram = a.appleProgram
         }
@@ -693,11 +696,13 @@ public final class DaemonCore: @unchecked Sendable {
         var ruleAccess: RuleAccess { key.access == .read ? .read : (key.access == .write ? .write : .any) }
 
         /// An allow rule saved from this answer covers `other` (same subject and pins, category, an
-        /// access it includes, only agents it names: Rule.chainAgents).
+        /// access it includes, only agents it names: Rule.chainAgents; a chain of unknown ancestry only
+        /// if this answer was given for one: Rule.coversUnknownAncestry).
         func allowCovers(_ other: AnswerScope) -> Bool {
             other.key.responsibleKey == key.responsibleKey && other.key.categoryID == key.categoryID
                 && !other.key.access.isEmpty && other.key.access.isSubset(of: key.access)
                 && Set(other.key.chainAgents).isSubset(of: Set(key.chainAgents))
+                && (other.key.ancestryKnown || !key.ancestryKnown)
                 && (responsible.teamID == nil || other.responsible.teamID == responsible.teamID)
                 && (cdhashPin == nil || other.responsible.cdhash?.lowercased() == cdhashPin?.lowercased())
         }
@@ -772,11 +777,12 @@ public final class DaemonCore: @unchecked Sendable {
                                        maxBytes: DaemonCore.maxNameBytes),
             enabled: true, target: .category(categoryID), subject: subject, access: scope.ruleAccess, action: .allow,
             expiresAt: once ? now.addingTimeInterval(DaemonCore.allowOnceDuration) : nil, createdAt: now,
-            template: DaemonCore.askAnswerTemplate, chainAgents: scope.key.chainAgents)
+            template: DaemonCore.askAnswerTemplate, chainAgents: scope.key.chainAgents,
+            coversUnknownAncestry: !scope.key.ancestryKnown)
         try DaemonCore.validate(rule)
         func sameScope(_ x: Rule) -> Bool {
             x.template == DaemonCore.askAnswerTemplate && x.action == .allow && x.target == rule.target && x.subject == rule.subject
-                && x.access == rule.access && x.chainAgents == rule.chainAgents
+                && x.access == rule.access && x.chainAgents == rule.chainAgents && x.coversUnknownAncestry == rule.coversUnknownAncestry
         }
         try saveRuleChange(peer: peer, privileged: true) { list in
             // Answers expire: drop the dead ones, and the earlier "allow once" this one replaces.
@@ -959,6 +965,7 @@ public final class DaemonCore: @unchecked Sendable {
         let r = alert.responsible
         let subject = RuleSubject.responsible(key: r.key, teamID: r.teamID, cdhash: scope.cdhashPin)
         let chainAgents = scope.key.chainAgents
+        let unknownAncestry = !scope.key.ancestryKnown
         let access = scope.ruleAccess
         // The action answered as a question would be (rule, setting, held accesses released or denied).
         var answered = true
@@ -973,7 +980,8 @@ public final class DaemonCore: @unchecked Sendable {
                 // firstPath is the access that made the alert "blocked" (the coalescer moves it on escalation).
                 try addException(toRule: ruleID, RuleException(
                     subject: subject, pathPrefix: alert.firstPath, categoryID: alert.categoryID, access: access,
-                    chainAgents: chainAgents, expiresAt: now.addingTimeInterval(600), remainingUses: 1, createdAt: now))
+                    chainAgents: chainAgents, coversUnknownAncestry: unknownAncestry, expiresAt: now.addingTimeInterval(600),
+                    remainingUses: 1, createdAt: now))
                 // A rule's block: the path-scoped, one-use exception is the whole answer. A category-wide
                 // 10-minute allow rule would also let through files the deny rule does not cover, which
                 // would otherwise be asked. (A rule denial never has an open question to release.)
@@ -985,7 +993,8 @@ public final class DaemonCore: @unchecked Sendable {
             guard privileged else { throw IPCError(.notPermitted, "allowing weakens protection: run it with sudo, or use the WhoRead app") }
             if let ruleID = alert.ruleID, alert.kind == .blocked || alert.kind == .wouldBlock {
                 try addException(toRule: ruleID, RuleException(subject: subject, categoryID: alert.categoryID, access: access,
-                                                               chainAgents: chainAgents, createdAt: now))
+                                                               chainAgents: chainAgents, coversUnknownAncestry: unknownAncestry,
+                                                               createdAt: now))
             }
             try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
             baseline.approve(responsibleKey: r.key, categoryID: alert.categoryID, at: now)
@@ -1677,6 +1686,62 @@ public final class DaemonCore: @unchecked Sendable {
             baseline.markDirty(dirty.map(\.0))
             Log.error("baseline save failed: \(error)")
         }
+    }
+
+    /// Store key of the AI agent ancestry of running processes, restored at the next start.
+    static let agentAncestryKey = "agentAncestry"
+
+    struct StoredAgentAncestry: Codable {
+        /// kern.boottime when saved: after a reboot none of these processes exist.
+        var bootTime: Date?
+        var records: [AgentAncestryRecord]
+    }
+
+    /// At most this much is saved (long executable paths): the oldest records are kept.
+    static let maxAgentAncestryBytes = 512 * 1024
+
+    /// Saves the AI agent ancestry of running processes (ProcessTree.agentAncestry) when it changed, so
+    /// a restart does not lose the agent of a job whose shell has exited. Called every few seconds and
+    /// at stop; never on the ES callback thread.
+    public func persistAgentAncestry(bootTime: Date? = DaemonCore.bootTime()) {
+        let generation = tree.agentAncestryGeneration
+        lock.lock(); let unchanged = savedAgentGeneration == generation; lock.unlock()
+        guard !unchanged else { return }
+        do {
+            var stored = StoredAgentAncestry(bootTime: bootTime, records: tree.agentAncestry())
+            var data = try JSONEncoder().encode(stored)
+            while data.count > DaemonCore.maxAgentAncestryBytes && !stored.records.isEmpty {
+                stored.records.removeLast((stored.records.count + 1) / 2)
+                data = try JSONEncoder().encode(stored)
+            }
+            try store.setValue(data, forKey: DaemonCore.agentAncestryKey)
+            lock.lock(); savedAgentGeneration = generation; lock.unlock()
+        } catch {
+            Log.error("saving the AI agent ancestry of running processes failed: \(error)")
+        }
+    }
+
+    /// Right after the tree is seeded at start: gives running processes the AI agents they had before.
+    /// Records saved before the last boot are ignored (should a pid and start time match by chance);
+    /// where either boot time is unknown, pid and start time alone decide.
+    public func restoreAgentAncestry(now: Date = Date(), bootTime: Date? = DaemonCore.bootTime()) {
+        guard let data = try? store.value(forKey: DaemonCore.agentAncestryKey),
+              let stored = try? JSONDecoder().decode(StoredAgentAncestry.self, from: data) else { return }
+        if let saved = stored.bootTime, let boot = bootTime, abs(saved.timeIntervalSince(boot)) > 1 { return }
+        tree.restoreAgentAncestry(stored.records, at: now)
+        Log.info("restored the AI agent ancestry of up to \(stored.records.count) running processes")
+    }
+
+    /// When the system booted (kern.boottime), nil if unknown (a sandbox may refuse the sysctl).
+    public static func bootTime() -> Date? {
+        #if canImport(Darwin)
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &tv, &size, nil, 0) == 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(tv.tv_sec) + TimeInterval(tv.tv_usec) / 1_000_000)
+        #else
+        return nil
+        #endif
     }
 
     /// Saves consumed "allow once" uses, and drops exceptions that can never match again. Only writes

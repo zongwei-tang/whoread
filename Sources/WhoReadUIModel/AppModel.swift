@@ -442,11 +442,13 @@ public final class AppModel {
 
     /// The AI agents a rule is scoped to (`Rule.chainAgents`, set by answers to questions); nil
     /// for a rule that applies to any chain. Without it, an answer for Terminal and one for Claude
-    /// Code inside Terminal would read the same in the Rules tab.
+    /// Code inside Terminal would read the same in the Rules tab. An answer given for a program whose
+    /// starter was unknown also covers such chains (`Rule.coversUnknownAncestry`), and says so.
     public func chainScope(_ r: Rule) -> String? {
         guard let agents = r.chainAgents else { return nil }
-        if agents.isEmpty { return L10n.t(.ruleChainNoAgent, language) }
-        return L10n.f(.ruleChainAgentsFormat, agents.map(agentName).joined(separator: ", "), language: language)
+        let scope = agents.isEmpty ? L10n.t(.ruleChainNoAgent, language)
+            : L10n.f(.ruleChainAgentsFormat, agents.map(agentName).joined(separator: ", "), language: language)
+        return r.coversUnknownAncestry ? scope + L10n.t(.ruleChainUnknownStarter, language) : scope
     }
 
     /// Whether a rule's path prefix is covered by monitoring, as the daemon decides when saving it:

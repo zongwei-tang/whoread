@@ -267,6 +267,8 @@ public final class RuleEngine: @unchecked Sendable {
             return r
         }
         let chainAgents = Set(chain.compactMap(\.agentID))
+        // A chain that does not reach launchd (ancestry unknown or cut short) may hide an AI agent.
+        let ancestryKnown = chain.reachesLaunchd
 
         let processPathKey = PathNormalizer.fold(process.executablePath)
         let processCdhash = process.cdhash?.lowercased()
@@ -298,7 +300,7 @@ public final class RuleEngine: @unchecked Sendable {
                     // (`mkdir X.app; cp /bin/cat X.app/`) would otherwise be charged to that bundle.
                     if cdhash == nil, key.hasPrefix("agent:") {
                         let id = String(key.dropFirst("agent:".count))
-                        if chain.contains(where: { $0.agentID == id && (team == nil || $0.image.teamID == team) }) {
+                        if chain.contains(where: { $0.agentID == id && (team == nil || $0.agentTeamID == team) }) {
                             return !(exceptOwners && owns(category, primary))
                         }
                     }
@@ -363,12 +365,14 @@ public final class RuleEngine: @unchecked Sendable {
                     }
                     // Scoped to the AI agents the user saw: a chain with any other agent is not covered.
                     if let scope = c.chainAgents, !chainAgents.isSubset(of: scope) { continue }
+                    // Nor, for an answer given for a known chain, one whose ancestry is unknown.
+                    if c.chainAgents != nil, c.rule.action == .allow, !c.rule.coversUnknownAncestry, !ancestryKnown { continue }
                     guard subjectMatches(c.rule.subject, category: category, primary: target.primaryCategory,
                                          unsignedKey: c.unsignedKey, widenForDeny: c.rule.action == .deny) else { continue }
 
                     switch c.rule.action {
                     case .deny:
-                        if case .anyNonOwner = c.rule.subject, process.isPlatformBinary, !c.rule.includePlatformBinaries {
+                        if case .anyNonOwner = c.rule.subject, process.isVerifiedPlatformBinary, !c.rule.includePlatformBinaries {
                             continue
                         }
                         // Exceptions carve the subject out of this rule.
@@ -379,7 +383,8 @@ public final class RuleEngine: @unchecked Sendable {
                             // Only requests the approval fully covers (a read approval is not a write approval).
                             if let a = e.access, a.intersect(requested) != requested { return false }
                             // Only chains whose agents the user saw when approving.
-                            if let approved = e.chainAgents, !chainAgents.isSubset(of: Set(approved)) { return false }
+                            if !Rule.scopeCovers(agents: e.chainAgents, unknownAncestry: e.coversUnknownAncestry,
+                                                 chainAgents: chainAgents, ancestryKnown: ancestryKnown) { return false }
                             let prefixes = c.exceptionPrefixKeys[ei]
                             if !prefixes.isEmpty && !prefixes.contains(where: { pathKey == $0 || pathKey.hasPrefix($0 + "/") }) {
                                 return false
@@ -439,7 +444,6 @@ public final class RuleEngine: @unchecked Sendable {
             // Every (path, category) with a requested read or write needs a decision. An owner only
             // counts with no AI agent in the chain: an agent can drive ssh or git to read a key. A
             // chain that does not reach launchd (ancestry unknown or cut short) may hide one.
-            let ancestryKnown = chain.reachesLaunchd
             var undecided: [(target: Int, category: Int)] = []
             var byOwner = false
             // ES caches an AUTH_OPEN allow for this executable and file whatever the later open's
@@ -472,7 +476,7 @@ public final class RuleEngine: @unchecked Sendable {
                 }.intersection(.readWrite)
                 // The daemon always has an attributor; without one, the program stands for itself.
                 let key = AskKey(responsibleKey: responsible()?.key ?? "bin:" + PathNormalizer.fold(process.executablePath),
-                                 categoryID: categoryID, access: access, chainAgents: Array(chainAgents))
+                                 categoryID: categoryID, access: access, chainAgents: Array(chainAgents), ancestryKnown: ancestryKnown)
                 return RuleDecision(verdict: .ask, policyDenied: enforcedDenied, reason: .askUser, cacheable: false, askKey: key)
             }
             consume()

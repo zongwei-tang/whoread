@@ -297,6 +297,8 @@ final class AskCLITests: XCTestCase {
             Rule(id: "agent", target: .category("ssh"), subject: terminal, access: .read, action: .allow,
                  expiresAt: t.addingTimeInterval(600), template: "ask-answer", chainAgents: ["claude-code"]),
             Rule(id: "old", target: .category("ssh"), subject: terminal, access: .read, action: .allow),
+            Rule(id: "unknown", target: .category("ssh"), subject: terminal, access: .read, action: .allow, template: "ask-answer",
+                 chainAgents: [], coversUnknownAncestry: true),
         ]
         let (server, socket) = try serve(stub, dir)
         defer { server.stop() }
@@ -304,7 +306,11 @@ final class AskCLITests: XCTestCase {
         XCTAssertEqual(r.status, 0, r.stderr)
         let plain = try XCTUnwrap(line(r.stdout, starting: "plain "), r.stdout)
         XCTAssertTrue(plain.contains("terminal.app, no AI agent in chain"), plain)
+        XCTAssertFalse(plain.contains("unknown starter"), plain)
         XCTAssertFalse(plain.contains("until"), plain)
+        // An answer given for a program whose starter was unknown also covers such chains.
+        let unknown = try XCTUnwrap(line(r.stdout, starting: "unknown "), r.stdout)
+        XCTAssertTrue(unknown.contains("terminal.app, no AI agent in chain (also unknown starter)"), unknown)
         let agent = try XCTUnwrap(line(r.stdout, starting: "agent "), r.stdout)
         XCTAssertTrue(agent.contains("terminal.app, chain agents claude-code"), agent)
         XCTAssertTrue(agent.contains("on until 2025-10-09 09:03:20"), agent)

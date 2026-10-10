@@ -19,8 +19,9 @@ public final class AlertCoalescer: @unchecked Sendable {
         case passed
         /// Denied by a rule (or only along with another category).
         case blocked
-        /// Denied while waiting for an answer; the sorted agent ids in the chain.
-        case asked(chainAgents: [String])
+        /// Denied while waiting for an answer; the sorted agent ids in the whole chain, and whether the
+        /// chain is known (an answer for a known chain never covers one whose ancestry was lost).
+        case asked(chainAgents: [String], ancestryKnown: Bool)
     }
 
     private struct Key: Hashable {
@@ -29,8 +30,9 @@ public final class AlertCoalescer: @unchecked Sendable {
         var lane: Lane
     }
 
-    private static func lane(kind: AlertKind?, denied: Bool, chain: [ChainLink]) -> Lane {
-        if kind == .ask { return .asked(chainAgents: Set(chain.compactMap(\.agentID)).sorted()) }
+    private static func lane(kind: AlertKind?, denied: Bool, chainAgents: [String], ancestryKnown: Bool?) -> Lane {
+        // Records from before the ancestry was kept count as known, as their answers were scoped then.
+        if kind == .ask { return .asked(chainAgents: chainAgents, ancestryKnown: ancestryKnown ?? true) }
         return denied ? .blocked : .passed
     }
 
@@ -57,7 +59,8 @@ public final class AlertCoalescer: @unchecked Sendable {
         self.nextID = max(self.nextID, nextID)
         for a in openAlerts {
             open[Key(responsibleKey: a.responsible.key, categoryID: a.categoryID,
-                     lane: AlertCoalescer.lane(kind: a.kind, denied: a.kind == .blocked, chain: a.chain))] = a
+                     lane: AlertCoalescer.lane(kind: a.kind, denied: a.kind == .blocked, chainAgents: a.scopeAgents,
+                                               ancestryKnown: a.ancestryKnown))] = a
         }
     }
 
@@ -67,7 +70,9 @@ public final class AlertCoalescer: @unchecked Sendable {
     public func ingest(_ event: AnalyzedEvent, kind: AlertKind?, firstTime: Bool = false, appleProgram: Bool = false) -> AlertUpdate? {
         lock.lock(); defer { lock.unlock() }
         let key = Key(responsibleKey: event.responsible.key, categoryID: event.categoryID,
-                      lane: AlertCoalescer.lane(kind: kind, denied: event.decision == .denied, chain: event.chain))
+                      lane: AlertCoalescer.lane(kind: kind, denied: event.decision == .denied,
+                                                chainAgents: event.chainAgents ?? Set(event.chain.compactMap(\.agentID)).sorted(),
+                                                ancestryKnown: event.ancestryKnown))
         if var alert = open[key], event.time < alert.windowEndsAt {
             // A new kind of access (a write after reads) is news even at the same alert level.
             let addsAccess = kind != nil && !alert.accesses.isSuperset(of: event.access)
@@ -88,6 +93,8 @@ public final class AlertCoalescer: @unchecked Sendable {
                 alert.firstPath = event.path
                 alert.firstEventID = event.id
                 alert.chain = event.chain
+                alert.chainAgents = event.chainAgents
+                alert.ancestryKnown = event.ancestryKnown
                 alert.agentID = event.agentID ?? alert.agentID
                 alert.paths.removeAll { $0 == event.path }
                 alert.paths.insert(event.path, at: 0)
@@ -112,7 +119,8 @@ public final class AlertCoalescer: @unchecked Sendable {
             windowEndsAt: event.time.addingTimeInterval(window), responsible: event.responsible,
             categoryID: event.categoryID, severity: event.severity, count: 1, accesses: event.access,
             firstPath: event.path, firstEventID: event.id, lastEventID: event.id, paths: [event.path],
-            chain: event.chain, agentID: event.agentID, ruleID: event.ruleID, firstTime: firstTime, appleProgram: appleProgram)
+            chain: event.chain, agentID: event.agentID, ruleID: event.ruleID, firstTime: firstTime, appleProgram: appleProgram,
+            chainAgents: event.chainAgents, ancestryKnown: event.ancestryKnown)
         nextID += 1
         open[key] = alert
         return AlertUpdate(alert: alert, change: .created)

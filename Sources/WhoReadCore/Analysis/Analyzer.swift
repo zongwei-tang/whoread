@@ -286,6 +286,9 @@ public final class Analyzer: @unchecked Sendable {
         let process = chain.first?.image ?? activity.process
         let responsible = attributor.attribute(chain: chain)
         let agentID = chain.nearestAgent
+        // Agents beyond the stored links count too; a chain that does not reach launchd may hide one.
+        let chainAgents = Set(chain.compactMap(\.agentID)).sorted()
+        let ancestryKnown = chain.reachesLaunchd
         let benignID = benign.classify(chain: chain)
         // Offers "allow all Apple programs" on the alert (and is what that setting covers).
         let appleProgram = AskPolicy.isTrustableAppleProgram(process, chain: chain)
@@ -390,7 +393,8 @@ public final class Analyzer: @unchecked Sendable {
                 path: primary.path, secondaryPath: other, viaAncestor: primary.viaAncestor,
                 categoryID: group.category.id, severity: group.category.severity, process: ArgvRedactor.redact(process),
                 chain: chainLinks, responsible: responsible, agentID: agentID, isOwner: isOwner,
-                benignServiceID: benignID, decision: eventDecision, ruleID: decision.ruleID)
+                benignServiceID: benignID, decision: eventDecision, ruleID: decision.ruleID,
+                chainAgents: chainAgents, ancestryKnown: ancestryKnown)
 
             let keys = access.kinds.map { BaselineKey(responsibleKey: responsible.key, categoryID: group.category.id, access: $0) }
             let firstTime = !learning && benignID == nil && keys.contains { !baseline.contains($0) }
@@ -426,8 +430,9 @@ public final class Analyzer: @unchecked Sendable {
         if decision.suppressAlert { return nil }
         if decision.forceAlert { return .ruleAlert }
         // As in ask mode, an owner is only expected with no AI agent in its chain (an agent can drive
-        // ssh or git to read a key).
-        if event.isOwner && event.agentID == nil { return nil }
+        // ssh or git to read a key), and only a known chain can show there is none.
+        let ancestryKnown = event.ancestryKnown == true
+        if event.isOwner && event.agentID == nil && ancestryKnown { return nil }
         if trustedApple { return nil }
         let keys = event.access.kinds.map {
             BaselineKey(responsibleKey: event.responsible.key, categoryID: event.categoryID, access: $0)
@@ -435,7 +440,8 @@ public final class Analyzer: @unchecked Sendable {
         if keys.isEmpty { return nil }
         // Approvals are keyed by the responsible app only. An AI agent running a program charged to an
         // app (a tool inside its bundle, such as Xcode's git) is not what the user approved for that app.
-        let agentDriven = event.agentID != nil && event.responsible.kind != .agent
+        // Nor is a program whose starter is unknown: the chain stops there, so it is charged to itself.
+        let agentDriven = (event.agentID != nil || !ancestryKnown) && event.responsible.kind != .agent
         if event.severity == .critical && (agentDriven || !keys.allSatisfy(baseline.isApproved)) {
             return .criticalNonOwner
         }

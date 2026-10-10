@@ -1380,24 +1380,38 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         let cdhash = withUnsafeBytes(of: proc.cdhash) { raw in raw.map { String(format: "%02x", $0) }.joined() }
         let signing = string(proc.signing_id)
         let team = string(proc.team_id)
+        let pid = audit_token_to_pid(proc.audit_token)
         var start: Date?
         var responsible: Int32?
+        var parent: ProcessToken?
+        var category: SigningCategory?
         if version >= 3 {
             start = Date(timeIntervalSince1970: TimeInterval(proc.start_time.tv_sec) + TimeInterval(proc.start_time.tv_usec) / 1_000_000)
         }
-        if version >= 4 { responsible = audit_token_to_pid(proc.responsible_audit_token) }
+        if version >= 4 {
+            // ESMessageCore.h: the responsible token "may be the process itself in case there is no
+            // responsible process or the responsible process has already exited".
+            let r = audit_token_to_pid(proc.responsible_audit_token)
+            responsible = r == pid ? nil : r
+            parent = ProcessToken(pid: audit_token_to_pid(proc.parent_audit_token),
+                                  pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+        }
+        if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
         return ProcessRecord(
-            pid: audit_token_to_pid(proc.audit_token),
+            pid: pid,
             pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.audit_token)),
             ppid: proc.ppid,
             originalPPID: proc.original_ppid,
             responsiblePID: responsible,
+            parentToken: parent,
             executablePath: path(proc.executable).path,
             pathTruncated: proc.executable.pointee.path_truncated,
             signingID: signing.isEmpty ? nil : signing,
             teamID: team.isEmpty ? nil : team,
             cdhash: cdhash,
             isPlatformBinary: proc.is_platform_binary,
+            signingCategory: category,
+            codeSigningFlags: proc.codesigning_flags,
             argv: nil,
             startTime: start,
             euid: audit_token_to_euid(proc.audit_token))

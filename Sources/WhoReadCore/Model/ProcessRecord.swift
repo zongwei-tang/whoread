@@ -12,7 +12,13 @@ public struct ProcessRecord: Codable, Hashable, Sendable {
     public var ppid: Int32
     /// ppid at fork time; survives reparenting to launchd.
     public var originalPPID: Int32?
+    /// The responsible process (macOS's "responsible app"); nil when there is none, including when the
+    /// source names the process itself (no responsible process, or it has exited).
     public var responsiblePID: Int32?
+    /// es_process_t.parent_audit_token (message version >= 4): pid and pidversion of a parent's exact
+    /// execution. It replaces `ppid`, so it may name the process that adopted this one; it is only
+    /// used when its pid is the fork-time parent's (`ProcessTree.parentExecution`).
+    public var parentToken: ProcessToken?
     public var executablePath: String
     public var pathTruncated: Bool
     public var signingID: String?
@@ -20,6 +26,11 @@ public struct ProcessRecord: Codable, Hashable, Sendable {
     /// Lower-case hex.
     public var cdhash: String?
     public var isPlatformBinary: Bool
+    /// es_process_t.cs_validation_category (message version >= 10): the code signing policy the kernel
+    /// validated this executable under. nil when the source does not say (older macOS, libproc).
+    public var signingCategory: SigningCategory?
+    /// es_process_t.codesigning_flags (cs_blobs.h), as the kernel had them when the event was made.
+    public var codeSigningFlags: UInt32?
     public var argv: [String]?
     /// Fork time. Stays the same across exec, so (pid, startTime) identifies a process instance.
     public var startTime: Date?
@@ -31,12 +42,15 @@ public struct ProcessRecord: Codable, Hashable, Sendable {
         ppid: Int32,
         originalPPID: Int32? = nil,
         responsiblePID: Int32? = nil,
+        parentToken: ProcessToken? = nil,
         executablePath: String,
         pathTruncated: Bool = false,
         signingID: String? = nil,
         teamID: String? = nil,
         cdhash: String? = nil,
         isPlatformBinary: Bool = false,
+        signingCategory: SigningCategory? = nil,
+        codeSigningFlags: UInt32? = nil,
         argv: [String]? = nil,
         startTime: Date? = nil,
         euid: UInt32? = nil
@@ -46,12 +60,15 @@ public struct ProcessRecord: Codable, Hashable, Sendable {
         self.ppid = ppid
         self.originalPPID = originalPPID
         self.responsiblePID = responsiblePID
+        self.parentToken = parentToken
         self.executablePath = executablePath
         self.pathTruncated = pathTruncated
         self.signingID = signingID
         self.teamID = teamID
         self.cdhash = cdhash
         self.isPlatformBinary = isPlatformBinary
+        self.signingCategory = signingCategory
+        self.codeSigningFlags = codeSigningFlags
         self.argv = argv
         self.startTime = startTime
         self.euid = euid
@@ -79,6 +96,9 @@ public struct ProcessRecord: Codable, Hashable, Sendable {
         if r.pidVersion == nil { r.pidVersion = other.pidVersion }
         if r.originalPPID == nil { r.originalPPID = other.originalPPID }
         if r.responsiblePID == nil { r.responsiblePID = other.responsiblePID }
+        if r.parentToken == nil { r.parentToken = other.parentToken }
+        if r.signingCategory == nil { r.signingCategory = other.signingCategory }
+        if r.codeSigningFlags == nil { r.codeSigningFlags = other.codeSigningFlags }
         if r.signingID == nil { r.signingID = other.signingID }
         if r.teamID == nil { r.teamID = other.teamID }
         if r.cdhash == nil { r.cdhash = other.cdhash }
@@ -89,6 +109,81 @@ public struct ProcessRecord: Codable, Hashable, Sendable {
             r.isPlatformBinary = true
         }
         return r
+    }
+}
+
+/// One execution of a process: the pid and pidversion of an audit token. exec gives the process a new
+/// pidversion, so (pid, pidversion) tells apart the images of one pid as well as reused pids.
+public struct ProcessToken: Codable, Hashable, Sendable {
+    public var pid: Int32
+    public var pidVersion: UInt32
+
+    public init(pid: Int32, pidVersion: UInt32) {
+        self.pid = pid
+        self.pidVersion = pidVersion
+    }
+}
+
+/// es_cs_validation_category_t (ESTypes.h): the code signing policy under which the kernel validated an
+/// executable. Kept as the raw value, so a category this build does not know is never mistaken for a
+/// trusted one.
+public struct SigningCategory: RawRepresentable, Codable, Hashable, Sendable {
+    public var rawValue: UInt32
+    public init(rawValue: UInt32) { self.rawValue = rawValue }
+
+    public static let invalid = SigningCategory(rawValue: 0)
+    public static let platform = SigningCategory(rawValue: 1)
+    public static let testFlight = SigningCategory(rawValue: 2)
+    public static let development = SigningCategory(rawValue: 3)
+    public static let appStore = SigningCategory(rawValue: 4)
+    public static let enterprise = SigningCategory(rawValue: 5)
+    public static let developerID = SigningCategory(rawValue: 6)
+    public static let localSigning = SigningCategory(rawValue: 7)
+    public static let rosetta = SigningCategory(rawValue: 8)
+    public static let oopJIT = SigningCategory(rawValue: 9)
+    /// ES_CS_VALIDATION_CATEGORY_NONE (named apart from Optional's `.none`).
+    public static let noPolicy = SigningCategory(rawValue: 10)
+}
+
+/// Code signing flags from `es_process_t.codesigning_flags`. Values from <kern/cs_blobs.h> (in the
+/// SDK's Kernel.framework headers, which user space cannot include).
+public enum CodeSigningFlag {
+    /// CS_GET_TASK_ALLOW: the code has the get-task-allow entitlement (Xcode debug builds), so the
+    /// user's other processes may get its task port: debug it, read and write its memory.
+    public static let getTaskAllow: UInt32 = 0x0000_0004
+    /// CS_DEBUGGED: the process is, or has been, debugged and allowed to run with invalid pages.
+    public static let debugged: UInt32 = 0x1000_0000
+    /// CS_VALID: every page the kernel validated so far matched the signature. ESMessageCore.h: a page
+    /// that was tampered with clears it once it is paged in, and the process runs on unless CS_KILL is
+    /// set (platform binaries and hardened runtime).
+    public static let valid: UInt32 = 0x0000_0001
+    /// CS_SIGNED: the process has a signature (which may have gone invalid).
+    public static let signed: UInt32 = 0x2000_0000
+}
+
+extension ProcessRecord {
+    /// Other processes of the user may control this one (get-task-allow, or it has been debugged), or it
+    /// runs code its signature does not cover (signed, but no longer valid), so its code identity says
+    /// nothing about what it does. False when the source gives no flags.
+    public var isControllable: Bool {
+        guard let flags = codeSigningFlags else { return false }
+        if flags & (CodeSigningFlag.getTaskAllow | CodeSigningFlag.debugged) != 0 { return true }
+        return flags & CodeSigningFlag.signed != 0 && flags & CodeSigningFlag.valid == 0
+    }
+
+    /// The platform flag, where the kernel's signing category confirms it: Apple trust (Apple programs,
+    /// platform owners, benign services, never-block) needs category PLATFORM, and code nobody else
+    /// controls. Without a category (older macOS, libproc) the flag alone counts, as before.
+    public var isVerifiedPlatformBinary: Bool {
+        isPlatformBinary && (signingCategory.map { $0 == .platform } ?? true) && !isControllable
+    }
+
+    /// A third-party code identity (team ID, signing ID) can stand for its vendor: signed for
+    /// distribution (Developer ID, App Store) where the kernel's category is known, and not controllable.
+    /// Development, local or ad-hoc signing and every other category are not: a debug build of an app
+    /// carries the vendor's team ID too.
+    public var hasDistributionSignature: Bool {
+        (signingCategory.map { $0 == .developerID || $0 == .appStore } ?? true) && !isControllable
     }
 }
 

@@ -104,7 +104,9 @@ public final class EsloggerParser: @unchecked Sendable {
         else {
             return .malformed("no event object")
         }
-        guard let processObject = root["process"] as? [String: Any], let process = EsloggerParser.process(processObject) else {
+        let messageVersion = J.int(root["version"])
+        guard let processObject = root["process"] as? [String: Any],
+              let process = EsloggerParser.process(processObject, messageVersion: messageVersion) else {
             return .malformed("no process")
         }
         let time = J.string(root["time"]).flatMap(RFC3339.parse) ?? Date()
@@ -195,7 +197,8 @@ public final class EsloggerParser: @unchecked Sendable {
             }
             return file(.mount, OperationSemantics.mount(mountPoint: mountPoint))
         case "exec":
-            guard let targetObject = body["target"] as? [String: Any], var target = EsloggerParser.process(targetObject) else {
+            guard let targetObject = body["target"] as? [String: Any],
+                  var target = EsloggerParser.process(targetObject, messageVersion: messageVersion) else {
                 return .malformed("exec without target")
             }
             if let args = body["args"] as? [Any] {
@@ -203,7 +206,8 @@ public final class EsloggerParser: @unchecked Sendable {
             }
             return .event(.exec(process: process, target: target, time: time))
         case "fork":
-            guard let childObject = body["child"] as? [String: Any], let child = EsloggerParser.process(childObject) else {
+            guard let childObject = body["child"] as? [String: Any],
+                  let child = EsloggerParser.process(childObject, messageVersion: messageVersion) else {
                 return .malformed("fork without child")
             }
             return .event(.fork(parent: process, child: child, time: time))
@@ -233,23 +237,37 @@ public final class EsloggerParser: @unchecked Sendable {
         return UInt32(truncatingIfNeeded: mode) & 0o170000 == 0o100000
     }
 
-    static func process(_ o: [String: Any]) -> ProcessRecord? {
+    /// An es_process_t. `messageVersion` (the message's `version`) gates the fields that exist only
+    /// from some version on; nil (not reported) takes whatever is there.
+    static func process(_ o: [String: Any], messageVersion: Int? = nil) -> ProcessRecord? {
         let token = o["audit_token"] as? [String: Any]
         guard let pid = J.int(token?["pid"]) ?? J.int(o["pid"]) else { return nil }
         guard let exe = J.file(o["executable"]) else { return nil }
-        let responsible = o["responsible_audit_token"] as? [String: Any]
+        func since(_ version: Int) -> Bool { messageVersion.map { $0 >= version } ?? true }
+        let pid32 = Int32(truncatingIfNeeded: pid)
+        let responsible = since(4) ? o["responsible_audit_token"] as? [String: Any] : nil
+        // "May be the process itself in case there is no responsible process or [it] has already exited".
+        let responsiblePID = J.int(responsible?["pid"]).map { Int32(truncatingIfNeeded: $0) }.flatMap { $0 == pid32 ? nil : $0 }
+        let parent = since(4) ? o["parent_audit_token"] as? [String: Any] : nil
+        var parentToken: ProcessToken?
+        if let p = J.int(parent?["pid"]), let v = J.int(parent?["pidversion"]) {
+            parentToken = ProcessToken(pid: Int32(truncatingIfNeeded: p), pidVersion: UInt32(truncatingIfNeeded: v))
+        }
         return ProcessRecord(
-            pid: Int32(truncatingIfNeeded: pid),
+            pid: pid32,
             pidVersion: J.int(token?["pidversion"]).map { UInt32(truncatingIfNeeded: $0) },
             ppid: Int32(truncatingIfNeeded: J.int(o["ppid"]) ?? 0),
             originalPPID: J.int(o["original_ppid"]).map { Int32(truncatingIfNeeded: $0) },
-            responsiblePID: J.int(responsible?["pid"]).map { Int32(truncatingIfNeeded: $0) },
+            responsiblePID: responsiblePID,
+            parentToken: parentToken,
             executablePath: exe.path,
             pathTruncated: exe.truncated,
             signingID: J.string(o["signing_id"]).flatMap { $0.isEmpty ? nil : $0 },
             teamID: J.string(o["team_id"]).flatMap { $0.isEmpty ? nil : $0 },
             cdhash: J.hex(o["cdhash"]),
             isPlatformBinary: J.bool(o["is_platform_binary"]) ?? false,
+            signingCategory: since(10) ? J.int(o["cs_validation_category"]).map { SigningCategory(rawValue: UInt32(truncatingIfNeeded: $0)) } : nil,
+            codeSigningFlags: J.int(o["codesigning_flags"]).map { UInt32(truncatingIfNeeded: $0) },
             argv: nil,
             startTime: J.string(o["start_time"]).flatMap(RFC3339.parse),
             euid: J.int(token?["euid"]).map { UInt32(truncatingIfNeeded: $0) })

@@ -32,6 +32,13 @@ public struct AnalyzedEvent: Codable, Hashable, Sendable, Identifiable {
     public var responsible: ResponsibleEntity
     /// Nearest AI agent in the chain (the process itself included).
     public var agentID: String?
+    /// Every AI agent in the whole chain, sorted (`chain` keeps only the nearest 64 links). nil in records
+    /// from before it was kept.
+    public var chainAgents: [String]?
+    /// The chain reaches launchd: every ancestor is known. false: ancestry was lost (a parent never seen,
+    /// a process whose parent was gone before it was seen, a chain cut short), so an AI agent may be
+    /// hidden above it. nil in records from before it was kept.
+    public var ancestryKnown: Bool?
     public var isOwner: Bool
     /// Non-nil when a benign system service did this; such events are folded in the UI.
     public var benignServiceID: String?
@@ -43,7 +50,7 @@ public struct AnalyzedEvent: Codable, Hashable, Sendable, Identifiable {
         id: Int64, time: Date, operation: FileOperation, access: AccessSet, path: String, secondaryPath: String?,
         viaAncestor: Bool = false, categoryID: String, severity: Severity, process: ProcessRecord, chain: [ChainLink],
         responsible: ResponsibleEntity, agentID: String?, isOwner: Bool, benignServiceID: String?,
-        decision: EventDecision, ruleID: String?, alertID: Int64? = nil
+        decision: EventDecision, ruleID: String?, alertID: Int64? = nil, chainAgents: [String]? = nil, ancestryKnown: Bool? = nil
     ) {
         self.id = id
         self.time = time
@@ -58,6 +65,8 @@ public struct AnalyzedEvent: Codable, Hashable, Sendable, Identifiable {
         self.chain = chain
         self.responsible = responsible
         self.agentID = agentID
+        self.chainAgents = chainAgents
+        self.ancestryKnown = ancestryKnown
         self.isOwner = isOwner
         self.benignServiceID = benignServiceID
         self.decision = decision
@@ -144,6 +153,10 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
     public var paths: [String]
     public var chain: [ChainLink]
     public var agentID: String?
+    /// As `AnalyzedEvent.chainAgents` and `.ancestryKnown`, for the event `chain` comes from (an answer
+    /// given on this alert is scoped by them). nil in alerts from before they were kept.
+    public var chainAgents: [String]?
+    public var ancestryKnown: Bool?
     public var ruleID: String?
     public var status: AlertStatus
     public var resolution: AlertAction?
@@ -158,7 +171,7 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
                 responsible: ResponsibleEntity, categoryID: String, severity: Severity, count: Int, accesses: AccessSet,
                 firstPath: String, firstEventID: Int64, lastEventID: Int64, paths: [String], chain: [ChainLink],
                 agentID: String?, ruleID: String?, status: AlertStatus = .unread, resolution: AlertAction? = nil,
-                firstTime: Bool = false, appleProgram: Bool = false) {
+                firstTime: Bool = false, appleProgram: Bool = false, chainAgents: [String]? = nil, ancestryKnown: Bool? = nil) {
         self.id = id
         self.kind = kind
         self.createdAt = createdAt
@@ -175,6 +188,8 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
         self.paths = paths
         self.chain = chain
         self.agentID = agentID
+        self.chainAgents = chainAgents
+        self.ancestryKnown = ancestryKnown
         self.ruleID = ruleID
         self.status = status
         self.resolution = resolution
@@ -185,6 +200,7 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, kind, createdAt, updatedAt, windowEndsAt, responsible, categoryID, severity, count, accesses, firstPath
         case firstEventID, lastEventID, paths, chain, agentID, ruleID, status, resolution, firstTime, appleProgram
+        case chainAgents, ancestryKnown
     }
 
     public init(from decoder: Decoder) throws {
@@ -210,7 +226,13 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
         resolution = try c.decodeIfPresent(AlertAction.self, forKey: .resolution)
         firstTime = try c.decodeIfPresent(Bool.self, forKey: .firstTime) ?? false
         appleProgram = try c.decodeIfPresent(Bool.self, forKey: .appleProgram) ?? false
+        chainAgents = try c.decodeIfPresent([String].self, forKey: .chainAgents)
+        ancestryKnown = try c.decodeIfPresent(Bool.self, forKey: .ancestryKnown)
     }
+
+    /// The AI agents of the chain an answer on this alert is scoped to: the full chain's when known,
+    /// else (an older alert) those of the stored, capped chain.
+    public var scopeAgents: [String] { chainAgents ?? Set(chain.compactMap(\.agentID)).sorted() }
 
     /// Actions offered for this alert, in display order.
     public var availableActions: [AlertAction] {
