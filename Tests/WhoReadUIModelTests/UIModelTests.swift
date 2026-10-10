@@ -276,8 +276,10 @@ final class AppModelTests: XCTestCase {
         let planned = planner.plan(model.alerts + [fresh], settings: settings, formatter: model.formatter)
         XCTAssertEqual(planned.count, 1)
         // The fixture's chain is all Apple with no AI agent: "allow all Apple programs" is offered, also
-        // as a banner button (its own category).
-        XCTAssertEqual(planned[0].categoryIdentifier, NotificationPlanner.categoryAlertApple)
+        // as a banner button (its own category, one per kind of app, AI agent or program).
+        XCTAssertEqual(planned[0].categoryIdentifier,
+                       NotificationPlanner.category(for: .firstAccess, appleProgram: true, responsible: fresh.responsible.kind))
+        XCTAssertTrue(planned[0].categoryIdentifier.hasPrefix(NotificationPlanner.categoryAlertApple + "."))
         XCTAssertEqual(planned[0].actions, [.alwaysAllow, .blockFromNowOn, .ignore, .trustApplePrograms])
         XCTAssertTrue(planned[0].body.contains("调用链："))
         // Repeats (merged count) do not re-notify; escalation to blocked does.

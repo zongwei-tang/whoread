@@ -24,6 +24,22 @@ public struct PlannedAskNotification: Equatable, Sendable {
     public var actions: [AlertAction]
 }
 
+/// A notification category to register: the answers offered on a banner, as buttons. Button titles
+/// are registered once per category, not per notification, so "always allow" and "always deny" say
+/// what they cover by kind ("this app (any program run in it)"); the banner's body names the app.
+public struct PlannedCategory: Equatable, Sendable {
+    public struct Button: Equatable, Sendable {
+        public var action: AlertAction
+        public var title: String
+        /// Allowing saves a rule that also answers later questions: never from the lock screen.
+        public var needsUnlock: Bool
+        public var destructive: Bool
+    }
+
+    public var identifier: String
+    public var buttons: [Button]
+}
+
 /// What to change in the delivered question notifications after a poll.
 public struct AskNotificationPlan: Equatable, Sendable {
     public var post: [PlannedAskNotification] = []
@@ -70,6 +86,8 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// Questions notified: id → first asked (a restarted daemon reuses ids).
     private var askNotified: [Int64: Date] = [:]
 
+    // Category prefixes: each is registered once per kind of app, AI agent or program (".app",
+    // ".agent", ".binary"), see `categories(language:)`.
     public static let categoryBlocked = "whoread.blocked"
     public static let categoryAlert = "whoread.alert"
     public static let categoryWouldBlock = "whoread.wouldblock"
@@ -82,12 +100,61 @@ public final class NotificationPlanner: @unchecked Sendable {
 
     public static let categoryAlertApple = "whoread.alert.apple"
 
-    public static func category(for kind: AlertKind, appleProgram: Bool = false) -> String {
+    /// One category per kind of alert and kind of app, AI agent or program it is charged to (the
+    /// button titles say what an answer covers).
+    public static func category(for kind: AlertKind, appleProgram: Bool = false, responsible: ResponsibleEntity.Kind) -> String {
+        let base: String
         switch kind {
-        case .blocked: return categoryBlocked
-        case .wouldBlock: return categoryWouldBlock
-        default: return appleProgram ? categoryAlertApple : categoryAlert
+        case .blocked: base = categoryBlocked
+        case .wouldBlock: base = categoryWouldBlock
+        default: base = appleProgram ? categoryAlertApple : categoryAlert
         }
+        return base + "." + responsible.rawValue
+    }
+
+    /// A question's category: "allow all Apple programs" for an all-Apple chain, and the kind it is
+    /// charged to.
+    public static func askCategory(apple: Bool, responsible: ResponsibleEntity.Kind) -> String {
+        (apple ? categoryAskApple : categoryAsk) + "." + responsible.rawValue
+    }
+
+    /// Every category, with its button titles in `language` (registered at launch and when the
+    /// language changes).
+    public static func categories(language: Language) -> [PlannedCategory] {
+        let f = AlertFormatter(language: language)
+        let kinds: [ResponsibleEntity.Kind] = [.app, .agent, .binary]
+        func alertCategory(_ id: String, _ actions: [AlertAction], kind: ResponsibleEntity.Kind) -> PlannedCategory {
+            PlannedCategory(identifier: id + "." + kind.rawValue, buttons: actions.map { a in
+                let title: String
+                switch a {
+                case .alwaysAllow: title = f.alwaysAllowTitle(kind: kind)
+                case .blockFromNowOn: title = f.alwaysDenyTitle(kind: kind, alertKind: .firstAccess)
+                default: title = f.actionTitle(a)
+                }
+                return PlannedCategory.Button(action: a, title: title, needsUnlock: AskAnswers.isAllow(a),
+                                              destructive: a == .blockFromNowOn || a == .keepBlocking)
+            })
+        }
+        func askCategory(apple: Bool, kind: ResponsibleEntity.Kind) -> PlannedCategory {
+            PlannedCategory(identifier: NotificationPlanner.askCategory(apple: apple, responsible: kind),
+                            buttons: AskAnswers.actions(apple: apple).map { a in
+                let title: String
+                switch a {
+                case .alwaysAllow: title = f.alwaysAllowTitle(kind: kind)
+                case .blockFromNowOn: title = f.alwaysDenyTitle(kind: kind, alertKind: .ask)
+                default: title = L10n.askActionTitle(a, language)
+                }
+                return PlannedCategory.Button(action: a, title: title, needsUnlock: AskAnswers.isAllow(a), destructive: !AskAnswers.isAllow(a))
+            })
+        }
+        return kinds.flatMap { kind in [
+            alertCategory(categoryBlocked, [.allowOnce, .alwaysAllow, .keepBlocking], kind: kind),
+            alertCategory(categoryAlert, [.alwaysAllow, .blockFromNowOn, .ignore], kind: kind),
+            alertCategory(categoryAlertApple, [.alwaysAllow, .blockFromNowOn, .ignore, .trustApplePrograms], kind: kind),
+            alertCategory(categoryWouldBlock, [.alwaysAllow, .ignore], kind: kind),
+            askCategory(apple: false, kind: kind),
+            askCategory(apple: true, kind: kind),
+        ] }
     }
 
     /// `launchedAt`: alerts created before this are not notified on the first plan.
@@ -104,7 +171,8 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// alerts raised since launch notify even if the daemon was unreachable until now.
     /// `alerts` nil: they were not read this time (refused, failed): nothing is planned or recorded, so
     /// the first read that succeeds still only records what is older than the launch.
-    public func plan(_ alerts: [Alert]?, settings: NotificationSettings, formatter: AlertFormatter) -> [PlannedNotification] {
+    public func plan(_ alerts: [Alert]?, settings: NotificationSettings, formatter: AlertFormatter,
+                     agentName: (String) -> String = { $0 }) -> [PlannedNotification] {
         guard let alerts else { return [] }
         defer { seeded = true }
         var out: [PlannedNotification] = []
@@ -126,8 +194,10 @@ public final class NotificationPlanner: @unchecked Sendable {
             let title = a.kind == .blocked ? L10n.t(.notifBlockedTitle, formatter.language) : L10n.t(.notifTitle, formatter.language)
             out.append(PlannedNotification(
                 identifier: "alert-\(a.id)-\(Int(a.createdAt.timeIntervalSince1970))-\(a.kind.rawValue)-\(a.firstEventID)", alertID: a.id, title: title,
-                body: [formatter.headline(a), formatter.identityLine(a), formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
-                categoryIdentifier: NotificationPlanner.category(for: a.kind, appleProgram: a.appleProgram), threadIdentifier: a.categoryID,
+                body: [formatter.headline(a), formatter.identityLine(a), a.allowCoverageLine(formatter, agentName: agentName),
+                       formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
+                categoryIdentifier: NotificationPlanner.category(for: a.kind, appleProgram: a.appleProgram, responsible: a.responsible.kind),
+                threadIdentifier: a.categoryID,
                 actions: a.availableActions))
         }
         return out
@@ -150,8 +220,8 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// `complete`: the reply listed every open question. The daemon caps the list (200), so a question
     /// missing from a capped reply may still be open: only a complete reply withdraws banners.
     /// The body puts the AI agents in the chain first (a collapsed banner shows only its first lines),
-    /// then the headline, where the program really is and who signed it, and the chain; names and
-    /// paths are escaped and capped (`DisplayText`).
+    /// then the headline, where the program really is and who signed it, what allowing covers (the
+    /// app, not only that program), and the chain; names and paths are escaped and capped (`DisplayText`).
     public func plan(asks: [AskRequest], formatter: AlertFormatter, complete: Bool = true,
                      agentName: (String) -> String = { $0 }) -> AskNotificationPlan {
         var plan = AskNotificationPlan()
@@ -163,8 +233,9 @@ public final class NotificationPlanner: @unchecked Sendable {
             plan.post.append(PlannedAskNotification(
                 identifier: NotificationPlanner.askIdentifier(a.id), askID: a.id, title: L10n.t(.notifAskTitle, formatter.language),
                 body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.displayAlert(formatter.language)),
-                       formatter.identityLine(a.asAlert), formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
-                categoryIdentifier: a.appleProgram ? NotificationPlanner.categoryAskApple : NotificationPlanner.categoryAsk,
+                       formatter.identityLine(a.asAlert), a.allowCoverageLine(formatter, agentName: agentName),
+                       formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
+                categoryIdentifier: NotificationPlanner.askCategory(apple: a.appleProgram, responsible: a.responsible.kind),
                 actions: AskAnswers.actions(for: a)))
         }
         if complete {

@@ -16,6 +16,7 @@ public enum L: String, CaseIterable, Sendable {
     case asksTitle, asksWaitingFormat, asksMoreFormat, askDeniedIn, askNotHeld
     case askAllowOnce, askAlwaysAllow, askDeny, askAlwaysDeny, askTrustApple
     case askAllowNotPermittedFormat, askGone, askAgentsFormat, askPathHidden, asksCannotReadFormat
+    case askCoversFormat, alertCoversFormat
     // What cannot be read (limited view)
     case limitedViewFormat, limitedAskPaths, notShownFormat, cannotReadFormat
     case partAlerts, partLive, partSummaries, partRules, partSettings, partCatalog, partAgents
@@ -120,6 +121,8 @@ public enum L10n {
         .askAllowNotPermittedFormat: ("Not allowed: only the signed WhoRead app or an administrator can allow (this build is not signed). In Terminal: %@", "没有权限：只有已签名的 WhoRead 应用或管理员才能允许（当前版本未签名）。请在终端运行：%@"),
         .askGone: ("This question is no longer open (answered elsewhere or expired).", "这个问题已经关闭（已在别处回答或已过期）。"),
         .askAgentsFormat: ("AI agent in the chain: %@", "调用链中有 AI agent：%@"),
+        .askCoversFormat: ("Allow once (10 min) and Always allow cover: %@.", "「允许一次（10 分钟）」和「始终允许」适用于：%@。"),
+        .alertCoversFormat: ("Always allow covers: %@.", "「始终允许」适用于：%@。"),
         .askPathHidden: ("(file path hidden: only the signed WhoRead app or sudo can see it)", "（文件路径已隐藏：只有已签名的 WhoRead 应用或 sudo 可以查看）"),
         .asksCannotReadFormat: ("Open questions cannot be read: %@", "无法读取等待回答的问题：%@"),
 

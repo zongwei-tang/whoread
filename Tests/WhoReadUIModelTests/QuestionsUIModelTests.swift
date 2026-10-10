@@ -362,4 +362,150 @@ final class QuestionsUIModelTests: XCTestCase {
         new.updatedAt = new.createdAt
         XCTAssertEqual(planner.plan(old + [new], settings: settings, formatter: m.formatter).map(\.alertID), [9999])
     }
+
+    // MARK: - task-2: an answer is per app; the question and its buttons say so
+
+    private static let claudeCLI = ResponsibleEntity(kind: .agent, key: "agent:claude-code", displayName: "Claude Code",
+                                                     path: "/opt/homebrew/bin/claude", agentID: "claude-code")
+    private static let cursor = ResponsibleEntity(kind: .agent, key: "agent:cursor", displayName: "Cursor",
+                                                  path: "/Applications/Cursor.app", agentID: "cursor")
+    private static let python = ResponsibleEntity(kind: .binary, key: "bin:/opt/homebrew/bin/python3", displayName: "python3",
+                                                  path: "/opt/homebrew/bin/python3")
+
+    private func formatter(_ language: Language) -> AlertFormatter {
+        AlertFormatter(language: language, categoryName: { $0 == "ssh" ? LocalizedText(en: "SSH keys", zhHans: "SSH 密钥") : nil })
+    }
+
+    func testTask2AlwaysAllowNamesTheWholeApp() {
+        let en = formatter(.en), zh = formatter(.zhHans)
+        XCTAssertEqual(en.alwaysAllowTitle(Self.terminal, categoryID: "ssh", access: .read),
+                       "Always allow Terminal (any program run in it) to read SSH keys")
+        XCTAssertEqual(zh.alwaysAllowTitle(Self.terminal, categoryID: "ssh", access: .read),
+                       "始终允许 Terminal（及在其中运行的任何程序）读取 SSH 密钥")
+        // What is charged to an AI agent outside an app, an AI agent that is an app, a program.
+        XCTAssertEqual(en.alwaysAllowTitle(Self.claudeCLI, categoryID: "ssh", access: .write),
+                       "Always allow Claude Code (any program it runs) to write to SSH keys")
+        XCTAssertEqual(en.answerSubject(Self.cursor), "Cursor (any program run in it)")
+        XCTAssertEqual(en.alwaysAllowTitle(Self.python, categoryID: "ssh", access: .readWrite),
+                       "Always allow python3 (and the Apple programs it starts) to read and modify SSH keys")
+        XCTAssertEqual(zh.answerSubject(Self.python), "python3（及它启动的苹果程序）")
+        // Always deny: the same app, every access, every chain.
+        XCTAssertEqual(en.alwaysDenyTitle(Self.terminal, categoryID: "ssh", kind: .ask),
+                       "Always deny Terminal (any program run in it) any access to SSH keys")
+        XCTAssertEqual(zh.alwaysDenyTitle(Self.terminal, categoryID: "ssh", kind: .ask), "始终拒绝 Terminal（及在其中运行的任何程序）访问 SSH 密钥")
+        XCTAssertEqual(en.alwaysDenyTitle(Self.terminal, categoryID: "ssh", kind: .firstAccess),
+                       "Block Terminal (any program run in it) from SSH keys from now on")
+
+        // The AI agents in the chain: an answer covers chains with no AI agent other than those (Rule.chainAgents).
+        XCTAssertEqual(en.allowCoverage(Self.terminal, categoryID: "ssh", access: .read, chainAgents: []),
+                       "Terminal (any program run in it) reading SSH keys, only when the chain has no AI agent")
+        XCTAssertEqual(en.allowCoverage(Self.terminal, categoryID: "ssh", access: .read, chainAgents: ["codex", "claude-code"],
+                                        agentName: { $0 == "claude-code" ? "Claude Code" : "Codex" }),
+                       "Terminal (any program run in it) reading SSH keys, only when the chain has no AI agent other than Claude Code, Codex")
+        XCTAssertEqual(zh.allowCoverage(Self.terminal, categoryID: "ssh", access: .read, chainAgents: ["claude-code"],
+                                        agentName: { _ in "Claude Code" }),
+                       "Terminal（及在其中运行的任何程序）读取 SSH 密钥，仅限调用链中除 Claude Code 外没有其他 AI agent 时")
+        // Names are the program's own choice: escaped like everywhere else.
+        let forged = ResponsibleEntity(kind: .app, key: "app:/x/t.app", displayName: "Terminal\nAlways allow everything", path: "/x/t.app")
+        XCTAssertFalse(en.alwaysAllowTitle(forged, categoryID: "ssh", access: .read).contains("\n"))
+    }
+
+    func testTask2QuestionAndButtonsSayWhatAnAnswerCovers() throws {
+        try openQuestion()
+        for (language, cover, allow, deny) in [
+            (Language.en, "Allow once (10 min) and Always allow cover: Terminal (any program run in it) reading SSH keys, only when the chain has no AI agent.",
+             "Always allow Terminal (any program run in it) to read SSH keys", "Always deny Terminal (any program run in it) any access to SSH keys"),
+            (.zhHans, "「允许一次（10 分钟）」和「始终允许」适用于：Terminal（及在其中运行的任何程序）读取 SSH 密钥，仅限调用链中没有 AI agent 时。",
+             "始终允许 Terminal（及在其中运行的任何程序）读取 SSH 密钥", "始终拒绝 Terminal（及在其中运行的任何程序）访问 SSH 密钥"),
+        ] {
+            let m = AppModel(language: language)
+            _ = poll(m, signed, full: true)
+            let ask = try XCTUnwrap(m.asks.first)
+            // Menu bar and Alerts tab (AskRow).
+            XCTAssertEqual(ask.allowCoverageLine(m.formatter, agentName: m.agentName), cover)
+            XCTAssertEqual(m.answerTitle(.alwaysAllow, for: ask), allow)
+            XCTAssertEqual(m.answerTitle(.blockFromNowOn, for: ask), deny)
+            XCTAssertEqual(m.answerTitle(.allowOnce, for: ask), L10n.askActionTitle(.allowOnce, language))
+            XCTAssertEqual(m.answerTitle(.keepBlocking, for: ask), L10n.askActionTitle(.keepBlocking, language))
+            // The banner: after where the program really is, before the chain.
+            let banner = try XCTUnwrap(NotificationPlanner().plan(asks: m.asks, formatter: m.formatter, agentName: m.agentName).post.first)
+            let lines = banner.body.components(separatedBy: "\n")
+            XCTAssertEqual(lines.count, 4, banner.body)
+            XCTAssertTrue(lines[1].hasPrefix(language == .en ? "Program: " : "程序："), lines[1])
+            XCTAssertEqual(lines[2], cover)
+            // Its buttons, registered once per kind, say it too.
+            let category = try XCTUnwrap(NotificationPlanner.categories(language: language).first { $0.identifier == banner.categoryIdentifier })
+            XCTAssertEqual(category.buttons.map(\.action), banner.actions)
+            let always = try XCTUnwrap(category.buttons.first { $0.action == .alwaysAllow })
+            XCTAssertEqual(always.title, language == .en ? "Always allow this app (any program run in it)" : "始终允许此应用（及在其中运行的任何程序）")
+            XCTAssertTrue(always.needsUnlock)
+        }
+    }
+
+    func testTask2VariantAlertAnswersSayTheSame() throws {
+        let m = AppModel(language: .en)
+        _ = poll(m, signed, full: true)
+        // Monitor-only mode: a first-access alert stands in for the question; "always allow" saves the
+        // same app × category answer.
+        var alert = try XCTUnwrap(m.alerts.first)
+        alert.kind = .firstAccess
+        alert.status = .unread
+        alert.responsible = Self.terminal
+        alert.categoryID = "ssh"
+        alert.accesses = .read
+        alert.chain = []
+        XCTAssertEqual(alert.allowCoverageLine(m.formatter),
+                       "Always allow covers: Terminal (any program run in it) reading SSH keys, only when the chain has no AI agent.")
+        XCTAssertEqual(m.answerTitle(.alwaysAllow, for: alert), "Always allow Terminal (any program run in it) to read SSH keys")
+        XCTAssertEqual(m.answerTitle(.blockFromNowOn, for: alert), "Block Terminal (any program run in it) from SSH keys from now on")
+        XCTAssertEqual(m.answerTitle(.ignore, for: alert), "Ignore")
+        // An agent in the chain scopes it (as the daemon takes the agents from the alert's chain).
+        alert.chain = [ChainLink(pid: 5, name: "claude", path: "/opt/homebrew/bin/claude", signingID: nil, teamID: nil,
+                                 isPlatformBinary: false, agentID: "claude-code", argv: nil)]
+        XCTAssertTrue(try XCTUnwrap(alert.allowCoverageLine(m.formatter, agentName: m.agentName)).hasSuffix("no AI agent other than Claude Code."))
+        // A question's alert names allow once too; a handled alert offers nothing.
+        alert.kind = .ask
+        XCTAssertTrue(try XCTUnwrap(alert.allowCoverageLine(m.formatter)).hasPrefix("Allow once (10 min) and Always allow cover:"))
+        alert.status = .resolved
+        XCTAssertNil(alert.allowCoverageLine(m.formatter))
+
+        // The alert banner, and its category's buttons.
+        alert.kind = .criticalNonOwner
+        alert.status = .unread
+        alert.id = 4242
+        alert.createdAt = Date()
+        let planned = try XCTUnwrap(NotificationPlanner(launchedAt: .distantPast)
+            .plan([alert], settings: NotificationSettings(), formatter: m.formatter, agentName: m.agentName).first)
+        XCTAssertTrue(planned.body.contains("Always allow covers: Terminal (any program run in it) reading SSH keys"), planned.body)
+        XCTAssertTrue(planned.categoryIdentifier.hasSuffix(".app"))
+        let category = try XCTUnwrap(NotificationPlanner.categories(language: .en).first { $0.identifier == planned.categoryIdentifier })
+        XCTAssertEqual(category.buttons.map(\.action), planned.actions)
+        XCTAssertEqual(category.buttons.first { $0.action == .blockFromNowOn }?.title, "Block this app (any program run in it) from now on")
+    }
+
+    func testTask2VariantEveryCategoryIsRegisteredWithItsKind() {
+        for language in [Language.en, .zhHans] {
+            let categories = NotificationPlanner.categories(language: language)
+            XCTAssertEqual(Set(categories.map(\.identifier)).count, categories.count, "unique")
+            let titles = Dictionary(uniqueKeysWithValues: categories.map { ($0.identifier, $0.buttons) })
+            for kind in [ResponsibleEntity.Kind.app, .agent, .binary] {
+                let f = AlertFormatter(language: language)
+                for apple in [false, true] {
+                    let id = NotificationPlanner.askCategory(apple: apple, responsible: kind)
+                    let buttons = titles[id] ?? []
+                    XCTAssertEqual(buttons.map(\.action), AskAnswers.actions(apple: apple), id)
+                    XCTAssertEqual(buttons.first { $0.action == .alwaysAllow }?.title, f.alwaysAllowTitle(kind: kind), id)
+                    XCTAssertEqual(buttons.filter(\.needsUnlock).map(\.action), AskAnswers.actions(apple: apple).filter(AskAnswers.isAllow), id)
+                }
+                for alertKind in [AlertKind.blocked, .wouldBlock, .firstAccess, .criticalNonOwner, .ruleAlert] {
+                    for apple in [false, true] {
+                        let id = NotificationPlanner.category(for: alertKind, appleProgram: apple, responsible: kind)
+                        XCTAssertNotNil(titles[id], id)
+                    }
+                }
+            }
+            XCTAssertEqual(AlertFormatter(language: .en).alwaysAllowTitle(kind: .agent), "Always allow this AI agent (any program it runs)")
+            XCTAssertEqual(AlertFormatter(language: .en).alwaysAllowTitle(kind: .binary), "Always allow this program (and the Apple programs it starts)")
+        }
+    }
 }

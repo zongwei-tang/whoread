@@ -217,7 +217,8 @@ final class DaemonConnection {
         if let status = model.status { planNotices(status) }
         if let settings = model.settings {
             // Only alerts read by this poll (nil when refused or failed): the first read seeds.
-            for n in planner.plan(snapshot.alerts, settings: settings.notifications, formatter: model.formatter) {
+            for n in planner.plan(snapshot.alerts, settings: settings.notifications, formatter: model.formatter,
+                                  agentName: model.agentName) {
                 NotificationManager.shared.post(n)
             }
         }

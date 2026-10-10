@@ -55,6 +55,14 @@ extension AskRequest {
               appleProgram: appleProgram)
     }
 
+    /// "Allow once (10 min) and Always allow cover: Terminal (any program run in it) reading SSH keys,
+    /// only when the chain has no AI agent." The answer is per app, not per program: shown with every
+    /// question (banner, menu bar, Alerts tab) next to the program that asked.
+    public func allowCoverageLine(_ f: AlertFormatter, agentName: (String) -> String = { $0 }) -> String {
+        L10n.f(.askCoversFormat, f.allowCoverage(responsible, categoryID: key.categoryID, access: key.access,
+                                                 chainAgents: key.chainAgents, agentName: agentName), language: f.language)
+    }
+
     /// The daemon left out the file path (and the command lines): it does not serve this connection
     /// as the signed app or root, and the file may lie in a folder only Full Disk Access can read.
     /// The daemon puts a note there instead; every real path is absolute.
@@ -68,6 +76,19 @@ extension AskRequest {
             a.paths = [a.firstPath]
         }
         return a
+    }
+}
+
+extension Alert {
+    /// "Always allow covers: Terminal (any program run in it) reading SSH keys, only when the chain has
+    /// no AI agent." for an open alert that offers "always allow" (it saves the same app × category
+    /// answer as a question); a question's alert names "allow once" too. nil otherwise.
+    public func allowCoverageLine(_ f: AlertFormatter, agentName: (String) -> String = { $0 }) -> String? {
+        guard status != .resolved, availableActions.contains(.alwaysAllow) else { return nil }
+        // The AI agents the answer is scoped to, as the daemon takes them from an alert.
+        let agents = chain.compactMap(\.agentID)
+        let coverage = f.allowCoverage(responsible, categoryID: categoryID, access: accesses, chainAgents: agents, agentName: agentName)
+        return L10n.f(kind == .ask ? .askCoversFormat : .alertCoversFormat, coverage, language: f.language)
     }
 }
 

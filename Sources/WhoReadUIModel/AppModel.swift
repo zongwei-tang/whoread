@@ -628,6 +628,20 @@ public final class AppModel {
         kind == .ask ? L10n.askActionTitle(action, language) : formatter.actionTitle(action)
     }
 
+    /// Button title for an answer to an open question or alert. "Always allow" and "always deny" /
+    /// "block from now on" name what they cover: "Always allow Terminal (any program run in it) to read
+    /// SSH keys". The others keep their short titles.
+    public func answerTitle(_ action: AlertAction, for alert: Alert) -> String {
+        switch action {
+        case .alwaysAllow: return formatter.alwaysAllowTitle(alert.responsible, categoryID: alert.categoryID, access: alert.accesses)
+        case .blockFromNowOn: return formatter.alwaysDenyTitle(alert.responsible, categoryID: alert.categoryID, kind: alert.kind)
+        default: return actionTitle(action, for: alert.kind)
+        }
+    }
+
+    /// The same for a question.
+    public func answerTitle(_ action: AlertAction, for ask: AskRequest) -> String { answerTitle(action, for: ask.asAlert) }
+
     public var visibleAlerts: [Alert] {
         alertsUnreadOnly ? alerts.filter { $0.status == .unread } : alerts
     }

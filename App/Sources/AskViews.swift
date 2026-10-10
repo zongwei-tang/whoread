@@ -19,7 +19,8 @@ struct AskRow: View {
                 Spacer()
                 deadline
             }
-            Text(f.headline(ask.asAlert)).font(.body.weight(.medium)).multilineTextAlignment(.leading)
+            // A path the daemon hides from this app reads as such.
+            Text(f.headline(ask.displayAlert(model.language))).font(.body.weight(.medium)).multilineTextAlignment(.leading)
             // Where the program really is and who signed it: the name above is its own choice.
             if let identity = model.identityLine(ask.asAlert) {
                 Text(identity).font(.caption).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
@@ -28,17 +29,16 @@ struct AskRow: View {
             if let agents = ask.agentsLine(model.language, agentName: model.agentName) {
                 Text(agents).font(.caption.weight(.semibold)).foregroundStyle(.orange)
             }
+            // What allowing covers: the app (every program run in it), not only the program that asked.
+            Text(ask.allowCoverageLine(f, agentName: model.agentName)).font(.caption).fixedSize(horizontal: false, vertical: true)
             Text(f.chainLine(ask.chain)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            // Allowing needs the signed app or root; denying is open to the console user.
-            HStack {
-                ForEach(AskAnswers.allowActions(for: ask), id: \.self) { action in
-                    Button(L10n.askActionTitle(action)) { connection.answer(ask: ask.id, action) }
-                }
+            // Allowing needs the signed app or root; denying is open to the console user. "Always allow"
+            // and "always deny" name what they cover.
+            AnswerButtons(actions: AskAnswers.allowActions(for: ask), title: { model.answerTitle($0, for: ask) }) {
+                connection.answer(ask: ask.id, $0)
             }
-            HStack {
-                ForEach(AskAnswers.denyActions, id: \.self) { action in
-                    Button(L10n.askActionTitle(action), role: .destructive) { connection.answer(ask: ask.id, action) }
-                }
+            AnswerButtons(actions: AskAnswers.denyActions, role: .destructive, title: { model.answerTitle($0, for: ask) }) {
+                connection.answer(ask: ask.id, $0)
             }
         }
         .controlSize(.small)
@@ -58,6 +58,32 @@ struct AskRow: View {
             .font(.caption).foregroundStyle(.orange)
         } else {
             Text(L10n.t(.askNotHeld)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+        }
+    }
+}
+
+/// Answer buttons in a row, or one under the other when their titles do not fit (the titles of
+/// "always allow" and "always deny" name the app and the category).
+struct AnswerButtons: View {
+    let actions: [AlertAction]
+    var role: ButtonRole?
+    let title: (AlertAction) -> String
+    var help: (AlertAction) -> String = { _ in "" }
+    let answer: (AlertAction) -> Void
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack { buttons }
+            VStack(alignment: .leading, spacing: 4) { buttons }
+        }
+    }
+
+    private var buttons: some View {
+        ForEach(actions, id: \.self) { action in
+            Button(role: role) { answer(action) } label: {
+                Text(title(action)).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
+            }
+            .help(help(action))
         }
     }
 }

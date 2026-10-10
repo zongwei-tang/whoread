@@ -11,35 +11,18 @@ final class NotificationManager: @unchecked Sendable {
 
     private func actionID(_ a: AlertAction) -> String { "whoread.action." + a.rawValue }
 
-    /// Called at launch and again whenever the UI language changes.
+    /// Called at launch and again whenever the UI language changes. The categories and their
+    /// titles come from `NotificationPlanner.categories` (one per kind of app, AI agent or program,
+    /// so "always allow" says what it covers).
     func registerCategories(language: Language = L10n.current) {
-        let f = AlertFormatter(language: language)
-        func category(_ id: String, _ actions: [AlertAction]) -> UNNotificationCategory {
-            let buttons = actions.map { a -> UNNotificationAction in
-                let destructive = a == .blockFromNowOn || a == .keepBlocking
-                // Allowing saves a rule that also answers future questions: never from the lock screen.
-                let options: UNNotificationActionOptions = AskAnswers.isAllow(a) ? [.authenticationRequired]
-                    : (destructive ? [.destructive] : [])
-                return UNNotificationAction(identifier: actionID(a), title: f.actionTitle(a), options: options)
-            }
-            return UNNotificationCategory(identifier: id, actions: buttons, intentIdentifiers: [], options: [])
+        let categories = NotificationPlanner.categories(language: language).map { c in
+            UNNotificationCategory(identifier: c.identifier, actions: c.buttons.map { b in
+                // Allowing from a banner needs the Mac unlocked (not from the lock screen).
+                let options: UNNotificationActionOptions = b.needsUnlock ? [.authenticationRequired] : (b.destructive ? [.destructive] : [])
+                return UNNotificationAction(identifier: actionID(b.action), title: b.title, options: options)
+            }, intentIdentifiers: [], options: [])
         }
-        // Questions: allowing from a banner needs the Mac unlocked (not from the lock screen).
-        func askCategory(_ id: String, apple: Bool) -> UNNotificationCategory {
-            let buttons = AskAnswers.actions(apple: apple).map { a -> UNNotificationAction in
-                let options: UNNotificationActionOptions = AskAnswers.isAllow(a) ? [.authenticationRequired] : [.destructive]
-                return UNNotificationAction(identifier: actionID(a), title: L10n.askActionTitle(a, language), options: options)
-            }
-            return UNNotificationCategory(identifier: id, actions: buttons, intentIdentifiers: [], options: [])
-        }
-        UNUserNotificationCenter.current().setNotificationCategories([
-            category(NotificationPlanner.categoryBlocked, [.allowOnce, .alwaysAllow, .keepBlocking]),
-            category(NotificationPlanner.categoryAlert, [.alwaysAllow, .blockFromNowOn, .ignore]),
-            category(NotificationPlanner.categoryAlertApple, [.alwaysAllow, .blockFromNowOn, .ignore, .trustApplePrograms]),
-            category(NotificationPlanner.categoryWouldBlock, [.alwaysAllow, .ignore]),
-            askCategory(NotificationPlanner.categoryAsk, apple: false),
-            askCategory(NotificationPlanner.categoryAskApple, apple: true),
-        ])
+        UNUserNotificationCenter.current().setNotificationCategories(Set(categories))
     }
 
     func post(_ n: PlannedNotification) {
@@ -49,12 +32,12 @@ final class NotificationManager: @unchecked Sendable {
         content.categoryIdentifier = n.categoryIdentifier
         content.threadIdentifier = n.threadIdentifier
         content.userInfo = ["alertID": NSNumber(value: n.alertID)]
-        content.sound = n.categoryIdentifier == NotificationPlanner.categoryBlocked ? .default : nil
+        content.sound = n.categoryIdentifier.hasPrefix(NotificationPlanner.categoryBlocked + ".") ? .default : nil
         let request = UNNotificationRequest(identifier: n.identifier, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
 
-    /// An open question, with the answers as buttons (`categoryAsk` / `categoryAskApple`).
+    /// An open question, with the answers as buttons (`NotificationPlanner.askCategory`).
     func post(_ n: PlannedAskNotification) {
         let content = UNMutableNotificationContent()
         content.title = n.title

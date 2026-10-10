@@ -194,16 +194,19 @@ final class AskUIModelTests: XCTestCase {
         XCTAssertEqual(first.post.map(\.identifier), ["ask-1", "ask-2"], "oldest first")
         XCTAssertEqual(first.remove, [])
         XCTAssertEqual(first.post.map(\.askID), [1, 2])
-        XCTAssertEqual(first.post[0].categoryIdentifier, NotificationPlanner.categoryAsk)
+        // One category per kind of app, AI agent or program (its buttons say what an answer covers).
+        XCTAssertEqual(first.post[0].categoryIdentifier, NotificationPlanner.askCategory(apple: false, responsible: .agent))
         XCTAssertEqual(first.post[0].actions, [.allowOnce, .alwaysAllow, .keepBlocking, .blockFromNowOn])
-        XCTAssertEqual(first.post[1].categoryIdentifier, NotificationPlanner.categoryAskApple)
+        XCTAssertEqual(first.post[1].categoryIdentifier, NotificationPlanner.askCategory(apple: true, responsible: .binary))
         XCTAssertEqual(first.post[1].actions, [.allowOnce, .alwaysAllow, .keepBlocking, .blockFromNowOn, .trustApplePrograms])
         XCTAssertEqual(first.post[0].title, "Allow this access?")
         XCTAssertEqual(first.post[0].body, // guard-4: the agent line comes first
                        "AI agent in the chain: claude-code\n"
                        + "Claude Code wants to read ~/.ssh/id_ed25519: not allowed until you decide (×3)\n"
+                       + "Allow once (10 min) and Always allow cover: Claude Code (any program it runs) reading ssh, "
+                       + "only when the chain has no AI agent other than claude-code.\n"
                        + "Chain: launchd → claude → cat")
-        XCTAssertEqual(first.post[1].body.components(separatedBy: "\n").count, 2, "no agent line without an agent")
+        XCTAssertEqual(first.post[1].body.components(separatedBy: "\n").count, 3, "no agent line without an agent")
 
         // Still open (more attempts, a new hold): no new banner.
         var again = agent
@@ -228,7 +231,9 @@ final class AskUIModelTests: XCTestCase {
         let zh = NotificationPlanner().plan(asks: [agent], formatter: model(status(), language: .zhHans).formatter)
         XCTAssertEqual(zh.post.first?.title, "允许这次访问吗？")
         XCTAssertEqual(zh.post.first?.body,
-                       "调用链中有 AI agent：claude-code\nClaude Code 想要读取 ~/.ssh/id_ed25519，你决定之前不会放行（3 次）\n调用链：launchd → claude → cat")
+                       "调用链中有 AI agent：claude-code\nClaude Code 想要读取 ~/.ssh/id_ed25519，你决定之前不会放行（3 次）\n"
+                       + "「允许一次（10 分钟）」和「始终允许」适用于：Claude Code（及它运行的任何程序）读取 ssh，"
+                       + "仅限调用链中除 claude-code 外没有其他 AI agent 时。\n调用链：launchd → claude → cat")
 
         // The headline may name only the app (Terminal) the agent runs in: the agent is named too,
         // as the app knows it (an answer covers the app only as driven by that agent).
