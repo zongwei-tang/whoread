@@ -43,8 +43,8 @@ public struct BaselineEntry: Codable, Hashable, Sendable {
 /// `learningDuration` is set: ask mode replaced it, and new triples alert at once.
 ///
 /// Bounded (dos-1): every distinct unsigned program path is its own app, so a process can mint new
-/// triples at will. Entries the user did not approve are forgotten once not seen within the
-/// retention period, and beyond `maxUnapproved` the least recently seen go first (`prune`).
+/// triples at will. Beyond `maxUnapproved` entries the user did not approve, the least recently
+/// seen go first (`prune`). Age alone forgets nothing: an access seen months ago is still known.
 /// Forgetting one only means its next access alerts as a first access again; the baseline never
 /// decides an access (rules and questions do), and approvals are never forgotten.
 public final class Baseline: @unchecked Sendable {
@@ -60,6 +60,9 @@ public final class Baseline: @unchecked Sendable {
     public private(set) var learningStartedAt: Date
     public var learningDuration: TimeInterval
     public let maxUnapproved: Int
+    /// What `prune` evicts down to: a tenth below `maxUnapproved`, so that under a flood of new
+    /// triples the sort comes once per that many new entries rather than on every pass.
+    public var lowWaterMark: Int { maxUnapproved - max(1, maxUnapproved / 10) }
 
     /// Entries beyond `maxUnapproved` (a table grown by an older build) are dropped at once and
     /// marked dirty, so the next save deletes their rows.
@@ -166,25 +169,18 @@ public final class Baseline: @unchecked Sendable {
         return Array(all.sorted { ($0.lastSeen, $0.firstSeen) > ($1.lastSeen, $1.firstSeen) }.prefix(max(0, limit)))
     }
 
-    /// Forgets unapproved (observed or learned) entries last seen before `cutoff`, then the least
-    /// recently seen unapproved ones beyond `maxUnapproved`. Approvals stay. Removed keys are marked
-    /// dirty (their rows are deleted on the next save). Called by maintenance; cheap while under
-    /// the limit. Returns how many were forgotten.
+    /// Over `maxUnapproved` unapproved (observed or learned) entries, forgets the least recently seen
+    /// of them down to `lowWaterMark`. Approvals stay. Removed keys are marked dirty (their rows are
+    /// deleted on the next save). Called by maintenance; cheap while under the limit. Returns how
+    /// many were forgotten.
     @discardableResult
-    public func prune(lastSeenBefore cutoff: Date? = nil) -> Int {
+    public func prune() -> Int {
         lock.lock(); defer { lock.unlock() }
-        var removed = 0
-        if let cutoff {
-            for (key, entry) in entries where entry.source != .approved && entry.lastSeen < cutoff {
-                entries[key] = nil
-                dirty.insert(key)
-                removed += 1
-            }
-        }
-        guard entries.count > maxUnapproved else { return removed }
+        guard entries.count > maxUnapproved else { return 0 }
         let unapproved = entries.values.filter { $0.source != .approved }
-        let excess = unapproved.count - maxUnapproved
-        guard excess > 0 else { return removed }
+        guard unapproved.count > maxUnapproved else { return 0 }
+        let excess = unapproved.count - max(0, lowWaterMark)
+        var removed = 0
         for entry in unapproved.sorted(by: { ($0.lastSeen, $0.firstSeen) < ($1.lastSeen, $1.firstSeen) }).prefix(excess) {
             entries[entry.key] = nil
             dirty.insert(entry.key)
