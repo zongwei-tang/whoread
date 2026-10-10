@@ -19,6 +19,84 @@
 #   WHOREAD_CLIENT_REQUIREMENT='anchor apple generic and certificate leaf[subject.OU] = "TEAMID"'
 #   WHOREAD_APP_REQUIREMENT='identifier "<prefix>.whoread" and anchor apple generic and certificate leaf[subject.OU] = "TEAMID"'
 set -euo pipefail
+
+# Prints why PATH (a link at PATH is not followed) could be changed by someone other than UID, and
+# succeeds; fails when only UID can change it. Any ACL ALLOW entry counts (mode bits do not show
+# one); DENY entries, like a home's "everyone deny delete", only take rights away.
+untrusted_reason() {  # PATH UID
+  local owner mode
+  owner="$(stat -f %u "$1")"
+  mode="$(stat -f %Lp "$1")"
+  if [ "$owner" != "$2" ]; then echo "is owned by uid $owner"
+  elif (( 8#$mode & 8#022 )); then echo "is writable by group or others (mode $mode)"
+  elif [[ "$(ls -led "$1")" == *$'\n'*' allow '* ]]; then echo "has an access control list that lets others in"
+  else return 1
+  fi
+}
+
+# Renames PATH to PATH.untrusted-<time>-<pid>-<n>, never following or deleting it, and says why.
+move_aside() {  # PATH REASON
+  local to n=0
+  while :; do
+    to="$1.untrusted-$(date +%s)-$$-$n"
+    [ -e "$to" ] || [ -L "$to" ] || break
+    n=$((n + 1))
+  done
+  mv "$1" "$to"
+  echo "$1 $2: moved aside to $to" >&2
+}
+
+# Makes DIR a directory only OWNER can enter (0700) holding NAME as OWNER's alone (0600), for launchd
+# to append the daemon's output to (alert headlines and process chains of every user). Nothing someone
+# else left there is followed or adopted, as the system extension does with its own log (macos-3):
+# - at DIR, a link or non-directory, another user's directory, or one others can write or that has an
+#   ACL ALLOW entry is moved aside first;
+# - then, with nobody else able to change DIR, the same goes for NAME, and for a NAME that is not a
+#   regular file or has more than one name (chown and chmod would change that other file too).
+# An existing log that passes is kept, with its content.
+private_log() {  # DIR NAME OWNER GROUP
+  local dir="$1" file="$1/$2" owner="$3" group="$4" uid reason
+  uid="$(id -u "$owner")"
+  if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+    move_aside "$dir" "is a symbolic link or not a directory"
+  elif [ -d "$dir" ] && reason="$(untrusted_reason "$dir" "$uid")"; then
+    move_aside "$dir" "$reason"
+  fi
+  [ -d "$dir" ] || mkdir -m 700 "$dir"
+  chown -h "$owner:$group" "$dir"
+  chmod -h 700 "$dir"
+  if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
+    move_aside "$file" "is a symbolic link or not a regular file"
+  elif [ -e "$file" ] && reason="$(untrusted_reason "$file" "$uid")"; then
+    move_aside "$file" "$reason"
+  elif [ -e "$file" ] && [ "$(stat -f %l "$file")" != 1 ]; then
+    move_aside "$file" "has $(stat -f %l "$file") hard links"
+  fi
+  [ -e "$file" ] || install -m 600 -o "$owner" -g "$group" /dev/null "$file"
+  chown -h "$owner:$group" "$file"
+  chmod -h 600 "$file"
+}
+
+# Fails, saying why, unless each existing DIR is a real directory that only UID can change. Used where
+# the daemon's own check would refuse it at start (the data directory), and where launchd starts the
+# daemon from as root (/usr/local): `install -d` would chown and chmod whatever a link there points to,
+# and the files copied next would land in it.
+require_trusted_dirs() {  # UID FIX DIR...
+  local uid="$1" fix="$2" dir reason
+  shift 2
+  for dir in "$@"; do
+    if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then reason="is a symbolic link or not a directory"
+    elif [ -d "$dir" ] && reason="$(untrusted_reason "$dir" "$uid")"; then :
+    else continue
+    fi
+    echo "refusing to install: $dir $reason. Only root may be able to change it: $fix" >&2
+    return 1
+  done
+}
+
+# Sourced (by the tests): define the functions above, do nothing else. `return` works only there.
+if (return 0 2>/dev/null); then return 0; fi
+
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 77; }
 usage() { echo "usage: $0 [eslogger|native] [--bin DIR]" >&2; exit 64; }
 SOURCE=eslogger
@@ -64,18 +142,24 @@ DATA="/Library/Application Support/WhoRead"
 PLIST=/Library/LaunchDaemons/com.whoread.daemon.plist
 LOGS=/Library/Logs/WhoRead
 
+# Like the daemon at start (macos-4): a data directory someone else could have changed is refused,
+# never adopted (install -d would chown it) or moved aside (that would drop the user's rules).
+require_trusted_dirs 0 "check it, then move it aside (sudo mv it to a new name) so a fresh one is created; whoever made it may have left rules, a catalog or links in it" \
+  "$DATA" "$DATA/defaults"
+# launchd runs whoreadd from /usr/local/libexec as root: whoever could rename entries in /usr/local
+# could put their own program there.
+require_trusted_dirs 0 "check it, then sudo chown root:wheel it, sudo chmod go-w it and remove its ACL entries (sudo chmod -N)" /usr/local
+
 launchctl bootout system "$PLIST" 2>/dev/null || true
 # bootout can return before the old daemon has exited; bootstrapping the label again while it is
 # still there fails (the VM's provisioning reinstalls over a running daemon).
 for _ in $(seq 60); do launchctl print system/com.whoread.daemon >/dev/null 2>&1 || break; sleep 0.5; done
 install -d -m 755 -o root -g wheel /usr/local/libexec /usr/local/bin "$DATA" "$DATA/defaults"
-# The log carries alert headlines and process chains of every user: root only. Pre-create the
-# file, and fix the modes an earlier install (755/644) left behind.
-install -d -o root -g wheel "$LOGS"
-( umask 077; : >> "$LOGS/whoreadd.log" )
-chown root:wheel "$LOGS/whoreadd.log"
-chmod 700 "$LOGS"
-chmod 600 "$LOGS/whoreadd.log"
+require_trusted_dirs 0 "check it, then remove its ACL entries (sudo chmod -N)" /usr/local/libexec /usr/local/bin
+# The log carries alert headlines and process chains of every user: root only. A link or another
+# user's file there is moved aside, never followed; an earlier install's log (755/644) is kept and
+# closed to others.
+private_log "$LOGS" whoreadd.log root wheel
 install -m 755 -o root -g wheel "$BIN/whoreadd" /usr/local/libexec/whoreadd
 install -m 755 -o root -g wheel "$BIN/whoread" /usr/local/bin/whoread
 install -m 644 -o root -g wheel "$ROOT/Data/catalog.json" "$ROOT/Data/agents.json" "$ROOT/Data/benign.json" "$DATA/defaults/"
