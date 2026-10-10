@@ -151,6 +151,37 @@ final class RedactorCoverageTests: XCTestCase {
         ])
     }
 
+    /// A command run in a container, a pod or over ssh has the rules of its own program: the htpasswd
+    /// line Docker's registry guide gives, `docker exec db mysql -pPW`, `kubectl exec … -- …`.
+    func testCommandsRunInAContainerOrOverSSHKeepTheirRules() {
+        assertRedacted(["docker", "run", "--rm", "--entrypoint", "htpasswd", "httpd:2", "-Bbn", "testuser", "Hunter2pw"],
+                       ["docker", "run", "--rm", "--entrypoint", "htpasswd", "httpd:2", "-Bbn", "testuser", R])
+        assertRedacted(["/bin/sh", "-c", "docker run --entrypoint=htpasswd httpd:2 -Bbn testuser Hunter2pw > auth/htpasswd"],
+                       ["/bin/sh", "-c", "docker run --entrypoint=htpasswd httpd:2 -Bbn testuser \(R) > auth/htpasswd"])
+        assertRedacted(["docker", "run", "--rm", "-it", "-v", "/srv/auth:/auth", "httpd:2", "htpasswd", "-Bbn", "bob", "Hunter2pw"],
+                       ["docker", "run", "--rm", "-it", "-v", "/srv/auth:/auth", "httpd:2", "htpasswd", "-Bbn", "bob", R])
+        assertRedacted(["docker", "exec", "-it", "-e", "TERM=xterm", "db", "mysql", "-uroot", "-pHunter2pw"],
+                       ["docker", "exec", "-it", "-e", "TERM=xterm", "db", "mysql", "-uroot", "-p\(R)"])
+        assertRedacted(["podman", "container", "exec", "cache", "redis-cli", "AUTH", "Hunter2pw"],
+                       ["podman", "container", "exec", "cache", "redis-cli", "AUTH", R])
+        assertRedacted(["/bin/sh", "-c", "docker compose -f dev.yml exec -T db mysqladmin -uroot password Hunter2pw"],
+                       ["/bin/sh", "-c", "docker compose -f dev.yml exec -T db mysqladmin -uroot password \(R)"])
+        assertRedacted(["docker-compose", "run", "--rm", "web", "htpasswd", "-nb", "bob", "Hunter2pw"],
+                       ["docker-compose", "run", "--rm", "web", "htpasswd", "-nb", "bob", R])
+        assertRedacted(["kubectl", "exec", "-n", "prod", "-it", "mysql-0", "--", "mysql", "-pHunter2pw"],
+                       ["kubectl", "exec", "-n", "prod", "-it", "mysql-0", "--", "mysql", "-p\(R)"])
+        assertRedacted(["ssh", "-p", "2222", "-i", "/Users/alice/keys/id", "web", "htpasswd", "-b", "/etc/nginx/htpasswd", "bob", "Hunter2pw"],
+                       ["ssh", "-p", "2222", "-i", "/Users/alice/keys/id", "web", "htpasswd", "-b", "/etc/nginx/htpasswd", "bob", R])
+        assertRedacted(["/bin/sh", "-c", "ssh -tt db sudo mysql -pHunter2pw"], ["/bin/sh", "-c", "ssh -tt db sudo mysql -p\(R)"])
+        assertKept([
+            ["docker", "run", "--rm", "-p", "8080:80", "nginx"], ["docker", "exec", "db", "mysql", "-uroot", "-p", "dbname"],
+            ["docker", "run", "-e", "MODE=prod", "img", "echo", "hello"], ["docker", "exec", "-it", "web", "bash"],
+            ["docker", "compose", "up", "-d"], ["kubectl", "exec", "pod", "--", "ls", "-la"], ["kubectl", "get", "pods"],
+            ["ssh", "host", "ls", "-la"], ["ssh", "-o", "StrictHostKeyChecking=no", "-p", "2222", "bob@host", "uptime"],
+            ["/bin/sh", "-c", "docker run --rm -v \"$PWD\":/app -w /app node:20 npm test"],
+        ])
+    }
+
     func testProgramSpecificPasswordFlags() {
         // security: the import/export passphrase, the partition-list and keychain passwords.
         assertRedacted(["security", "import", "cert.p12", "-k", "build.keychain", "-P", "Hunter2pw", "-T", "/usr/bin/codesign"],

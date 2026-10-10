@@ -281,9 +281,11 @@ public enum ArgvRedactor {
         // `exec > FILE`: from then on the shell's own output goes to FILE, on every later line. A
         // command line run by `sh -c '…' > FILE` writes there from the start.
         var execRedirect = outputRedirected
+        // The command a container or remote tool runs (`docker exec db mysql …`), by where it starts.
+        var launched: (start: Int, entrypoint: String?)?
         func resetCommand(at i: Int) {
             pending = nil; program = nil; expectProgram = true; skipNext = false
-            flags = ([:], [:]); positional = [:]
+            flags = ([:], [:]); positional = [:]; launched = nil
             dataMode = false; dataSeen = false; keepNext = false; hereString = false; outputBeforeProgram = false
             commandStart = i
         }
@@ -292,6 +294,7 @@ public enum ArgvRedactor {
             expectProgram = wrappers.contains(name)
             flags = programFlags(name, command: tokens[i...])
             positional = positionalSecrets(name, tokens: tokens, program: i, lineStarts: lineStarts, shell: shell)
+            launched = launchedCommand(name, tokens: tokens, program: i, lineStarts: lineStarts, shell: shell)
             if shell && dataWriters.contains(name) {
                 dataMode = outputBeforeProgram || execRedirect || groups.redirected.contains(i)
                     || writesOutput(tokens, after: i, lineStarts: lineStarts)
@@ -332,6 +335,17 @@ public enum ArgvRedactor {
                 }
             } else if lineStarts.contains(i) || groups.commandStarts.contains(i) {
                 resetCommand(at: i)
+            }
+            if let l = launched, i == l.start {
+                // `docker exec db mysql -pPW`, `ssh host htpasswd -b …`: the command run there has the
+                // rules of its own program.
+                resetCommand(at: i)
+                if let name = l.entrypoint {
+                    // `docker run --entrypoint htpasswd IMAGE ARGS…`: the image's arguments are the
+                    // entry point's.
+                    startProgram(name, at: i)
+                    continue
+                }
             }
             if isSeparator(raw) {
                 resetCommand(at: i + 1)
@@ -655,6 +669,95 @@ public enum ArgvRedactor {
             }
         }
         return out
+    }
+
+    static let containerTools: Set<String> = ["docker", "podman", "nerdctl", "finch"]
+    static let composeTools: Set<String> = ["docker-compose", "podman-compose"]
+    /// Options of the container tools and of their exec, run and create commands that take a value
+    /// (`docker run -e K=V -v A:B IMAGE`). Others are switches (`-it`, `--rm`).
+    static let containerValueOptions: Set<String> = [
+        "--context", "-c", "-H", "--host", "--config", "-l", "--log-level", "-f", "--file", "-p", "--project-name",
+        "--project-directory", "--profile", "--env-file", "--ansi", "--progress", "--parallel", "-e", "--env", "-u",
+        "--user", "-w", "--workdir", "--detach-keys", "-v", "--volume", "--publish", "--name", "--network", "--net",
+        "--mount", "--label", "--label-file", "--platform", "-h", "--hostname", "--add-host", "--cpus", "--cpu-shares",
+        "-m", "--memory", "--memory-swap", "--memory-reservation", "--restart", "--log-driver", "--log-opt", "--device",
+        "--cap-add", "--cap-drop", "--security-opt", "--ulimit", "--dns", "--dns-search", "--dns-option", "--ipc",
+        "--pid", "--uts", "--userns", "--cgroupns", "--cgroup-parent", "--tmpfs", "--shm-size", "--gpus", "--runtime",
+        "--pull", "--health-cmd", "--health-interval", "--health-retries", "--health-timeout", "--health-start-period",
+        "--stop-signal", "--stop-timeout", "--volumes-from", "--link", "--expose", "--group-add", "--ip", "--ip6",
+        "--mac-address", "--network-alias", "--cidfile", "--cpuset-cpus", "--cpuset-mems", "--blkio-weight",
+        "--oom-score-adj", "--isolation", "--storage-opt", "--sysctl", "-a", "--attach", "--annotation", "--domainname",
+        "--index", "--pod", "--arch", "--os",
+    ]
+    /// ssh options that take a value (`-p 2222`, `-i KEY`, `-o Opt=v`).
+    static let sshValueOptions = Set("BbcDEeFIiJLlmOoPpQRSWw")
+
+    /// The command a container or remote tool runs, whose words follow the tool's own: `docker exec
+    /// [OPTIONS] CONTAINER CMD…`, `docker run|create [OPTIONS] IMAGE CMD…` (also `container exec|run`,
+    /// podman, nerdctl, finch), `docker compose exec|run [OPTIONS] SERVICE CMD…`, `kubectl|oc … --
+    /// CMD…`, and `ssh [OPTIONS] HOST CMD…` with CMD in separate words (one quoted word is a command
+    /// line of its own). `start` is the index of CMD's program; with `--entrypoint PROG`, the image's
+    /// (PROG's arguments follow it).
+    static func launchedCommand(_ program: String, tokens: [String], program p: Int, lineStarts: Set<Int>,
+                                shell: Bool) -> (start: Int, entrypoint: String?)? {
+        let isContainer = containerTools.contains(program) || composeTools.contains(program)
+        guard isContainer || ["kubectl", "oc", "ssh"].contains(program) else { return nil }
+        let words = commandWords(tokens, program: p, lineStarts: lineStarts, shell: shell)
+        let text = words.map { unquote(tokens[$0]).1 }
+        if program == "kubectl" || program == "oc" {
+            guard let dashes = text.firstIndex(of: "--"), dashes + 1 < words.count else { return nil }
+            return (words[dashes + 1], nil)
+        }
+        var j = 0
+        if program == "ssh" {
+            while j < words.count, text[j].count > 1, text[j].hasPrefix("-") {
+                if text[j] == "--" { j += 1; break }
+                // `-p 2222`, `-tt`, `-p2222`: the first option letter that takes a value takes the
+                // rest of the word, or the next word.
+                let letters = text[j].dropFirst()
+                let valued = letters.firstIndex { sshValueOptions.contains($0) }
+                j += valued.map { letters.index(after: $0) == letters.endIndex } == true ? 2 : 1
+            }
+            // The host, then the command in words of its own.
+            guard j + 1 < words.count, !text[j + 1].contains(where: \.isWhitespace) else { return nil }
+            return (words[j + 1], nil)
+        }
+        var entrypoint: String?
+        func options() {
+            while j < words.count, text[j].count > 1, text[j].hasPrefix("-") {
+                let w = text[j]
+                if w == "--" { j += 1; return }
+                if w.hasPrefix("--entrypoint=") {
+                    entrypoint = String(w.dropFirst("--entrypoint=".count))
+                } else if w == "--entrypoint" && j + 1 < words.count {
+                    entrypoint = text[j + 1]
+                    j += 1
+                } else if containerValueOptions.contains(w) || (!w.hasPrefix("--") && w.count > 2
+                                                                && containerValueOptions.contains("-" + String(w.last!))) {
+                    // `-e K=V`, and `-it` / `-dp 80:80` (a value option last in a group of letters).
+                    j += 1
+                }
+                j += 1
+            }
+        }
+        options()
+        var compose = composeTools.contains(program)
+        if j < words.count && text[j] == "container" {
+            j += 1
+        } else if j < words.count && text[j] == "compose" {
+            j += 1
+            compose = true
+            options()
+        }
+        let commands: Set<String> = compose ? ["exec", "run"] : ["exec", "run", "create"]
+        guard j < words.count, commands.contains(text[j]) else { return nil }
+        j += 1
+        options()
+        // The container, image or service.
+        guard j < words.count else { return nil }
+        if let entrypoint, !entrypoint.isEmpty { return (words[j], basename(entrypoint)) }
+        guard j + 1 < words.count else { return nil }
+        return (words[j + 1], nil)
     }
 
     /// A word of data replaced, its quotes kept (`'pw'` → `'‹redacted›'`).
