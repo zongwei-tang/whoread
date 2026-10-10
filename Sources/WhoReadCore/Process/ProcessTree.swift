@@ -33,6 +33,8 @@ public struct ProcessNode: Sendable, Hashable {
     /// mark for that agent (see `recordedAncestors`), so the node cap never evicts it while it has
     /// children, even after an exec to something else.
     var everAgent = false
+    /// pidversions this process instance was seen with (each exec gives a new one), latest last.
+    var pidVersions: [UInt32] = []
 }
 
 /// What lies above a node, so that a chain query costs the same however deep the tree is: a process
@@ -181,6 +183,7 @@ public final class ProcessTree: @unchecked Sendable {
         if image.startTime == nil { image.startTime = node.image.startTime }
         if image.originalPPID == nil { image.originalPPID = node.image.originalPPID }
         adopt(image, into: &node)
+        ProcessTree.note(image.pidVersion, in: &node)
         node.fromSnapshot = false
         node.lastSeen = time
         node.exitedAt = nil
@@ -426,6 +429,7 @@ public final class ProcessTree: @unchecked Sendable {
             adopt(image, into: &node)
             node.fromSnapshot = fromSnapshot
         }
+        ProcessTree.note(p.pidVersion, in: &node)
         node.lastSeen = time
         nodes[id] = node
         if sameImage && !wasAgent && node.agentID != nil && node.childCount > 0 {
@@ -463,7 +467,7 @@ public final class ProcessTree: @unchecked Sendable {
         nodes[id] = ProcessNode(
             id: id, image: p, parentID: nil, agentID: agentID,
             exitedAt: nil, lastSeen: time, childCount: 0, fromSnapshot: fromSnapshot, ancestry: Ancestry(),
-            everAgent: agentID != nil)
+            everAgent: agentID != nil, pidVersions: p.pidVersion.map { [$0] } ?? [])
         byPID[p.pid, default: []].append(id)
         if byPID[p.pid]!.count > 8 {
             // Keep only recent instances per pid in the index; older ones stay reachable via links.
@@ -479,6 +483,22 @@ public final class ProcessTree: @unchecked Sendable {
         return p.ppid > 1 ? p.ppid : nil
     }
 
+    /// The exact execution (pid, pidversion) of the process that forked `p`, when the source names it.
+    /// parent_audit_token stands in for ppid, so after reparenting it may name launchd, and under a
+    /// debugger the debugger: it is only taken when its pid is the fork-time parent's.
+    static func parentExecution(of p: ProcessRecord) -> ProcessToken? {
+        guard let token = p.parentToken, let parent = forkParentPID(of: p), token.pid == parent, parent > 1 else { return nil }
+        return token
+    }
+
+    /// Keeps the pidversions a process instance was seen with (bounded: a process execs a few times).
+    private static func note(_ version: UInt32?, in node: inout ProcessNode) {
+        guard let version, node.pidVersions.last != version else { return }
+        node.pidVersions.removeAll { $0 == version }
+        node.pidVersions.append(version)
+        if node.pidVersions.count > 8 { node.pidVersions.removeFirst(node.pidVersions.count - 8) }
+    }
+
     private func findParentNode(
         for p: ProcessRecord, excluding selfID: UInt64, at time: Date, allowResolver: Bool, depth: Int = 0
     ) -> UInt64? {
@@ -486,8 +506,16 @@ public final class ProcessTree: @unchecked Sendable {
         // parent at all, so the chain does not reach launchd and grants no trust.
         guard let parentPID = ProcessTree.forkParentPID(of: p), parentPID != p.pid else { return nil }
         if parentPID == 1 { return launchdNode(at: time) }
+        let exact = ProcessTree.parentExecution(of: p)
 
+        // A candidate that fits the start times but was only seen with other pidversions than the one
+        // the source names: it may have exec'd since (an event not processed yet), or be an earlier
+        // holder of the pid whose exit was not seen yet. libproc tells which, below.
+        var unconfirmed: UInt64?
         if let ids = byPID[parentPID] {
+            if let exact, let id = ids.last(where: { $0 != selfID && nodes[$0]?.pidVersions.contains(exact.pidVersion) == true }) {
+                return id // the very execution the source names
+            }
             for id in ids.reversed() where id != selfID {
                 guard let node = nodes[id] else { continue }
                 if let childStart = p.startTime {
@@ -498,17 +526,23 @@ public final class ProcessTree: @unchecked Sendable {
                         continue // gone before the child existed
                     }
                 }
+                if exact != nil, !node.pidVersions.isEmpty {
+                    if unconfirmed == nil { unconfirmed = id }
+                    continue
+                }
                 return id
             }
         }
         if allowResolver, unresolvable[selfID] != parentPID, let resolver = parentResolver {
             if let record = resolver(parentPID), record.pid == parentPID, !ProcessTree.startedAfter(record.startTime, p.startTime) {
                 // libproc reports whoever holds the pid now: one that started after the child reused it.
+                // Its start time finds the node it is, if any (an unconfirmed candidate that exec'd).
                 return observeLocked(normalized(record), at: time, depth: depth + 1, fromSnapshot: true)
             }
             if nodes[selfID] != nil { unresolvable[selfID] = parentPID }
         }
-        return nil
+        // Not settled by libproc: the candidate stands, as it would without a pidversion.
+        return unconfirmed
     }
 
     /// `start` is later than `childStart` (beyond rounding): a process holding the parent's pid that
