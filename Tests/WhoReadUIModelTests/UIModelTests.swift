@@ -52,7 +52,7 @@ final class AppModelTests: XCTestCase {
     var client: IPCClient!
 
     override func setUpWithError() throws {
-        dir = FileManager.default.temporaryDirectory.appendingPathComponent("whoread-ui-\(UUID().uuidString.prefix(6))")
+        dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("whoread-ui-\(UUID().uuidString.prefix(6))")
         var c = DaemonConfiguration()
         c.dataDirectory = dir.path
         c.defaultsDirectory = repoRoot.appendingPathComponent("Data").path

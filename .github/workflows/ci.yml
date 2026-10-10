@@ -1,0 +1,98 @@
+# Builds and tests WhoRead on GitHub's macOS runners: SwiftPM build and tests, the dev-socket e2e,
+# XcodeGen + xcodebuild of every target (ad hoc, no team), shellcheck. Endpoint Security blocking is
+# not testable here (SIP is on and runners have no ES entitlement); that runs in a SIP-disabled VM.
+#
+# Each run also publishes a plain-text report per runner to the `ci-results` branch
+# (results/<commit>/<runner>.txt), so the result can be read without signing in.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use the newest installed Xcode
+        run: |
+          x="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$x" ]; then sudo xcode-select -s "$x"; fi
+          xcodebuild -version
+      - name: Run CI checks
+        id: ci
+        run: scripts/ci/run-ci.sh "$RUNNER_TEMP/report.txt"
+        continue-on-error: true
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '```'
+            cat "$RUNNER_TEMP/report.txt" 2>/dev/null | head -400
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cp "$RUNNER_TEMP/report.txt" "$RUNNER_TEMP/${{ matrix.os }}.txt" 2>/dev/null || echo "no report" > "$RUNNER_TEMP/${{ matrix.os }}.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-${{ matrix.os }}
+          path: ${{ runner.temp }}/${{ matrix.os }}.txt
+          retention-days: 14
+      - name: Fail the job when a check failed
+        if: steps.ci.outcome != 'success'
+        run: exit 1
+
+  publish:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: report-*
+          merge-multiple: true
+          path: reports
+      - name: Push the reports to the ci-results branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "whoread-ci"
+          git config --global user.email "whoread-ci@users.noreply.github.com"
+          git init -q out && cd out
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q --depth 1 origin ci-results 2>/dev/null; then
+            git checkout -q -b ci-results FETCH_HEAD
+          else
+            git checkout -q --orphan ci-results
+          fi
+          mkdir -p "results/${GITHUB_SHA}"
+          cp ../reports/*.txt "results/${GITHUB_SHA}/"
+          {
+            echo "commit: ${GITHUB_SHA}"
+            echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            for f in ../reports/*.txt; do echo "$(basename "$f" .txt): $(grep -E '^OVERALL:' "$f" || echo 'OVERALL: NO REPORT')"; done
+          } > "results/${GITHUB_SHA}/index.txt"
+          cp "results/${GITHUB_SHA}/index.txt" latest.txt
+          git add -A
+          git commit -q -m "CI results for ${GITHUB_SHA}"
+          for i in 1 2 3; do
+            git push -q origin HEAD:ci-results && break
+            git fetch -q --depth 1 origin ci-results && git rebase -q FETCH_HEAD || true
+          done

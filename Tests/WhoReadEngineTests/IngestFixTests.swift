@@ -33,7 +33,7 @@ final class IngestSourceTests: XCTestCase {
         let dir = TempDir()
         let file = dir.path("seq.jsonl")
         try ([exitLine(10), malformedLine(11), exitLine(12), exitLine(15)].joined(separator: "\n") + "\n")
-            .write(toFile: file, atomically: true, encoding: .utf8)
+            .write(toFile: file, atomically: false, encoding: .utf8)
         for prefixes in [nil, ["/Users/alice/.ssh"]] {
             let source = ReplaySource(path: file, prefixes: prefixes)
             let sink = RecordingSink()
@@ -48,7 +48,7 @@ final class IngestSourceTests: XCTestCase {
     func testEsloggerMalformedLineIsNotAKernelDrop() throws {
         let dir = TempDir()
         let lines = dir.path("lines.jsonl")
-        try ([exitLine(10), malformedLine(11), exitLine(12)].joined(separator: "\n") + "\n").write(toFile: lines, atomically: true, encoding: .utf8)
+        try ([exitLine(10), malformedLine(11), exitLine(12)].joined(separator: "\n") + "\n").write(toFile: lines, atomically: false, encoding: .utf8)
         let fake = script(dir, "eslogger", "cat \(lines)\nexec sleep 600")
         let source = EsloggerSource(executable: fake, prefixes: ["/Users/alice/.ssh"])
         let sink = RecordingSink()
@@ -64,9 +64,9 @@ final class IngestSourceTests: XCTestCase {
         let marker = dir.path("ran-once")
         let first = dir.path("first.jsonl")
         let second = dir.path("second.jsonl")
-        try ([exitLine(20_000_000), exitLine(20_000_001)].joined(separator: "\n") + "\n").write(toFile: first, atomically: true, encoding: .utf8)
+        try ([exitLine(20_000_000), exitLine(20_000_001)].joined(separator: "\n") + "\n").write(toFile: first, atomically: false, encoding: .utf8)
         // The new client counts from 0; 2…4 are genuinely missing.
-        try ([exitLine(0), exitLine(1), exitLine(5)].joined(separator: "\n") + "\n").write(toFile: second, atomically: true, encoding: .utf8)
+        try ([exitLine(0), exitLine(1), exitLine(5)].joined(separator: "\n") + "\n").write(toFile: second, atomically: false, encoding: .utf8)
         let fake = script(dir, "eslogger", """
             if [ ! -e \(marker) ]; then touch \(marker); cat \(first); exit 0; fi
             cat \(second)

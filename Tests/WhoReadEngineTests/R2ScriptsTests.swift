@@ -22,7 +22,7 @@ final class R2ScriptsTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: bin, withIntermediateDirectories: true)
         for (name, body) in stubs {
             let p = bin + "/" + name
-            try ("#!/bin/bash\n" + body + "\n").write(toFile: p, atomically: true, encoding: .utf8)
+            try ("#!/bin/bash\n" + body + "\n").write(toFile: p, atomically: false, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: p)
         }
         let log = dir.path("calls.log")
@@ -64,7 +64,7 @@ final class R2ScriptsTests: XCTestCase {
             for _ in 0..<100 { core.enforcer.recordResponse(micros: 300, missedDeadline: false) }
             XCTAssertEqual(core.status().latency.totalResponses, 100)
         }
-        FileManager.default.createFile(atPath: dir.path("data/auth-armed"), contents: Data())
+        touch(dir.path("data/auth-armed"))
         let core = try makeCore(dir)
         let s = core.status()
         XCTAssertTrue(s.enforcementEnabled)
@@ -121,10 +121,10 @@ final class R2ScriptsTests: XCTestCase {
         let build = root.appendingPathComponent("scripts/build.sh").path
         try FileManager.default.copyItem(atPath: script("scripts/build.sh"), toPath: build)
         let xcodegen = root.appendingPathComponent("scripts/xcodegen.sh").path
-        try "#!/bin/bash\nexit 0\n".write(toFile: xcodegen, atomically: true, encoding: .utf8)
+        try "#!/bin/bash\nexit 0\n".write(toFile: xcodegen, atomically: false, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: xcodegen)
         try (team ? "BUNDLE_ID_PREFIX = com.example\nDEVELOPMENT_TEAM = ABCDE12345\n" : "BUNDLE_ID_PREFIX = com.example\n")
-            .write(to: root.appendingPathComponent("Xcode/Local.xcconfig"), atomically: true, encoding: .utf8)
+            .write(to: root.appendingPathComponent("Xcode/Local.xcconfig"), atomically: false, encoding: .utf8)
         let r = try run(build, stubs: ["xcodebuild": "echo \"xcodebuild $*\" >> \"$LOG\""], env: env, in: dir)
         XCTAssertEqual(r.status, 0, r.stderr)
         XCTAssertEqual(r.calls.count, 3, "\(r.calls)")

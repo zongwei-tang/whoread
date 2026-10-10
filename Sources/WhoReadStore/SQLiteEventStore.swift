@@ -26,9 +26,7 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         }
         // Create with restrictive permissions before SQLite touches it.
-        if !FileManager.default.fileExists(atPath: path) {
-            _ = FileManager.default.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600])
-        }
+        try SafeFile.createIfAbsent(path, mode: 0o600)
         db = try SQLiteDatabase(path: path)
         chmod(path, 0o600)
         try migrate()

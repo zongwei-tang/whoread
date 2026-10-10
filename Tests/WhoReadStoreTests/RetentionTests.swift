@@ -7,7 +7,7 @@ final class RetentionTests: XCTestCase {
     var dir: URL!
 
     override func setUpWithError() throws {
-        dir = FileManager.default.temporaryDirectory.appendingPathComponent("whoread-retention-\(UUID().uuidString)")
+        dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("whoread-retention-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 

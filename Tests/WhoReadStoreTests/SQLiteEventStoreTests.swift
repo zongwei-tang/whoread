@@ -6,7 +6,7 @@ final class SQLiteEventStoreTests: XCTestCase {
     var dir: URL!
 
     override func setUpWithError() throws {
-        dir = FileManager.default.temporaryDirectory.appendingPathComponent("whoread-store-\(UUID().uuidString)")
+        dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("whoread-store-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
@@ -165,7 +165,7 @@ final class RuleDecodingTests: XCTestCase {
     /// A rule row this build cannot read must not be dropped silently (spec-5 / policy-8): the daemon
     /// would keep enforcing with the rest and the next save would erase it.
     func testUndecodableRuleRowThrows() throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("whoread-rules-\(UUID().uuidString)")
+        let dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("whoread-rules-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let path = dir.appendingPathComponent("w.sqlite").path

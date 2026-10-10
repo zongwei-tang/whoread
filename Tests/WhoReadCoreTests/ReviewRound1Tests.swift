@@ -469,6 +469,10 @@ final class RuleRound1Tests: XCTestCase {
         while done.wait(timeout: .now()) == .timedOut {
             analyzer.replace(classifier: flips % 2 == 0 ? other : h.classifier)
             flips += 1
+            // Darwin's locks are not fair: a loop that re-locks at once can starve the other
+            // thread for minutes. A short pause keeps the two interleaved, which is what this
+            // test is about (settings changes are rare in practice).
+            usleep(50)
         }
         XCTAssertEqual(engine.rules.count, 1500, "after \(flips) recompiles")
     }

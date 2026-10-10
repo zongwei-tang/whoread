@@ -517,9 +517,11 @@ final class ExportWriter {
     init(path: String?) throws {
         self.path = path
         if let path {
-            guard FileManager.default.createFile(atPath: path + ".partial", contents: nil),
-                  let h = FileHandle(forWritingAtPath: path + ".partial") else { throw CLIError("cannot write \(path).partial") }
-            handle = h
+            // Owner-only from the first byte (history can name protected files), and never through a
+            // symlink or into a file someone else created.
+            do { handle = try SafeFile.createNew(path + ".partial", mode: 0o600) } catch {
+                throw CLIError("cannot write \(path).partial: \(error) (remove a leftover file first)")
+            }
         } else {
             handle = FileHandle.standardOutput
         }
@@ -915,7 +917,7 @@ func cmdCatalog(_ c: IPCClient) throws {
     case "export":
         let data = try c.catalog().catalog.encoded() + Data("\n".utf8)
         if let path = args.value("output") ?? args.value("o") {
-            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            try SafeFile.replace(path, with: data, mode: 0o644)
             FileHandle.standardError.write(Data("catalog written to \(path)\n".utf8))
         } else {
             FileHandle.standardOutput.write(data)
@@ -1026,9 +1028,8 @@ func cmdKillSwitch() throws {
     let path = args.value("path") ?? WhoReadPaths.killSwitchFile
     switch args.positional.dropFirst().first ?? "status" {
     case "engage":
-        guard FileManager.default.createFile(atPath: path, contents: Data("disabled by whoread kill-switch\n".utf8),
-                                             attributes: [.posixPermissions: 0o644]) else {
-            throw CLIError("cannot create \(path) (run with sudo)", exitCode: 77)
+        do { try SafeFile.replace(path, with: Data("disabled by whoread kill-switch\n".utf8), mode: 0o644) } catch {
+            throw CLIError("cannot create \(path) (run with sudo): \(error)", exitCode: 77)
         }
         out("kill switch ENGAGED: \(path) exists; enforcement is off within ~0.2 s")
     case "release":
@@ -1089,7 +1090,7 @@ func cmdFixture() throws {
     let lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
     let sanitizer = FixtureSanitizer(home: home, vault: args.value("vault"), samplePerKind: Int(args.value("sample") ?? "40") ?? 40)
     let (kept, report) = sanitizer.sanitize(lines: lines)
-    try (kept.joined(separator: "\n") + "\n").write(toFile: output, atomically: true, encoding: .utf8)
+    try SafeFile.replace(output, with: Data((kept.joined(separator: "\n") + "\n").utf8), mode: 0o600)
     out("kept \(report.kept) of \(report.inputLines) lines: \(report.vaultEvents) vault events, \(report.lifecycle) lifecycle, \(report.samples) samples; by kind \(report.byKind)")
 }
 

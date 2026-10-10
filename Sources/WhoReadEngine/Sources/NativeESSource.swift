@@ -678,9 +678,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     /// unclean stop; enforcement stays as the user set it. Client thread only (IO).
     private func arm() {
         guard let config = core?.config, !config.inMemoryStore else { return }
-        if !FileManager.default.createFile(atPath: config.authArmedMarkerPath, contents: nil,
-                                           attributes: [.posixPermissions: 0o600]) {
-            Log.warning("could not create \(config.authArmedMarkerPath)")
+        do { try SafeFile.replace(config.authArmedMarkerPath, with: Data(), mode: 0o600) } catch {
+            Log.warning("could not create the auth-armed marker: \(error)")
         }
     }
 

@@ -783,7 +783,7 @@ final class AskLifecycleTests: XCTestCase {
             let core = try DaemonCore(config: config, makeSource: { _ in FakeSource(canEnforce: true) })
             try enable(core)
         }
-        XCTAssertTrue(FileManager.default.createFile(atPath: dir.path("data/auth-armed"), contents: Data()))
+        XCTAssertTrue(touch(dir.path("data/auth-armed")))
         do {
             let core = try DaemonCore(config: config, makeSource: { _ in FakeSource(canEnforce: true) })
             XCTAssertTrue(core.enforcement.isActive, "enforcement as the user set it")

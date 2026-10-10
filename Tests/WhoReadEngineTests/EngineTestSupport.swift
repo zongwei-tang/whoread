@@ -19,7 +19,7 @@ let fixtureV7 = repoRoot.appendingPathComponent("Tests/Fixtures/eslogger/schema-
 final class TempDir {
     let url: URL
     init() {
-        url = FileManager.default.temporaryDirectory.appendingPathComponent("whoread-\(UUID().uuidString.prefix(8))")
+        url = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("whoread-\(UUID().uuidString.prefix(8))")
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
     func path(_ name: String) -> String { url.appendingPathComponent(name).path }
@@ -41,7 +41,7 @@ func baseConfig(_ dir: TempDir, source: SourceKind = .replay, replay: String? = 
 /// Writes an executable shell script.
 func script(_ dir: TempDir, _ name: String, _ body: String) -> String {
     let p = dir.path(name)
-    try! ("#!/bin/sh\n" + body + "\n").write(toFile: p, atomically: true, encoding: .utf8)
+    try! ("#!/bin/sh\n" + body + "\n").write(toFile: p, atomically: false, encoding: .utf8)
     chmod(p, 0o755)
     return p
 }
@@ -75,4 +75,38 @@ func proc(_ pid: Int32, _ path: String, ppid: Int32 = 1, platform: Bool = false,
           start: Date = Date(timeIntervalSince1970: 1_760_000_000)) -> ProcessRecord {
     ProcessRecord(pid: pid, pidVersion: UInt32(pid), ppid: ppid, originalPPID: ppid, executablePath: path,
                   isPlatformBinary: platform, argv: argv, startTime: start)
+}
+
+/// Creates (or replaces) a file the way the product does; Foundation's createFile cannot write
+/// inside a sandboxed test runner.
+@discardableResult
+func touch(_ path: String, _ data: Data = Data()) -> Bool {
+    (try? SafeFile.replace(path, with: data, mode: 0o644)) != nil
+}
+
+/// True when this process may not bind a Unix socket (EPERM), as inside some sandboxes.
+let unixSocketBindDenied: Bool = {
+    let dir = ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory()
+    let path = (dir as NSString).appendingPathComponent("wr-bind-probe-\(getpid()).sock")
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd); unlink(path) }
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    let bytes = Array(path.utf8.prefix(MemoryLayout.size(ofValue: addr.sun_path) - 1))
+    withUnsafeMutableBytes(of: &addr.sun_path) { raw in
+        for (i, b) in bytes.enumerated() { raw[i] = b }
+    }
+    let rc = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+    }
+    return rc != 0 && errno == EPERM
+}()
+
+/// Skips a test that needs a listening Unix socket when the runner forbids binding one and
+/// `WHOREAD_ALLOW_SOCKET_SKIP=1` says that is expected (scripts/dev/sc-build.sh inside a sandbox).
+/// Everywhere else these tests run normally.
+func skipIfSocketBindDenied() throws {
+    try XCTSkipIf(ProcessInfo.processInfo.environment["WHOREAD_ALLOW_SOCKET_SKIP"] == "1" && unixSocketBindDenied,
+                  "binding a Unix socket is not permitted in this sandbox; this test runs outside it (VM / plain swift test)")
 }

@@ -239,7 +239,7 @@ final class KernelDropRound2Tests: XCTestCase {
         XCTAssertNil(FakeSource(canEnforce: false).kernelDroppedEvents)
         let dir = TempDir()
         let file = dir.path("seq.jsonl")
-        try ([1, 2, 5, 6].map { exitLine($0) }.joined(separator: "\n") + "\n").write(toFile: file, atomically: true, encoding: .utf8)
+        try ([1, 2, 5, 6].map { exitLine($0) }.joined(separator: "\n") + "\n").write(toFile: file, atomically: false, encoding: .utf8)
         let source = ReplaySource(path: file)
         try source.start(sink: RecordingSink())
         XCTAssertTrue(source.waitUntilFinished())

@@ -13,7 +13,7 @@ final class AskUIModelTests: XCTestCase {
     var client: IPCClient!
 
     override func setUpWithError() throws {
-        dir = FileManager.default.temporaryDirectory.appendingPathComponent("whoread-ask-ui-\(UUID().uuidString.prefix(6))")
+        dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("whoread-ask-ui-\(UUID().uuidString.prefix(6))")
         var c = DaemonConfiguration()
         c.dataDirectory = dir.path
         c.defaultsDirectory = repoRoot.appendingPathComponent("Data").path

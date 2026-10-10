@@ -45,6 +45,7 @@ final class Round2CLITests: XCTestCase {
     // store-ipc-cli-5: SO_RCVTIMEO bounds each read() alone, so one byte every 0.2 s kept a
     // connection (and its slot) forever. The whole frame now has to arrive within the timeout.
     func testTricklingRequestIsCutOffAtTheFrameDeadline() throws {
+        try skipIfSocketBindDenied()
         let dir = TempDir()
         let server = UnixSocketServer(path: dir.path("t.sock"), handler: OKHandler(), ioTimeout: 1)
         try server.start()
@@ -67,6 +68,7 @@ final class Round2CLITests: XCTestCase {
     // ...and so do the slots they hold (each connection has its own thread, so none waits for a
     // worker to start its clock).
     func testSlotsHeldByTricklingPeersFreeUpAtTheDeadline() throws {
+        try skipIfSocketBindDenied()
         try XCTSkipIf(geteuid() == 0, "root takes no slot")
         let dir = TempDir()
         let path = dir.path("t.sock")
@@ -105,6 +107,7 @@ final class Round2CLITests: XCTestCase {
     }
 
     func testRequestsStillWorkUnderTheFrameDeadline() throws {
+        try skipIfSocketBindDenied()
         let dir = TempDir()
         let server = UnixSocketServer(path: dir.path("t.sock"), handler: OKHandler(), ioTimeout: 1)
         try server.start()

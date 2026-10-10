@@ -9,6 +9,8 @@ import WhoReadIPC
 /// `whoread` executable, so these run the built binary against a daemon on a dev socket: a stub
 /// handler that serves canned questions and records what the CLI sent, or the real strict handler.
 final class AskCLITests: XCTestCase {
+    override func setUpWithError() throws { try skipIfSocketBindDenied() }
+
     private static let t = Date(timeIntervalSince1970: 1_760_000_000)
 
     /// The `whoread` executable next to the test bundle (`swift build --build-tests` builds it).
@@ -35,7 +37,7 @@ final class AskCLITests: XCTestCase {
         p.executableURL = URL(fileURLWithPath: bin)
         p.arguments = (socket.map { ["--socket", $0] } ?? []) + ["--lang", lang] + args
         // UTC, so the times the CLI prints are known.
-        p.environment = ["PATH": "/usr/bin:/bin", "HOME": NSTemporaryDirectory(), "TZ": "UTC"]
+        p.environment = ["PATH": "/usr/bin:/bin", "HOME": ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory(), "TZ": "UTC"]
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err

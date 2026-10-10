@@ -98,8 +98,7 @@ public final class Daemon: @unchecked Sendable {
             xpcServer = server
             // Lets the CLI find the service without flags (world-readable, not secret).
             let marker = (config.dataDirectory as NSString).appendingPathComponent("mach-service")
-            try? (name + "\n").write(toFile: marker, atomically: true, encoding: .utf8)
-            chmod(marker, 0o644)
+            do { try SafeFile.replace(marker, with: Data((name + "\n").utf8), mode: 0o644) } catch { Log.warning("\(error)") }
             Log.info("XPC listener on \(name)")
         }
         #endif

@@ -565,7 +565,7 @@ final class EnforcementRound1Tests: XCTestCase {
     func testAuthArmedMarkerIsReportedAndLeavesEnforcementAsSet() throws {
         let dir = TempDir()
         do { _ = try r1Core(dir) }
-        XCTAssertTrue(FileManager.default.createFile(atPath: dir.path("data/auth-armed"), contents: Data()))
+        XCTAssertTrue(touch(dir.path("data/auth-armed")))
         let (core, _) = try r1Core(dir)
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path("data/auth-armed")), "the marker is consumed")
         XCTAssertFalse(core.currentSettings.enforcementEnabled, "it was off and stays off")
@@ -814,7 +814,7 @@ final class CatalogRound1Tests: XCTestCase {
         let homeDir = repoRoot.appendingPathComponent(".build/r1-home-\(UUID().uuidString.prefix(8))").path
         defer { try? FileManager.default.removeItem(atPath: homeDir) }
         try FileManager.default.createDirectory(atPath: homeDir + "/dotfiles/aws", withIntermediateDirectories: true)
-        try "x".write(toFile: homeDir + "/dotfiles/aws/credentials", atomically: true, encoding: .utf8)
+        try "x".write(toFile: homeDir + "/dotfiles/aws/credentials", atomically: false, encoding: .utf8)
         let (core, fake) = try r1Core(dir) { $0.homeDirectories = [homeDir] }
         let target = (homeDir + "/dotfiles/aws/credentials")
         let resolvedTarget = RealpathSymlinkResolver().resolve(target) ?? target
@@ -959,7 +959,7 @@ final class Round1FollowUpDaemonTests: XCTestCase {
         defer { first.stop() }
         try enableEnforcement(first.core)
         // What the native source keeps on disk while AUTH events are subscribed.
-        XCTAssertTrue(FileManager.default.createFile(atPath: config.authArmedMarkerPath, contents: nil))
+        XCTAssertTrue(touch(config.authArmedMarkerPath))
         XCTAssertThrowsError(try Daemon(configuration: config, makeSource: { _ in FakeSource(canEnforce: true) }))
         XCTAssertTrue(FileManager.default.fileExists(atPath: config.authArmedMarkerPath), "the running daemon's marker is left alone")
         XCTAssertTrue(try first.core.store.settings().enforcementEnabled)

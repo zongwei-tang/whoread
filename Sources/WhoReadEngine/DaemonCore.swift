@@ -634,10 +634,8 @@ public final class DaemonCore: @unchecked Sendable {
 
     static func writeUserCatalog(_ catalog: Catalog, base: Catalog, config: DaemonConfiguration) {
         do {
-            try catalog.encoded().write(to: URL(fileURLWithPath: config.userCatalogPath), options: .atomic)
-            chmod(config.userCatalogPath, 0o600)
-            try base.encoded().write(to: URL(fileURLWithPath: config.userCatalogBasePath), options: .atomic)
-            chmod(config.userCatalogBasePath, 0o600)
+            try SafeFile.replace(config.userCatalogPath, with: catalog.encoded(), mode: 0o600)
+            try SafeFile.replace(config.userCatalogBasePath, with: base.encoded(), mode: 0o600)
         } catch {
             Log.error("could not write the user catalog: \(error)")
         }
@@ -1091,10 +1089,8 @@ public final class DaemonCore: @unchecked Sendable {
                 try? FileManager.default.removeItem(atPath: config.userCatalogPath)
                 try? FileManager.default.removeItem(atPath: config.userCatalogBasePath)
             } else {
-                try c.encoded().write(to: URL(fileURLWithPath: config.userCatalogPath), options: .atomic)
-                chmod(config.userCatalogPath, 0o600)
-                try defaultCatalog.encoded().write(to: URL(fileURLWithPath: config.userCatalogBasePath), options: .atomic)
-                chmod(config.userCatalogBasePath, 0o600)
+                try SafeFile.replace(config.userCatalogPath, with: c.encoded(), mode: 0o600)
+                try SafeFile.replace(config.userCatalogBasePath, with: defaultCatalog.encoded(), mode: 0o600)
             }
         }
         lock.lock()
