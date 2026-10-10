@@ -54,6 +54,7 @@ echo "share=$WHOREAD_VM_SHARE repo=$WHOREAD_VM_REPO"
 echo "pwd=$(pwd -P)"
 echo "args=$#|$1|$2"
 echo "testuser=$WHOREAD_TEST_USER"
+echo "zero=$0"
 exit 3
 SH
 out=$(VMJOB run copy "$T/outside.sh" -- "a b" "c'd" 2>"$T/err"); rc=$?
@@ -61,6 +62,13 @@ out=$(VMJOB run copy "$T/outside.sh" -- "a b" "c'd" 2>"$T/err"); rc=$?
 grep -q '^hello from job$' <<< "$out" && ok "copied script: output streamed" || bad "copied script output: $out"
 grep -q "^args=2|a b|c'd$" <<< "$out" && ok "copied script: arguments kept" || bad "copied script args: $out"
 grep -q "^pwd=$SHARE$" <<< "$out" && ok "copied script: starts in the share" || bad "copied script pwd: $out"
+zero=$(sed -n 's/^zero=//p' <<< "$out")
+case "$zero" in
+  */script/outside.sh) [ ! -e "$zero" ] && [ "${zero#"$SHARE"/}" = "$zero" ] \
+    && ok "copied script: runs from a private copy outside the share, removed after the job" \
+    || bad "copied script: private copy $zero left behind or in the share" ;;
+  *) bad "copied script: \$0 is $zero, not its private copy" ;;
+esac
 grep -q "^testuser=$(id -un)$" <<< "$out" && ok "WHOREAD_TEST_USER set" || bad "test user: $out"
 grep -q '^\[vm\] job .*: exit 3 after' <<< "$out" && ok "final [vm] line" || bad "no final line: $out"
 COPY_ID=$(last_id)
@@ -98,18 +106,19 @@ out=$(VMJOB shell 'echo shell-ok; exit 7' 2>"$T/err"); rc=$?
 
 echo "== jobs queued behind another job"
 # vmjob gives a job its timeout + grace from its start, not from when it was queued; a job still
-# queued after that is withdrawn (exit 70) and never runs.
-printf '#!/bin/bash\necho first\nsleep 4\n' > "$T/first.sh"
+# queued after that is withdrawn (exit 70) and never runs. The second job waits about 12 s for the
+# first and then runs about 12 s: within its 20 s from its start, not from when it was queued.
+printf '#!/bin/bash\necho first\nsleep 12\n' > "$T/first.sh"
 VMJOB run first "$T/first.sh" > "$T/first.out" 2>&1 &
 FIRST=$!
 for _ in $(seq 50); do grep -qx 'first' "$SHARE/.vm/results/"*-first-*.out 2>/dev/null && break; sleep 0.2; done
-printf '#!/bin/bash\n# timeout: 8\nsleep 5\necho second ran\nexit 4\n' > "$T/second.sh"
+printf '#!/bin/bash\n# timeout: 20\nsleep 12\necho second ran\nexit 4\n' > "$T/second.sh"
 printf '#!/bin/bash\ntouch "%s/third-ran"\n' "$T" > "$T/third.sh"
 WHOREAD_VMJOB_GRACE=0 VMJOB run third "$T/third.sh" --timeout 1 > "$T/third.out" 2>&1 &
 THIRD=$!
 s=$(date +%s); out=$(WHOREAD_VMJOB_GRACE=0 VMJOB run second "$T/second.sh" 2>"$T/err"); rc=$?; e=$(date +%s)
 [ $rc -eq 4 ] && grep -q '^second ran$' <<< "$out" \
-  && ok "a job queued behind another gets its whole time from its start ($((e - s)) s in all, limit 8 s)" \
+  && ok "a job queued behind another gets its whole time from its start ($((e - s)) s in all, limit 20 s)" \
   || bad "queued job: rc $rc after $((e - s)) s: $out $(cat "$T/err")"
 wait $THIRD; rc=$?
 [ $rc -eq 70 ] && grep -q 'still queued' "$T/third.out" && ok "a job still queued after its limit is withdrawn (exit 70)" \
@@ -134,6 +143,159 @@ echo "== bad job names are ignored"
 printf '#!/bin/bash\ntouch "%s/ran"\n' "$T" > "$SHARE/.vm/jobs/bad name.sh"
 sleep 3
 [ ! -e "$T/ran" ] && [ -f "$SHARE/.vm/jobs/bad name.sh.rejected" ] && ok "bad name rejected, not run" || bad "bad name handling"
+
+# wait_for FILE_GLOB LINE : until a file matching the glob holds LINE (10 s at most).
+wait_for() {
+  for _ in $(seq 50); do
+    # shellcheck disable=SC2086  # the glob is meant to expand
+    grep -qx "$2" $1 2>/dev/null && return 0
+    sleep 0.2
+  done
+  return 1
+}
+# with_runner PATH_DIR : restarts the runner with stand-ins from PATH_DIR in front of its PATH.
+with_runner() {
+  stop_runner
+  WHOREAD_VM_RUNNER_TEST_PATH="$1" start_runner daemon
+}
+
+echo "== clock jumps (host sleep) do not use up a job's time"
+# A stand-in date adds the offset in $T/clock-offset to the epoch seconds; everything else is the
+# real date. After the host slept, the VM's clock jumps ahead by the time it was paused.
+mkdir -p "$T/clockbin"
+cat > "$T/clockbin/date" <<SH
+#!/bin/bash
+off=\$(cat "$T/clock-offset" 2>/dev/null); off=\${off:-0}
+if [ "\$#" -eq 1 ] && [ "\$1" = +%s ]; then echo \$(( \$(/bin/date +%s) + off )); else exec /bin/date "\$@"; fi
+SH
+chmod +x "$T/clockbin/date"
+echo 0 > "$T/clock-offset"
+with_runner "$T/clockbin" || bad "runner did not start with the date stand-in"
+printf '#!/bin/bash\n# timeout: 30\necho begin\n/bin/sleep 4\necho done\n' > "$T/jump.sh"
+VMJOB run jump "$T/jump.sh" > "$T/jump.out" 2>&1 &
+WAITER=$!
+wait_for "$SHARE/.vm/results/*-jump-*.out" begin || bad "jump job did not start"
+echo 100000 > "$T/clock-offset"
+wait $WAITER; rc=$?
+[ $rc -eq 0 ] && grep -qx done "$T/jump.out" \
+  && ok "a forward jump of the VM's clock does not time a running job out" || bad "forward clock jump: rc $rc: $(cat "$T/jump.out")"
+# Backwards (the clock was ahead and is set right): the heartbeat must go on.
+echo -100000 > "$T/clock-offset"
+sleep 2
+out=$(VMJOB ping 2>&1); rc=$?
+[ $rc -eq 0 ] && ok "a backward jump of the VM's clock does not stop the heartbeat" || bad "backward clock jump: ping rc $rc: $out"
+echo 0 > "$T/clock-offset"
+with_runner "" || bad "runner did not restart"
+# vmjob on the host: its clock jumps as well when the Mac wakes up; the job is still running.
+printf '#!/bin/bash\n# timeout: 4\necho begin\n/bin/sleep 3\necho done\n' > "$T/hjump.sh"
+PATH="$T/clockbin:$PATH" WHOREAD_VMJOB_GRACE=30 VMJOB run hjump "$T/hjump.sh" > "$T/hjump.out" 2>&1 &
+WAITER=$!
+wait_for "$SHARE/.vm/results/*-hjump-*.out" begin || bad "hjump job did not start"
+echo 100000 > "$T/clock-offset"
+wait $WAITER; rc=$?
+echo 0 > "$T/clock-offset"
+[ $rc -eq 0 ] && grep -qx done "$T/hjump.out" \
+  && ok "a jump of the host's clock does not make vmjob give up on a running job" || bad "host clock jump: rc $rc: $(cat "$T/hjump.out")"
+
+echo "== a runner stopped right after its job ended records the job's exit code"
+# A stand-in sleep makes the runner's one-second waits last 3 s while $T/slow-sleep exists, so the
+# job ends, and the stop request arrives, while the runner has not looked yet.
+mkdir -p "$T/sleepbin"
+printf '#!/bin/bash\nif [ -e "%s/slow-sleep" ] && [ "$1" = 1 ]; then exec /bin/sleep 3; fi\nexec /bin/sleep "$@"\n' "$T" > "$T/sleepbin/sleep"
+chmod +x "$T/sleepbin/sleep"
+rm -f "$T/slow-sleep" "$T/release"
+with_runner "$T/sleepbin" || bad "runner did not start with the sleep stand-in"
+printf '#!/bin/bash\necho waiting\nwhile [ ! -e "%s/release" ]; do /bin/sleep 0.1; done\nexit 5\n' "$T" > "$T/ends.sh"
+VMJOB run ends "$T/ends.sh" > "$T/ends.out" 2>&1 &
+WAITER=$!
+wait_for "$SHARE/.vm/results/*-ends-*.out" waiting || bad "ends job did not start"
+ENDS_ID=$(basename "$(ls "$SHARE/.vm/running/"*-ends-*.sh 2>/dev/null | head -n 1)" .sh)
+: > "$T/slow-sleep"
+/bin/sleep 2.5
+: > "$T/release"
+/bin/sleep 0.3
+stop_runner
+rm -f "$T/slow-sleep"
+[ "$(cat "$SHARE/.vm/results/$ENDS_ID.status" 2>/dev/null)" = 5 ] \
+  && ok "the stopped runner recorded the job's own exit code (5)" \
+  || bad "status after the runner stopped: '$(cat "$SHARE/.vm/results/$ENDS_ID.status" 2>/dev/null)': $(tail -n 3 "$T/runner.log")"
+tail -n 1 "$SHARE/.vm/results/$ENDS_ID.out" 2>/dev/null | grep -q "^\[vm\] job $ENDS_ID: exit 5 after" \
+  && ok "its last line says exit 5" || bad "last line: $(tail -n 1 "$SHARE/.vm/results/$ENDS_ID.out" 2>/dev/null)"
+start_runner daemon >/dev/null || bad "runner did not restart"
+wait $WAITER; rc=$?
+[ $rc -eq 5 ] && ok "vmjob reports exit 5" || bad "vmjob after the runner stopped: rc $rc: $(cat "$T/ends.out")"
+[ "$(cat "$SHARE/.vm/results/$ENDS_ID.status" 2>/dev/null)" = 5 ] && [ -f "$SHARE/.vm/done/$ENDS_ID.sh" ] \
+  && ok "the next runner keeps that result" || bad "result changed by the next runner"
+
+echo "== a running job is not changed by edits in the share"
+# The job file, as the runner sees it in the share.
+printf '#!/bin/bash\necho first\n/bin/sleep 2\necho second\n' > "$SHARE/.vm/jobs/edited-job.sh"
+wait_for "$SHARE/.vm/results/edited-job.out" first || bad "edited-job did not start"
+echo 'echo appended to the job file' >> "$SHARE/.vm/running/edited-job.sh"
+for _ in $(seq 50); do [ -f "$SHARE/.vm/results/edited-job.status" ] && break; sleep 0.2; done
+grep -qx second "$SHARE/.vm/results/edited-job.out" && ! grep -q appended "$SHARE/.vm/results/edited-job.out" \
+  && ok "the runner runs a private copy of a job file, made when the job starts" || bad "edited job file: $(cat "$SHARE/.vm/results/edited-job.out")"
+# A script that runs from the share (its checkout), edited by the host while it runs.
+printf '#!/bin/bash\necho "zero=$0 line=$LINENO source=${BASH_SOURCE[0]}"\necho first\n/bin/sleep 2\necho second\n' > "$SHARE/wt/scripts/edited.sh"
+VMJOB run edited "$SHARE/wt/scripts/edited.sh" > "$T/edited.out" 2>&1 &
+WAITER=$!
+wait_for "$SHARE/.vm/results/*-edited-*.out" first || bad "edited script did not start"
+echo 'echo appended to the script' >> "$SHARE/wt/scripts/edited.sh"
+wait $WAITER; rc=$?
+[ $rc -eq 0 ] && grep -qx second "$T/edited.out" && ! grep -q appended "$T/edited.out" \
+  && ok "an in-place script edited while it runs: the job goes on with its copy" || bad "edited in-place script: rc $rc: $(cat "$T/edited.out")"
+grep -q "^zero=$SHARE/wt/scripts/edited.sh line=2 source=" "$T/edited.out" \
+  && ok "in-place script: \$0 is its path in the share, line numbers are the script's" || bad "in-place \$0/LINENO: $(cat "$T/edited.out")"
+src=$(sed -n 's/^zero=.* line=[0-9]* source=//p' "$T/edited.out")
+case "$src" in
+  */script/edited.sh) [ ! -e "$src" ] && [ "${src#"$SHARE"/}" = "$src" ] \
+    && ok "in-place script: runs from a private copy outside the share, removed after the job" \
+    || bad "in-place script: private copy $src left behind or in the share" ;;
+  *) bad "in-place script: BASH_SOURCE is $src, not its private copy" ;;
+esac
+
+echo "== a job runs its script as it was when it was queued"
+# The runner is busy with another job while the queued script is edited (git checkout, an editor).
+rm -f "$T/unblock"
+printf '#!/bin/bash\necho blocking\nwhile [ ! -e "%s/unblock" ]; do /bin/sleep 0.1; done\n' "$T" > "$T/blocker.sh"
+VMJOB run blocker "$T/blocker.sh" > "$T/blocker.out" 2>&1 &
+BLOCKER=$!
+wait_for "$SHARE/.vm/results/*-blocker-*.out" blocking || bad "blocker job did not start"
+printf '#!/bin/bash\necho queued text\n' > "$SHARE/wt/scripts/later.sh"
+VMJOB run later "$SHARE/wt/scripts/later.sh" > "$T/later.out" 2>&1 &
+WAITER=$!
+for _ in $(seq 50); do ls "$SHARE/.vm/jobs/"*-later-*.sh >/dev/null 2>&1 && break; sleep 0.2; done
+printf '#!/bin/bash\necho edited text\n' > "$SHARE/wt/scripts/later.sh"
+: > "$T/unblock"
+wait $BLOCKER
+wait $WAITER; rc=$?
+[ $rc -eq 0 ] && grep -qx 'queued text' "$T/later.out" && ! grep -q 'edited text' "$T/later.out" \
+  && ok "an in-place script edited while its job waits: the queued text runs" || bad "script edited while queued: rc $rc: $(cat "$T/later.out")"
+# The copy ends where the script ends, also without a final newline, and only there.
+printf '#!/bin/bash\necho one\necho "last line"' > "$SHARE/wt/scripts/nonl.sh"
+out=$(VMJOB run nonl "$SHARE/wt/scripts/nonl.sh" 2>&1); rc=$?
+[ $rc -eq 0 ] && grep -qx 'last line' <<< "$out" && ok "a script without a final newline runs to its last line" || bad "script without a final newline: rc $rc: $out"
+printf '#!/bin/bash\necho before\nWHOREAD_VM_END_OF_SCRIPT\necho after\n' > "$T/marker.sh"
+out=$(VMJOB run marker "$T/marker.sh" 2>&1); rc=$?
+[ $rc -eq 64 ] && ! ls "$SHARE/.vm/jobs/"*-marker-* >/dev/null 2>&1 && ! ls "$SHARE/.vm/results/"*-marker-* >/dev/null 2>&1 \
+  && ok "a script holding the line that ends a job's copy is refused (64), nothing queued" || bad "script with the end marker: rc $rc: $out"
+
+echo "== scripts for another interpreter, or with interpreter options, are refused"
+printf '#!/usr/bin/perl\nprint "perl ran\\n";\n' > "$T/perl.sh"
+out=$(VMJOB run perl "$T/perl.sh" 2>&1); rc=$?
+[ $rc -eq 64 ] && ! ls "$SHARE/.vm/jobs/"*-perl-* >/dev/null 2>&1 && ! ls "$SHARE/.vm/results/"*-perl-* >/dev/null 2>&1 \
+  && ok "a #!/usr/bin/perl script is refused (64), nothing queued" || bad "perl script: rc $rc: $out"
+# A script in the share runs as `. COPY`: -e from the #! line would silently not apply.
+printf '#!/bin/bash -e\nfalse\necho went on\n' > "$T/opts.sh"
+out=$(VMJOB run opts "$T/opts.sh" 2>&1); rc=$?
+[ $rc -eq 64 ] && ! ls "$SHARE/.vm/jobs/"*-opts-* >/dev/null 2>&1 && ! ls "$SHARE/.vm/results/"*-opts-* >/dev/null 2>&1 \
+  && ok "a #!/bin/bash -e script is refused (64), nothing queued" || bad "script with interpreter options: rc $rc: $out"
+printf '#!/bin/sh\necho sh-ok\n' > "$T/sh.sh"
+out=$(VMJOB run sh "$T/sh.sh" 2>&1); rc=$?
+[ $rc -eq 0 ] && grep -qx sh-ok <<< "$out" && ok "a #!/bin/sh script runs" || bad "sh script: rc $rc: $out"
+printf '#!/usr/bin/env bash \necho env-ok\n' > "$T/env.sh"
+out=$(VMJOB run env "$T/env.sh" 2>&1); rc=$?
+[ $rc -eq 0 ] && grep -qx env-ok <<< "$out" && ok "a #!/usr/bin/env bash script runs" || bad "env bash script: rc $rc: $out"
 
 echo "== runner restart while a job runs"
 printf '#!/bin/bash\necho long job\nsleep 60\n' > "$T/long.sh"
@@ -179,6 +341,10 @@ ORPHAN_ID=$(basename "$(ls "$SHARE/.vm/running/"*-orphan-*.sh 2>/dev/null | head
 JOBPID=""
 [ -n "$ORPHAN_ID" ] && read -r JOBPID _ < "$SHARE/.vm/running/$ORPHAN_ID.pid"
 [ -n "$JOBPID" ] && ok "running job recorded its pid and start time" || bad "no pid file for the running job"
+ORPHAN_DIR=""
+[ -n "$ORPHAN_ID" ] && read -r ORPHAN_DIR < "$SHARE/.vm/running/$ORPHAN_ID.dir"
+[ -n "$ORPHAN_DIR" ] && [ -f "$ORPHAN_DIR/$ORPHAN_ID.sh" ] && ok "running job recorded its private folder" \
+  || bad "no private folder recorded for the running job: '$ORPHAN_DIR'"
 kill -KILL "$RUNNER_PID"; wait "$RUNNER_PID" 2>/dev/null; RUNNER_PID=""
 sleep 1
 [ -n "$JOBPID" ] && kill -0 "$JOBPID" 2>/dev/null && ok "the job outlives its runner's SIGKILL (own process group)" || bad "job $JOBPID not running after the runner's SIGKILL"
@@ -186,6 +352,9 @@ sleep 1
 set -m; sleep 60 & DECOY=$!; set +m
 cp "$T/orphan.sh" "$SHARE/.vm/running/decoy-job.sh"
 echo "$DECOY Mon Jan  1 00:00:00 2001" > "$SHARE/.vm/running/decoy-job.pid"
+# ... and a recorded private folder that is not one: never removed.
+mkdir -p "$T/keep-me"
+echo "$T/keep-me" > "$SHARE/.vm/running/decoy-job.dir"
 start_runner daemon && ok "runner restarted after SIGKILL" || bad "runner did not restart after SIGKILL"
 for _ in $(seq 50); do kill -0 "$JOBPID" 2>/dev/null || break; sleep 0.2; done
 [ -n "$JOBPID" ] && ! kill -0 "$JOBPID" 2>/dev/null && ok "the restarted runner stopped the orphaned job" || bad "orphaned job $JOBPID still running"
@@ -194,8 +363,12 @@ kill -0 "$DECOY" 2>/dev/null && ok "an unrelated process holding a recorded pid 
 wait $WAITER; rc=$?
 [ $rc -eq 125 ] && ok "orphaned job reported interrupted (exit 125)" || bad "orphaned job: rc $rc: $(cat "$T/orphan.out")"
 # The runner recovers leftover jobs one after the other: the decoy may be marked a moment after the orphan.
-for _ in $(seq 50); do [ -f "$SHARE/.vm/results/decoy-job.status" ] && break; sleep 0.2; done
+for _ in $(seq 150); do [ -f "$SHARE/.vm/results/decoy-job.status" ] && break; sleep 0.2; done
 [ "$(cat "$SHARE/.vm/results/decoy-job.status" 2>/dev/null)" = 125 ] && ok "decoy job marked interrupted" || bad "decoy job status"
+[ -n "$ORPHAN_DIR" ] && [ ! -e "$ORPHAN_DIR" ] && ok "the restarted runner removed the orphaned job's private folder" \
+  || bad "the orphaned job's private folder is left: $ORPHAN_DIR"
+[ -d "$T/keep-me" ] && [ ! -e "$SHARE/.vm/running/decoy-job.dir" ] && ok "a recorded folder of another form is left alone" \
+  || bad "the folder recorded for the decoy was removed, or its record kept"
 sleep 1
 grep -q 'not reached' "$SHARE/.vm/results/$ORPHAN_ID.out" && bad "the orphaned job went on" || ok "the orphaned job did not go on"
 [ ! -e "$SHARE/.vm/running/$ORPHAN_ID.pid" ] && [ -f "$SHARE/.vm/done/$ORPHAN_ID.sh" ] && ok "orphaned job cleaned up into done/" || bad "orphan leftovers in running/"

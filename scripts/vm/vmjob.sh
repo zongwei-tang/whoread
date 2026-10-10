@@ -14,11 +14,15 @@
 # runs), 70 gave up waiting (a job still queued is withdrawn and never runs; a running one may still
 # finish: result ID --wait), 64 usage. A job gets its timeout plus 120 s from its start (not from
 # when it was queued) before vmjob gives up; WHOREAD_VMJOB_GRACE sets another margin than 120 s.
+# Only time this Mac is awake counts: a jump of the clock (after sleep) does not use up these limits.
 #
-# A SCRIPT inside the shared directory runs in place, so its $0 and relative paths work; any other
-# script is copied into the job. The timeout is --timeout N, else a "# timeout: N" line among the
-# script's first 20 lines, else 900 s. In the VM a job starts in the checkout it came from (the
-# shared directory for copied scripts) with:
+# Every job runs a private copy of SCRIPT: its text as it was when vmjob queued the job, which the
+# job carries (editing SCRIPT afterwards, also while it waits or runs, changes nothing). A SCRIPT
+# inside the shared directory runs with $0 its path there, so paths relative to $0 work (other files
+# it uses come from the share as they are then); BASH_SOURCE is the private copy. Either way it runs
+# with /bin/bash: a script whose #! line names another interpreter, or options, is refused. The
+# timeout is --timeout N, else a "# timeout: N" line among the script's first 20 lines, else 900 s.
+# In the VM a job starts in the checkout it came from (the shared directory for other scripts) with:
 #   WHOREAD_VM_SHARE   the shared directory as the VM sees it
 #   WHOREAD_VM_REPO    the checkout the script came from (a worktree under the share works too)
 #   WHOREAD_TEST_USER  the VM's test user (admin): run vault accesses as this user
@@ -27,11 +31,29 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 DEFAULT_TIMEOUT=900
+END_OF_SCRIPT=WHOREAD_VM_END_OF_SCRIPT
 GRACE="${WHOREAD_VMJOB_GRACE:-120}"
 case "$GRACE" in ""|*[!0-9]*) echo "vmjob: WHOREAD_VMJOB_GRACE must be a number of seconds" >&2; exit 64 ;; esac
 
 die() { echo "vmjob: $*" >&2; exit "${2:-1}"; }
-usage() { sed -n '5,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 64; }
+usage() { sed -n '5,17p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 64; }
+
+# CLOCK: seconds of waiting so far. It follows the wall clock while that moves plausibly; tick is
+# called about once a second, and a step backwards or of more than MAX_STEP seconds (this Mac slept,
+# and the VM with it, or the clock was set) counts as one second.
+CLOCK=0
+WALL_LAST=""
+MAX_STEP=30
+tick() {
+  local now step
+  now=$(date +%s)
+  if [ -n "$WALL_LAST" ]; then
+    step=$((now - WALL_LAST))
+    if [ "$step" -lt 0 ] || [ "$step" -gt "$MAX_STEP" ]; then step=1; fi
+    CLOCK=$((CLOCK + step))
+  fi
+  WALL_LAST=$now
+}
 
 # The shared directory: the main checkout, also when this script runs from a worktree under it.
 host_dir() {
@@ -97,7 +119,8 @@ withdraw() {
 # A job that is neither queued nor running and has no result (withdrawn, or no such job): 70 at once.
 wait_result() {
   local id="$1" limit="$2" res="$VMDIR/results/$1" start now rc seen changed cur started=""
-  start=$(date +%s)
+  tick
+  start=$CLOCK
   seen=$(cat "$HB" 2>/dev/null)
   changed=$start
   while :; do
@@ -118,7 +141,8 @@ wait_result() {
       [ -n "$rc" ] || rc=1
       return $((rc > 255 ? 255 : rc))
     fi
-    now=$(date +%s)
+    tick
+    now=$CLOCK
     cur=$(cat "$HB" 2>/dev/null)
     if [ "$cur" != "$seen" ]; then seen=$cur; changed=$now; fi
     # A job moves jobs/ → running/ → (status written) → done/; checked in this order, it cannot slip
@@ -170,8 +194,20 @@ cmd_run() {
   done
   case "$timeout" in '') ;; *[!0-9]*|0) die "--timeout needs a positive number of seconds" 64 ;; esac
   [ -f "$script" ] || die "no such script: $script" 64
+  # The VM runs the copy with /bin/bash (`. COPY` for a script in the share, which keeps $0): a #!
+  # line naming another interpreter, or options (#!/bin/bash -e), would silently not apply there.
+  case "$(head -n 1 "$script")" in
+    '#!'*)
+      case "$(head -n 1 "$script" | tr -s ' \t' '  ' | sed 's/ $//')" in
+        '#!/bin/bash'|'#! /bin/bash'|'#!/bin/sh'|'#! /bin/sh'|\
+        '#!/usr/bin/env bash'|'#! /usr/bin/env bash'|'#!/usr/bin/env sh'|'#! /usr/bin/env sh') ;;
+        *) die "$script starts with $(head -n 1 "$script"): jobs run with /bin/bash only, without options (use set -e and the like in the script)" 64 ;;
+      esac ;;
+  esac
   name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
   abs="$(cd "$(dirname "$script")" && pwd -P)/$(basename "$script")"
+  # The job carries the script's text up to this line (a here-document).
+  ! grep -qxF "$END_OF_SCRIPT" "$abs" || die "$script contains a line $END_OF_SCRIPT, which ends the copy a job carries" 64
   [ -n "$timeout" ] || timeout=$(header_timeout "$abs")
   [ -n "$timeout" ] || timeout=$DEFAULT_TIMEOUT
   alive || exit 69
@@ -181,29 +217,41 @@ cmd_run() {
   {
     echo '#!/bin/bash'
     echo "# timeout: $timeout"
-    echo "# whoread-vm job $id, submitted $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# whoread-vm job $id, submitted $(date -u +%Y-%m-%dT%H:%M:%SZ), with a copy of $(printf '%q' "$abs")"
     case "$abs" in
       "$HOST_DIR"/*)
         rel="${abs#"$HOST_DIR"/}"
         repo=$(git -C "$(dirname "$abs")" rev-parse --show-toplevel 2>/dev/null) && repo=$(cd "$repo" && pwd -P) || repo="$HOST_DIR"
         case "$repo" in "$HOST_DIR"/*) repo_rel="/${repo#"$HOST_DIR"/}" ;; *) repo_rel="" ;; esac
         # shellcheck disable=SC2016  # expanded in the VM
-        printf 'export WHOREAD_VM_REPO="$WHOREAD_VM_SHARE"%s\n' "$(printf '%q' "$repo_rel")"
-        echo 'cd "$WHOREAD_VM_REPO" || exit 1'
-        printf 'exec /bin/bash "$WHOREAD_VM_SHARE"/%s' "$(printf '%q' "$rel")"
-        for a in "$@"; do printf ' %q' "$a"; done
-        echo ;;
+        printf 'export WHOREAD_VM_REPO="$WHOREAD_VM_SHARE"%s\n' "$(printf '%q' "$repo_rel")" ;;
       *)
-        echo 'export WHOREAD_VM_REPO="$WHOREAD_VM_SHARE"'
-        echo 'cd "$WHOREAD_VM_REPO" || exit 1'
-        if [ $# -gt 0 ]; then
-          printf 'set --'
-          for a in "$@"; do printf ' %q' "$a"; done
-          echo
-        fi
-        echo "# ---- copied from $abs"
-        cat "$abs" ;;
+        rel=""
+        # shellcheck disable=SC2016  # expanded in the VM
+        echo 'export WHOREAD_VM_REPO="$WHOREAD_VM_SHARE"' ;;
     esac
+    # shellcheck disable=SC2016  # expanded in the VM
+    echo 'cd "$WHOREAD_VM_REPO" || exit 1'
+    # The runner runs this file from a private folder; the copy of the script goes there too, under
+    # its own name (error messages name it), and never into the share.
+    # shellcheck disable=SC2016  # expanded in the VM
+    printf 'script="$(dirname "$0")/script/"%s\n' "$(printf '%q' "$(basename "$abs")")"
+    # shellcheck disable=SC2016  # expanded in the VM
+    printf 'mkdir "$(dirname "$script")" && cat > "$script" <<%s || exit 125\n' "'$END_OF_SCRIPT'"
+    cat "$abs"
+    [ -z "$(tail -c 1 "$abs")" ] || echo
+    echo "$END_OF_SCRIPT"
+    if [ -n "$rel" ]; then
+      # Sourced from bash -c, so $0 is the script's path in the share; the copy's path is part of
+      # the command (not an argument), so the script's arguments stay its own.
+      # shellcheck disable=SC2016  # expanded in the VM
+      printf 'exec /bin/bash -c ". $(printf %%q "$script")" "$WHOREAD_VM_SHARE"/%s' "$(printf '%q' "$rel")"
+    else
+      # shellcheck disable=SC2016  # expanded in the VM
+      printf 'exec /bin/bash "$script"'
+    fi
+    for a in "$@"; do printf ' %q' "$a"; done
+    echo
   } > "$job.tmp" || die "cannot write $job.tmp"
   mv -f "$job.tmp" "$job" || die "cannot queue $job"
   echo "vmjob: queued $id (timeout ${timeout}s)" >&2
