@@ -8,9 +8,10 @@ import Foundation
 /// AI agents run commands as `zsh -c "<whole command>"`, so an element containing whitespace is
 /// tokenized like a shell command line and every token gets the same treatment as an argv element.
 /// File paths are evidence and are kept wherever a secret is not expected. What a command line
-/// writes (echo/printf words sent to a file or a pipe, also from inside a loop, group or `if` whose
-/// output goes there or after `exec > FILE`; heredoc bodies written by cat/tee or into a file;
-/// here-strings) is file contents, not metadata: it is redacted, and the redirect's target kept.
+/// writes (echo/printf words sent to a file or a pipe, also from inside a loop, group, function or
+/// `if` whose output goes there or after `exec > FILE`; heredoc bodies written by cat/tee or into a
+/// file; here-strings; the values of variables and the arguments of functions or `sh -c` that such
+/// data uses) is file contents, not metadata: it is redacted, and the redirect's target kept.
 /// Secrets inside the text of a command are redacted by its syntax where it is known: SQL that sets
 /// a password or passes one to `PASSWORD()`, JSON and JavaScript objects, calls that take a user and
 /// a password (`db.auth('u', 'pw')`), AppleScript's `do shell script … password`, URL userinfo, and
