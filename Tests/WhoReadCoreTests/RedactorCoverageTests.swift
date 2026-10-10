@@ -732,6 +732,15 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "if true;then echo \(R);fi > ~/WhoReadTestVault/n"])
         assertRedacted(["/bin/bash", "-c", "{ echo Hunter2pw;} > ~/WhoReadTestVault/n"], ["/bin/bash", "-c", "{ echo \(R);} > ~/WhoReadTestVault/n"])
         assertRedacted(["/bin/bash", "-c", "if mysql -pHunter2pw;then echo ok;fi"], ["/bin/bash", "-c", "if mysql -p\(R);then echo ok;fi"])
+        // After a redacted value the operator and the next word are shown as part of it (the value may
+        // hold them), but that word still starts a command with its own rules.
+        assertRedacted(["/bin/bash", "-c", "mysql -uroot -pHunter2pw&&curl -u admin:Hunter2pw https://x"],
+                       ["/bin/bash", "-c", "mysql -uroot -p\(R) -u admin:\(R) https://x"])
+        assertRedacted(["/bin/bash", "-c", "ldapsearch -x -w Hunter2pw;sshpass -p Hunter2pw ssh h"],
+                       ["/bin/bash", "-c", "ldapsearch -x -w \(R) -p \(R) ssh h"])
+        assertRedacted(["/bin/bash", "-c", "tool --token Hunter2pw|htpasswd -nb bob Hunter2pw"], ["/bin/bash", "-c", "tool --token \(R) -nb bob \(R)"])
+        assertRedacted(["/bin/bash", "-c", "export PW=Hunter2pw&&echo Hunter2pw > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "export PW=\(R) \(R) > ~/WhoReadTestVault/n"])
         // In text that is not a command line (a connection string, YAML fed to a program), an operator
         // may be part of a value: what is glued to a redacted value goes with it.
         assertRedacted(["/bin/sh", "-c", "kubectl apply -f - <<EOF\nstringData:\n  password: Hun;ter&2pw|x\nEOF"],

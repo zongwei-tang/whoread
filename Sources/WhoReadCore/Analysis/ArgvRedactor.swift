@@ -373,10 +373,13 @@ public enum ArgvRedactor {
                 continue
             }
             if i == swallow {
-                // The redacted value before it covers the operator and this word.
+                // The redacted value before it covers the operator and this word. In a command line
+                // the word may as well start the next command (`-pPW&&curl -u admin:PW …`): that
+                // command's rules still apply to the words after it.
                 out[i - 1] = ""
                 out[i] = ""
                 swallowed = i
+                if shell && !raw.contains("=") && !raw.hasPrefix("-") { startProgram(basename(raw), at: i) }
                 continue
             }
             if let h = heredoc {
