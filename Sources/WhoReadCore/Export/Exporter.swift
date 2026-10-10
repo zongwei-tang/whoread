@@ -103,6 +103,27 @@ public enum Exporter {
         return lines.joined(separator: "\n") + "\n"
     }
 
+    /// CSV as printed to a terminal. CSV has no escape of its own, so names and paths with ESC, C1
+    /// controls, bidi overrides and the other hidden characters (`DisplayText.isHidden`) would act
+    /// on the terminal: they become visible `\u{…}` escapes, as in the CLI's tables. A line break
+    /// inside a quoted cell is escaped too (it cannot fake a row); the one that ends a row is kept.
+    /// Only for a terminal: files and pipes get `csv` exactly. Takes whole rows.
+    public static func terminalSafeCSV(_ csv: String) -> String {
+        guard csv.unicodeScalars.contains(where: { $0 == "\"" || ($0 != "\n" && DisplayText.isHidden($0)) }) else { return csv }
+        var out = String.UnicodeScalarView()
+        var quoted = false
+        for u in csv.unicodeScalars {
+            // A doubled quote inside a quoted cell flips twice: still inside.
+            if u == "\"" { quoted.toggle() }
+            if DisplayText.isHidden(u) && (u != "\n" || quoted) {
+                out.append(contentsOf: DisplayText.escaped(String(u)).unicodeScalars)
+            } else {
+                out.append(u)
+            }
+        }
+        return String(out)
+    }
+
     /// RFC 4180 quoting, plus a leading apostrophe on cells a spreadsheet would treat as a formula.
     public static func csvField(_ raw: String) -> String {
         var s = raw

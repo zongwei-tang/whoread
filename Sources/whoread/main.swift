@@ -554,6 +554,9 @@ final class ExportWriter {
     private let handle: FileHandle
     private let staged: StagedFile?
     private var buffer = Data()
+    /// Standard output is a terminal: CSV cells are shown with hidden characters escaped. A file or
+    /// a pipe gets the exact CSV.
+    let toTerminal: Bool
 
     init(path: String?) throws {
         if let path {
@@ -564,9 +567,11 @@ final class ExportWriter {
                 throw CLIError("cannot write \(path): \(error)")
             }
             handle = staged!.handle
+            toTerminal = false
         } else {
             staged = nil
             handle = FileHandle.standardOutput
+            toTerminal = isatty(STDOUT_FILENO) != 0
         }
     }
 
@@ -576,6 +581,10 @@ final class ExportWriter {
     }
 
     func write(_ s: String) throws { try write(Data(s.utf8)) }
+
+    /// Whole CSV rows: on a terminal, ESC, C1, bidi and the other hidden characters (and line breaks
+    /// inside a cell) are written as `\u{…}` escapes (`Exporter.terminalSafeCSV`).
+    func writeCSV(_ rows: String) throws { try write(toTerminal ? Exporter.terminalSafeCSV(rows) : rows) }
 
     private func flush() throws {
         guard !buffer.isEmpty else { return }
@@ -628,7 +637,7 @@ func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter)
     switch f {
     case .json: try w.write("[")
     case .jsonl: break
-    case .csv: try w.write(Exporter.csvColumns.joined(separator: ",") + "\n")
+    case .csv: try w.writeCSV(Exporter.csvColumns.joined(separator: ",") + "\n")
     }
     var count = 0
     // Pages shrink when the store drops rows it cannot decode: page on until an empty one, and
@@ -661,7 +670,7 @@ func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter)
         case .csv:
             // The header went out once above; drop the one Exporter puts on every page.
             let csv = Exporter.csv(events: page, catalog: catalog)
-            if let nl = csv.firstIndex(of: "\n") { try w.write(String(csv[csv.index(after: nl)...])) }
+            if let nl = csv.firstIndex(of: "\n") { try w.writeCSV(String(csv[csv.index(after: nl)...])) }
         }
         count += page.count
         q.afterID = last.id
@@ -688,15 +697,15 @@ func exportAggregates(_ c: IPCClient, format f: Exporter.Format, to w: ExportWri
         }
     case .csv:
         let catalog = try? c.catalog().catalog
-        try w.write(["day", "responsible", "responsible_kind", "responsible_key", "category", "category_name", "agent",
-                     "first", "last", "count", "reads", "writes", "denied", "benign"].joined(separator: ",") + "\n")
+        try w.writeCSV(["day", "responsible", "responsible_kind", "responsible_key", "category", "category_name", "agent",
+                        "first", "last", "count", "reads", "writes", "denied", "benign"].joined(separator: ",") + "\n")
         for a in rows {
             let s = a.summary
             let cells = [a.day, s.responsible.displayName, s.responsible.kind.rawValue, s.responsible.key, s.categoryID,
                          catalog?.category(s.categoryID)?.name.en ?? "", s.agentID ?? "",
                          RFC3339.format(s.firstSeen, fractionDigits: 6), RFC3339.format(s.lastSeen, fractionDigits: 6),
                          String(s.count), String(s.reads), String(s.writes), String(s.denied), s.benign ? "true" : "false"]
-            try w.write(cells.map(Exporter.csvField).joined(separator: ",") + "\n")
+            try w.writeCSV(cells.map(Exporter.csvField).joined(separator: ",") + "\n")
         }
     }
     return rows.count

@@ -27,45 +27,68 @@ final class BoundedStateTests: XCTestCase {
         XCTAssertEqual(b.count, 202, "recording never sorts or evicts (that is maintenance's job)")
         _ = b.takeDirty()
 
-        XCTAssertEqual(b.prune(), 150)
-        XCTAssertEqual(b.count, 52)
+        // Down to 45 (a tenth below the limit), not to the limit itself: see testPruneLeavesRoomBelowTheLimit.
+        XCTAssertEqual(b.prune(), 155)
+        XCTAssertEqual(b.count, 47)
         XCTAssertTrue(b.isApproved(BaselineKey(responsibleKey: "app:/applications/zoom.us.app", categoryID: "ssh", access: .read)),
                       "the user's approvals are never forgotten, however old")
-        XCTAssertFalse(b.contains(key(149)), "the least recently seen go first")
-        XCTAssertTrue(b.contains(key(150)))
+        XCTAssertFalse(b.contains(key(154)), "the least recently seen go first")
+        XCTAssertTrue(b.contains(key(155)))
         XCTAssertTrue(b.contains(key(199)))
         let dirty = b.takeDirty()
-        XCTAssertEqual(dirty.count, 150)
+        XCTAssertEqual(dirty.count, 155)
         XCTAssertTrue(dirty.allSatisfy { $0.1 == nil }, "removed: the next save deletes their rows")
         XCTAssertEqual(b.prune(), 0, "under the limit: nothing to do")
         // A forgotten entry is simply new again: its next access alerts as a first access.
         XCTAssertTrue(b.record(key(0), at: at(500), learning: false))
     }
 
-    func testEntriesNotSeenWithinRetentionAreForgotten() {
+    /// Over the limit, prune evicts down to a tenth below it. Trimming to the limit exactly meant that
+    /// under a sustained flood every maintenance pass (every 30 s) sorted all unapproved entries
+    /// (100k) while holding the lock that `record` needs; now a sort comes once per 10k new entries.
+    func testPruneLeavesRoomBelowTheLimit() {
+        let b = Baseline(learningStartedAt: t0, maxUnapproved: 100)
+        for i in 0..<101 { b.record(key(i), at: at(Double(i)), learning: false) }
+        XCTAssertEqual(b.prune(), 11)
+        XCTAssertEqual(b.count, 90)
+        XCTAssertFalse(b.contains(key(10)), "the least recently seen go first")
+        XCTAssertTrue(b.contains(key(11)))
+        for i in 101..<111 { b.record(key(i), at: at(Double(i)), learning: false) }
+        XCTAssertEqual(b.count, 100)
+        XCTAssertEqual(b.prune(), 0, "at the limit: no sort, no eviction")
+        b.record(key(111), at: at(111), learning: false)
+        XCTAssertEqual(b.prune(), 11)
+        XCTAssertEqual(b.count, 90)
+        XCTAssertEqual(Baseline(learningStartedAt: t0, maxUnapproved: 5).lowWaterMark, 4, "at least one below the limit")
+        XCTAssertEqual(Baseline(learningStartedAt: t0).lowWaterMark, 90_000)
+    }
+
+    /// Entries are not forgotten for age: an app's access the baseline already knows must not alert
+    /// "for the first time" again a month later. Only the count limit evicts (oldest first).
+    func testOldUnapprovedEntriesAreKeptWhileUnderTheLimit() {
         let b = Baseline(learningStartedAt: t0)
-        b.record(key(1), at: at(-40 * 86400), learning: false)
+        b.record(key(1), at: at(-400 * 86400), learning: false)
         b.record(key(2), at: at(-40 * 86400), learning: true)
         b.record(key(3), at: at(-86400), learning: false)
-        b.approve(responsibleKey: "bin:/tmp/approved", categoryID: "ssh", access: .read, at: at(-400 * 86400))
         _ = b.takeDirty()
-        XCTAssertEqual(b.prune(lastSeenBefore: at(-30 * 86400)), 2)
-        XCTAssertFalse(b.contains(key(1)))
-        XCTAssertFalse(b.contains(key(2)))
+        XCTAssertEqual(b.prune(), 0)
+        XCTAssertTrue(b.contains(key(1)))
+        XCTAssertTrue(b.contains(key(2)))
         XCTAssertTrue(b.contains(key(3)))
-        XCTAssertTrue(b.isApproved(BaselineKey(responsibleKey: "bin:/tmp/approved", categoryID: "ssh", access: .read)))
-        XCTAssertEqual(Set(b.takeDirty().map(\.0)), [key(1), key(2)])
+        XCTAssertTrue(b.takeDirty().isEmpty, "nothing to delete")
+        XCTAssertFalse(b.record(key(1), at: t0, learning: false), "still known: not a first access")
     }
 
     func testAnOversizedStoredTableIsCappedWhenLoaded() {
         let entries = (0..<120).map { BaselineEntry(key: key($0), firstSeen: at(Double($0)), lastSeen: at(Double($0)), count: 1, source: .observed) }
             + [BaselineEntry(key: key(0, "ssh"), firstSeen: t0, lastSeen: t0, count: 0, source: .approved)]
         let b = Baseline(learningStartedAt: t0, entries: entries, maxUnapproved: 100)
-        XCTAssertEqual(b.count, 101)
+        // 90 unapproved left (a tenth below the limit) and the approval.
+        XCTAssertEqual(b.count, 91)
         XCTAssertTrue(b.isApproved(key(0, "ssh")))
-        XCTAssertFalse(b.contains(key(19)))
-        XCTAssertTrue(b.contains(key(20)))
-        XCTAssertEqual(b.takeDirty().count, 20, "the dropped rows are deleted on the first save")
+        XCTAssertFalse(b.contains(key(29)))
+        XCTAssertTrue(b.contains(key(30)))
+        XCTAssertEqual(b.takeDirty().count, 30, "the dropped rows are deleted on the first save")
     }
 
     func testTheNewestEntriesAreListedFirstUpToTheLimit() {
