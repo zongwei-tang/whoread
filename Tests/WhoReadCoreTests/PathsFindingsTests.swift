@@ -607,6 +607,54 @@ final class NestedPrefixMembershipTests: XCTestCase {
     }
 }
 
+/// What belonging to every enclosing category costs on the AUTH path: classifying the path, then
+/// evaluating the rules once per category. Prints µs per call (a debug build); the bounds only catch a
+/// gross regression.
+final class NestedPrefixCostTests: XCTestCase {
+    private func microseconds(_ n: Int, _ f: () -> Void) -> Double {
+        let start = Date()
+        for _ in 0..<n { f() }
+        return Date().timeIntervalSince(start) * 1e6 / Double(n)
+    }
+
+    func testCostOfEveryCategoryOnTheAuthPath() throws {
+        let cat = try catalog(custom: ["~/.ssh/work"])
+        let c = PathClassifier(catalog: cat, normalizer: PathNormalizer(homeDirectories: [home]))
+        let flat = "/Users/alice/.ssh/id_ed25519", nested = "/Users/alice/.ssh/work/id_ed25519"
+        let outside = "/Users/alice/Documents/report.txt"
+        XCTAssertEqual(c.classifications(normalized: flat).count, 1)
+        XCTAssertEqual(c.classifications(normalized: nested).count, 2)
+        let n = 3_000
+        var sink = 0
+        let oneFlat = microseconds(n) { sink &+= c.classify(normalized: flat) == nil ? 0 : 1 }
+        let allFlat = microseconds(n) { sink &+= c.classifications(normalized: flat).count }
+        let oneNested = microseconds(n) { sink &+= c.classify(normalized: nested) == nil ? 0 : 1 }
+        let allNested = microseconds(n) { sink &+= c.classifications(normalized: nested).count }
+        let allOutside = microseconds(n) { sink &+= c.classifications(normalized: outside).count }
+
+        // 500 answers (allow rules per app and category) and the agent template: what evaluation loops
+        // over for each category of each path.
+        let ids = ["ssh", "custom", "aws", "chrome", "messages"]
+        let answers = (0..<500).map { i in
+            Rule(id: "a\(i)", target: .category(ids[i % ids.count]), subject: .responsible(key: "app:/applications/app\(i).app", teamID: nil),
+                 access: .read, action: .allow, template: RuleTemplates.askAnswer, chainAgents: [])
+        }
+        let h = try harness(rules: answers + [blockCritical], catalog: cat)
+        let gcat = h.spawn(h.spawn(P.terminal, P.zsh(500, parent: 100)), proc(501, "/opt/homebrew/bin/gcat", ppid: 500))
+        let ask = AskPolicy(enabled: true, trustApplePrograms: false, benignChain: false)
+        func read(_ path: String) -> FileActivity { activity(.open, gcat, OperationSemantics.open(path: path, fflag: 1)) }
+        let readFlat = read(flat), readNested = read(nested)
+        XCTAssertEqual(authDecision(h, readNested, ask: ask).verdict, .ask)
+        let decideFlat = microseconds(200) { sink &+= authDecision(h, readFlat, ask: ask).verdict == .ask ? 1 : 0 }
+        let decideNested = microseconds(200) { sink &+= authDecision(h, readNested, ask: ask).verdict == .ask ? 1 : 0 }
+        print(String(format: "AUTH path, µs per call: classify flat %.2f, every category flat %.2f, classify nested %.2f, "
+                     + "every category nested %.2f, outside every prefix %.2f; decision (500 answers) flat %.1f, nested %.1f [%d]",
+                     oneFlat, allFlat, oneNested, allNested, allOutside, decideFlat, decideNested, sink))
+        for t in [oneFlat, allFlat, oneNested, allNested, allOutside] { XCTAssertLessThan(t, 500) }
+        XCTAssertLessThan(decideNested, 10_000)
+    }
+}
+
 // MARK: - files-3 / files-7: the eslogger prefilter
 
 final class PrefilterFindingsTests: XCTestCase {
