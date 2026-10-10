@@ -1,7 +1,11 @@
 #!/bin/bash
 # Installs the development LaunchDaemon (needs sudo). Run on your Mac after building:
 #   swift build -c release        (or scripts/build.sh for signed Xcode builds, see below)
-#   sudo scripts/install-dev-daemon.sh [eslogger|native]
+#   sudo scripts/install-dev-daemon.sh [eslogger|native] [--bin DIR]
+#
+# Nothing is built here: it installs whoreadd and whoread from --bin DIR (or WHOREAD_BIN=DIR), else
+# from the first of .build/release, .build/debug, .build-sc/debug that has both. The test VM has no
+# Xcode and installs the host's build this way (scripts/vm/provision.sh).
 #
 # Then grant Full Disk Access to /usr/local/libexec/whoreadd (System Settings → Privacy & Security
 # → Full Disk Access → + → ⌘⇧G → /usr/local/libexec/whoreadd) and restart it:
@@ -16,19 +20,26 @@
 #   WHOREAD_APP_REQUIREMENT='identifier "<prefix>.whoread" and anchor apple generic and certificate leaf[subject.OU] = "TEAMID"'
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 77; }
-SOURCE="${1:-eslogger}"
-case "$SOURCE" in
-  eslogger|native) ;;
-  *) echo "usage: $0 [eslogger|native]" >&2; exit 64 ;;
-esac
+usage() { echo "usage: $0 [eslogger|native] [--bin DIR]" >&2; exit 64; }
+SOURCE=eslogger
+BIN="${WHOREAD_BIN:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    eslogger|native) SOURCE="$1"; shift ;;
+    --bin) [ $# -ge 2 ] || usage; BIN="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if [ -n "${WHOREAD_BIN:-}" ]; then
-  BIN="$WHOREAD_BIN"
-else
-  BIN="$ROOT/.build/release"
-  [ -x "$BIN/whoreadd" ] || BIN="$ROOT/.build/debug"
+if [ -z "$BIN" ]; then
+  for d in "$ROOT/.build/release" "$ROOT/.build/debug" "$ROOT/.build-sc/debug"; do
+    if [ -x "$d/whoreadd" ] && [ -x "$d/whoread" ]; then BIN="$d"; break; fi
+  done
+  BIN="${BIN:-$ROOT/.build/release}"
 fi
 [ -x "$BIN/whoreadd" ] && [ -x "$BIN/whoread" ] || { echo "no whoreadd/whoread in $BIN: build first (swift build -c release)" >&2; exit 1; }
+# Prebuilt binaries from another Mac (the VM installs the host's build): fail here, not in launchd.
+"$BIN/whoread" version >/dev/null 2>&1 || { echo "$BIN/whoread does not run on this Mac (architecture or macOS version?)" >&2; exit 1; }
 CLIENT_REQ="${WHOREAD_CLIENT_REQUIREMENT:-}"
 APP_REQ="${WHOREAD_APP_REQUIREMENT:-}"
 # Without a client requirement no peer counts as verified code, so the app requirement would
@@ -54,6 +65,9 @@ PLIST=/Library/LaunchDaemons/com.whoread.daemon.plist
 LOGS=/Library/Logs/WhoRead
 
 launchctl bootout system "$PLIST" 2>/dev/null || true
+# bootout can return before the old daemon has exited; bootstrapping the label again while it is
+# still there fails (the VM's provisioning reinstalls over a running daemon).
+for _ in $(seq 60); do launchctl print system/com.whoread.daemon >/dev/null 2>&1 || break; sleep 0.5; done
 install -d -m 755 -o root -g wheel /usr/local/libexec /usr/local/bin "$DATA" "$DATA/defaults"
 # The log carries alert headlines and process chains of every user: root only. Pre-create the
 # file, and fix the modes an earlier install (755/644) left behind.

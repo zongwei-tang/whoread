@@ -99,7 +99,7 @@ final class R2ScriptsTests: XCTestCase {
         }
         let latency = try at("echo \"== latency\"")
         // A burst of denied opens right before the summary, so p99 is not the max of a few samples.
-        XCTAssertLessThan(try at("for _ in $(seq 200); do /bin/cat \"$KEY\" >/dev/null 2>&1; done"), latency)
+        XCTAssertLessThan(try at("for _ in $(seq 200); do as_user /bin/cat \"$KEY\" >/dev/null 2>&1; done"), latency)
         XCTAssertLessThan(latency, try at("echo \"== kill switches"))
         XCTAssertLessThan(latency, try at("echo \"== daemon killed\""))
         let stop = try at("if [ \"${1:-}\" = \"--stop-test\" ]")
@@ -109,6 +109,43 @@ final class R2ScriptsTests: XCTestCase {
         XCTAssertTrue(m5.contains("\"access\":\"any\""))
         XCTAssertTrue(m5.contains("allowed /bin/ls \"$VAULT/ssh\""))
         XCTAssertTrue(m5.contains("denied /usr/bin/touch \"$VAULT/ssh/m5-new\""))
+    }
+
+    /// As a job of the VM runner the script runs as root: every probe must still be the test user's
+    /// (the vault is in that user's home), the answered question must be the one holding the probe
+    /// (other questions can be open), and enforcement must be left as the script found it, so the
+    /// next job does not run with enforcement on and nobody answering.
+    func testM5AsARootVMJob() throws {
+        let m5 = try String(contentsOfFile: script("scripts/vm/acceptance-m5.sh"), encoding: .utf8)
+        let lines = m5.split(separator: "\n").map(String.init)
+        // A bare probe (not through as_user / denied / allowed / as_agent) would run as root.
+        for line in lines where line.contains("/bin/cat \"$") {
+            XCTAssertTrue(line.contains("as_user /bin/cat") || line.contains("denied /bin/cat")
+                          || line.contains("allowed /bin/cat") || line.contains("as_agent /bin/cat"), line)
+        }
+        XCTAssertTrue(m5.contains("denied() { as_user \"$@\""))
+        XCTAssertTrue(m5.contains("allowed() { as_user \"$@\""))
+        XCTAssertTrue(m5.contains("select(.key.categoryID == \"test-vault\" and .holding > 0"))
+        XCTAssertFalse(m5.contains("jq -r 'if length > 0 then .[0].id else \"\" end'"))
+        XCTAssertTrue(m5.contains("ENFORCEMENT_BEFORE=$(\"$WR\" status --json"))
+        // The cleanup switches enforcement off before it puts the key back and removes m5-new (in
+        // ask mode, with nothing answering, both would be denied), and switches it on again only if
+        // it was on (unknown counts as off).
+        let cleanup = try XCTUnwrap(m5.range(of: "cleanup() {"))
+        let cleanupEnd = try XCTUnwrap(m5.range(of: "\n}\n", range: cleanup.upperBound..<m5.endIndex))
+        let body = String(m5[cleanup.upperBound..<cleanupEnd.lowerBound])
+        func pos(_ s: String) throws -> String.Index { try XCTUnwrap(body.range(of: s)?.lowerBound, s) }
+        let off = try pos("sudo \"$WR\" enforcement off")
+        XCTAssertLessThan(off, try pos("/bin/mv \"$TMPDIR/m5-moved\" \"$KEY\""))
+        XCTAssertLessThan(off, try pos("\"$VAULT/ssh/m5-new\""))
+        XCTAssertLessThan(try pos("\"$VAULT/ssh/m5-new\""), try pos("[ \"$ENFORCEMENT_BEFORE\" = true ] && sudo \"$WR\" enforcement on"))
+        XCTAssertFalse(body.contains("= false ]"))
+        // The probes write their copies, links and the moved key into a folder the test user owns.
+        XCTAssertTrue(m5.contains("chown \"$TEST_USER\" \"$WORK\""))
+        XCTAssertTrue(m5.contains("TMPDIR=\"$WORK\""))
+        // No Python in the VM (no Command Line Tools): jq does the JSON and the clock.
+        XCTAssertFalse(m5.contains("python3 -c 'import"))
+        XCTAssertTrue(m5.contains("t() { jq -n 'now'; }"))
     }
 
     // MARK: - build.sh (scripts-packaging-2)
