@@ -995,19 +995,36 @@ public enum ArgvRedactor {
     }
 
     /// A command line in one element: headers first (they span tokens), then token by token.
-    static func redactCommandLine(_ s: String, depth: Int = 1) -> String {
-        if let header = redactWholeHeader(s) { return header }
-        var s = replace(quotedHeader, in: s, with: "$1$2$3" + placeholder)
-        s = redactQuotedPairs(s)
-        s = redactSQLCredentials(s)
-        s = replace(appleScriptPassword, in: s, with: "$1" + placeholder + "$3")
-        s = replace(escapedAppleScriptPassword, in: s, with: "$1" + placeholder + "$3")
+    static func redactCommandLine(_ line: String, depth: Int = 1) -> String {
+        if let header = redactWholeHeader(line) { return header }
+        // Words that put a single quote inside single quotes (`'… PASSWORD '\''pw'\'''`, as commands
+        // are quoted for `sh -c` or `eval`) or use ANSI-C quoting are read as the same value in double
+        // quotes, which the rules below understand. A word nothing was redacted in is written back as
+        // it was.
+        var asWritten: [Int: String] = [:]
+        var read = line
+        if line.contains("'") {
+            var normalized = ""
+            var index = 0
+            for piece in tokenize(line) {
+                if !piece.isSpace, let word = doubleQuoted(piece.text) {
+                    asWritten[index] = piece.text
+                    normalized += word
+                } else {
+                    normalized += piece.text
+                }
+                if !piece.isSpace { index += 1 }
+            }
+            if !asWritten.isEmpty { read = normalized }
+        }
+        let s = redactAcrossWords(read)
         let pieces = tokenize(s)
         let words = pieces.filter { !$0.isSpace }.map(\.text)
         // One word that is the whole string (`print('a b')`: the quote starts mid-word): splitting
         // makes no progress, so it is a token, not a command line.
         if words.count == 1 && words[0] == s.trimmingCharacters(in: .whitespacesAndNewlines) {
-            return redactToken(s)
+            let token = redactToken(s)
+            return token == read ? line : token
         }
         // Words after a line break start a new command (or a heredoc's body or end).
         var lineStarts = Set<Int>()
@@ -1022,12 +1039,48 @@ public enum ArgvRedactor {
                 index += 1
             }
         }
-        var redacted = redactSequence(words, firstIsProgram: false, depth: depth, lineStarts: lineStarts)[...]
+        var redacted = redactSequence(words, firstIsProgram: false, depth: depth, lineStarts: lineStarts)
+        if !asWritten.isEmpty {
+            let normalized = tokenize(read).filter { !$0.isSpace }.map(\.text)
+            if normalized.count == words.count {
+                for (k, word) in asWritten where redacted[k] == normalized[k] { redacted[k] = word }
+            }
+        }
+        var rest = redacted[...]
         var out = ""
         for piece in pieces {
-            if piece.isSpace { out += piece.text } else { out += redacted.popFirst() ?? piece.text }
+            if piece.isSpace { out += piece.text } else { out += rest.popFirst() ?? piece.text }
         }
         return out
+    }
+
+    /// The rules that read a command line's text across its words: quoted headers, JSON and
+    /// JavaScript pairs, SQL and AppleScript.
+    static func redactAcrossWords(_ s: String) -> String {
+        var t = replace(quotedHeader, in: s, with: "$1$2$3" + placeholder)
+        t = redactQuotedPairs(t)
+        t = redactSQLCredentials(t)
+        t = replace(appleScriptPassword, in: t, with: "$1" + placeholder + "$3")
+        return replace(escapedAppleScriptPassword, in: t, with: "$1" + placeholder + "$3")
+    }
+
+    /// `word` as one double-quoted word with the same value (`"it's"`), when it puts a single quote
+    /// inside single quotes (`'it'\''s'`, `'it'"'"'s'`) or is ANSI-C quoted (`$'it\'s'`); nil for any
+    /// other word, which the rules read as written. A `;` ending the word stays after it.
+    static func doubleQuoted(_ word: String) -> String? {
+        var core = word
+        var end = ""
+        while core.hasSuffix(";") && !core.hasSuffix("\\;") {
+            core.removeLast()
+            end += ";"
+        }
+        guard let value = shellWordValue(core) else { return nil }
+        var out = "\""
+        for c in value {
+            if "\"\\$`".contains(c) { out.append("\\") }
+            out.append(c)
+        }
+        return out + "\"" + end
     }
 
     // MARK: - SQL
@@ -1632,6 +1685,8 @@ public enum ArgvRedactor {
         var current = ""
         var quote: Character?
         var escaped = false
+        // `$'…'` (ANSI-C quoting): a backslash escapes the next character, `\'` included.
+        var ansi = false
         var space = ""
         for c in s {
             if escaped { current.append(c); escaped = false; continue }
@@ -1642,13 +1697,16 @@ public enum ArgvRedactor {
             }
             // Before a backslash too: `echo \$HOME` stays `echo \$HOME`, not `echo\$HOME `.
             if !space.isEmpty { pieces.append(Piece(text: space, isSpace: true)); space = "" }
-            if c == "\\" && quote != "'" { current.append(c); escaped = true; continue }
+            if c == "\\" && (quote != "'" || ansi) { current.append(c); escaped = true; continue }
             if let q = quote {
                 current.append(c)
-                if c == q { quote = nil }
+                if c == q { quote = nil; ansi = false }
                 continue
             }
-            if c == "\"" || c == "'" { quote = c }
+            if c == "\"" || c == "'" {
+                ansi = c == "'" && current.last == "$"
+                quote = c
+            }
             current.append(c)
         }
         if !current.isEmpty { pieces.append(Piece(text: current, isSpace: false)) }
@@ -1669,6 +1727,69 @@ public enum ArgvRedactor {
     static func unquote(_ t: String) -> (String, String) {
         guard isQuoted(t), let f = t.first else { return ("", t) }
         return (String(f), String(t.dropFirst().dropLast()))
+    }
+
+    /// The value the shell gives a quoted word where `unquote` would leave quotes inside: a single
+    /// quote written into a single-quoted word (`'it'\''s'`, `'it'"'"'s'` → `it's`), and ANSI-C
+    /// quoting (`$'it\'s'`). Nil for any other word, which the rules read as written (`--password='x'`,
+    /// `{"k":"v"}`, SQL's `'bob'@'%'`), and for one with shell syntax outside quotes (`'a'\''b'>FILE`)
+    /// or an unclosed quote.
+    static func shellWordValue(_ word: String) -> String? {
+        guard word.contains("'") else { return nil }
+        let chars = Array(word)
+        var value = ""
+        var parts = 0
+        var ansi = false
+        var k = 0
+        while k < chars.count {
+            let c = chars[k]
+            if c == "'" {
+                guard let close = chars[(k + 1)...].firstIndex(of: "'") else { return nil }
+                value += String(chars[(k + 1)..<close])
+                k = close + 1
+            } else if c == "\"" || (c == "$" && k + 1 < chars.count && chars[k + 1] == "'") {
+                // Double quotes: \ escapes " \ $ ` (a line break after it is removed). ANSI-C: \' \" \\
+                // \n \t \r; other escapes are kept as written.
+                ansi = ansi || c == "$"
+                let close: Character = c == "$" ? "'" : "\""
+                var j = k + (c == "$" ? 2 : 1)
+                var closed = false
+                while j < chars.count {
+                    let d = chars[j]
+                    if d == "\\" && j + 1 < chars.count {
+                        let e = chars[j + 1]
+                        switch (c == "$", e) {
+                        case (false, "\""), (false, "\\"), (false, "$"), (false, "`"), (true, "'"), (true, "\""), (true, "\\"):
+                            value.append(e)
+                        case (false, "\n"):
+                            break
+                        case (true, "n"): value.append("\n")
+                        case (true, "t"): value.append("\t")
+                        case (true, "r"): value.append("\r")
+                        default: value.append(d); value.append(e)
+                        }
+                        j += 2
+                        continue
+                    }
+                    if d == close { closed = true; break }
+                    value.append(d)
+                    j += 1
+                }
+                guard closed else { return nil }
+                k = j + 1
+            } else if c == "\\" {
+                if k + 1 < chars.count && chars[k + 1] != "\n" { value.append(chars[k + 1]) }
+                k += 2
+                continue
+            } else {
+                if "<>|;&()`".contains(c) { return nil }
+                value.append(c)
+                k += 1
+                continue
+            }
+            parts += 1
+        }
+        return (isQuoted(word) && parts > 1 && value.contains("'")) || ansi ? value : nil
     }
 
     static func basename(_ s: String) -> String {

@@ -258,6 +258,41 @@ final class RedactorCoverageTests: XCTestCase {
         ])
     }
 
+    // MARK: - Single quotes inside single-quoted words
+
+    /// `'\''` and `'"'"'` put a single quote into a single-quoted word, as commands are quoted for
+    /// `sh -c` and `eval` (agents run commands that way); `$'…'` is ANSI-C quoting. The rules read the
+    /// word's value: before, a SQL or JavaScript literal opened by such a quote ended at the `\'`.
+    func testSingleQuotesInsideSingleQuotedWords() {
+        assertRedacted(["/bin/sh", "-c", #"psql -c 'ALTER USER app WITH PASSWORD '\''Hunter2pw'\'''"#],
+                       ["/bin/sh", "-c", #"psql -c "ALTER USER app WITH PASSWORD '\#(R)'""#])
+        assertRedacted(["/bin/sh", "-c", #"psql -c 'ALTER USER app WITH PASSWORD '"'"'Hunter2pw'"'"''"#],
+                       ["/bin/sh", "-c", #"psql -c "ALTER USER app WITH PASSWORD '\#(R)'""#])
+        assertRedacted(["/bin/bash", "-c", #"psql -c $'ALTER USER bob PASSWORD \'Hunter2pw\'' && ls"#],
+                       ["/bin/bash", "-c", #"psql -c "ALTER USER bob PASSWORD '\#(R)'" && ls"#])
+        assertRedacted(["/bin/sh", "-c", #"node -e 'connect({password: '\''Hunter2pw'\''})'"#],
+                       ["/bin/sh", "-c", #"node -e "connect({password: '\#(R)'})""#])
+        // A command quoted for eval inside the shell's own command line.
+        let zsh = "source /Users/alice/snap.sh && eval "
+        let tail = #" \< /dev/null && pwd -P >| /tmp/cwd"#
+        assertRedacted(["/bin/zsh", "-c", "-l", zsh + #"'psql -c "ALTER USER bob PASSWORD '\''Hunter2pw'\''"'"# + tail],
+                       ["/bin/zsh", "-c", "-l", zsh + #""psql -c \"ALTER USER bob PASSWORD '\#(R)'\"""# + tail])
+        assertRedacted(["/bin/zsh", "-c", "-l", zsh + #"'echo '\''db:5432:*:bob:Hunter2pw'\'' > ~/WhoReadTestVault/pgpass'"# + tail],
+                       ["/bin/zsh", "-c", "-l", zsh + #""echo '\#(R)' > ~/WhoReadTestVault/pgpass""# + tail])
+        assertRedacted(["/bin/bash", "-c", #"bash -c 'mysql -e "CREATE USER '\''bob'\''@'\''%'\'' IDENTIFIED BY '\''Hunter2pw'\''"'"#],
+                       ["/bin/bash", "-c", #"bash -c "mysql -e \"CREATE USER 'bob'@'%' IDENTIFIED BY '\#(R)'\"""#])
+        assertRedacted(["/bin/sh", "-c", #"echo 'machine h login bob password '\''Hunter2pw'\''' >> ~/WhoReadTestVault/netrc"#],
+                       ["/bin/sh", "-c", #"echo "\#(R)" >> ~/WhoReadTestVault/netrc"#])
+        // Nothing to redact: the word stays as written.
+        assertKept([
+            ["/bin/zsh", "-c", #"git commit -m 'Don'\''t log the password' && git log -1"#],
+            ["/bin/zsh", "-c", #"python3 -c 'print("it'\''s ok")'"#],
+            ["/bin/zsh", "-c", "-l", zsh + #"'grep -rn '\''IDENTIFIED BY'\'' migrations/'"# + tail],
+            ["/bin/bash", "-c", #"echo $'a\tb' && ls"#],
+            ["/bin/sh", "-c", "psql -c \"SELECT 'it''s'\""],
+        ])
+    }
+
     // MARK: - Data written by compound commands and after exec > FILE
 
     /// A pgpass line: no key=value or netrc rule would catch it, only the data rules.
