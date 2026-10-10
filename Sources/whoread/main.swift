@@ -104,13 +104,23 @@ func makeClient() throws -> IPCClient {
     #if os(macOS)
     let name = args.value("service")
         ?? ProcessInfo.processInfo.environment["WHOREAD_MACH_SERVICE"]
-        ?? (try? String(contentsOfFile: WhoReadPaths.dataDirectory + "/mach-service", encoding: .utf8))?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        ?? announcedServiceName()
         ?? WhoReadPaths.machServiceName
     return TransportClient(transport: XPCClient(machServiceName: name))
     #else
     throw CLIError("no XPC on this platform: pass --socket PATH (whoreadd --dev-socket PATH)")
     #endif
+}
+
+/// The service name the running daemon wrote to its data directory, unless someone other than root
+/// could have written it there: such a name could lead the CLI to another service (daemonfs-3).
+func announcedServiceName() -> String? {
+    do {
+        return try TrustedFile.machServiceName(inDataDirectory: WhoReadPaths.dataDirectory)
+    } catch {
+        note("not using the daemon's service name: \(error); using \(WhoReadPaths.machServiceName)")
+        return nil
+    }
 }
 
 /// `s` as one shell word, so a suggested command can be pasted as is. `~` is quoted too: the shell
