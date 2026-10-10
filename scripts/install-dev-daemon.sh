@@ -53,7 +53,8 @@ move_aside() {  # PATH REASON
 #   ACL ALLOW entry is moved aside first;
 # - then, with nobody else able to change DIR, the same goes for NAME, and for a NAME that is not a
 #   regular file or has more than one name (chown and chmod would change that other file too).
-# An existing log that passes is kept, with its content.
+# An existing log that passes is kept, with its content. Both lose their whole ACL: one made fresh
+# takes ALLOW entries from an inheritable ACL above it, which its mode does not show.
 private_log() {  # DIR NAME OWNER GROUP
   local dir="$1" file="$1/$2" owner="$3" group="$4" uid reason
   uid="$(id -u "$owner")"
@@ -65,6 +66,7 @@ private_log() {  # DIR NAME OWNER GROUP
   [ -d "$dir" ] || mkdir -m 700 "$dir"
   chown -h "$owner:$group" "$dir"
   chmod -h 700 "$dir"
+  chmod -h -N "$dir"
   if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
     move_aside "$file" "is a symbolic link or not a regular file"
   elif [ -e "$file" ] && reason="$(untrusted_reason "$file" "$uid")"; then
@@ -75,6 +77,7 @@ private_log() {  # DIR NAME OWNER GROUP
   [ -e "$file" ] || install -m 600 -o "$owner" -g "$group" /dev/null "$file"
   chown -h "$owner:$group" "$file"
   chmod -h 600 "$file"
+  chmod -h -N "$file"
 }
 
 # Fails, saying why, unless each existing DIR is a real directory that only UID can change. Used where

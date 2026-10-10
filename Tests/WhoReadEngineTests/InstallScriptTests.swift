@@ -198,6 +198,19 @@ final class InstallScriptLogTests: XCTestCase {
         XCTAssertEqual(movedAside("whoreadd.log", in: logs).count, 1)
     }
 
+    // macos-3 variant: a directory and a file made fresh take ALLOW entries from an inheritable ACL
+    // above them, which 0700 and 0600 do not show: every user could have listed and read the log.
+    func testFreshLogDirectoryAndFileInheritNoACL() throws {
+        try chmodACL(["+a", "everyone allow read,list,search,file_inherit,directory_inherit", dir.url.path])
+        try privateLog()
+        XCTAssertFalse(SafeFile.aclAllows(path: logs, changing: false), "the directory keeps no ALLOW entry")
+        XCTAssertFalse(SafeFile.aclAllows(path: log, changing: false), "the log keeps no ALLOW entry")
+        // A log file made later in a kept directory inherits nothing either.
+        XCTAssertEqual(unlink(log), 0)
+        try privateLog()
+        XCTAssertFalse(SafeFile.aclAllows(path: log, changing: false))
+    }
+
     // What an earlier install left (a 0755 directory and a 0644 log): kept, with its content, and
     // closed to others.
     func testEarlierInstallsLogIsKeptAndClosedToOthers() throws {
