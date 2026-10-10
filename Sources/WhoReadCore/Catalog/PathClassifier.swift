@@ -350,9 +350,9 @@ public final class PathClassifier: @unchecked Sendable {
     }
 
     /// Every category whose prefix contains the path and whose patterns accept it, each once at its
-    /// most severe prefix. The first is the category the path is named by (`classify`, whose owners
-    /// count as owners of the whole path); the others follow most severe first, then deepest prefix
-    /// first, then catalog order. An SSH key in a custom folder inside `~/.ssh` is ssh/critical and
+    /// most severe prefix. The first is the category the path is named by (`classify`; its owners also
+    /// own the others that are not more severe, see EvaluationTarget); the others follow most severe
+    /// first, then deepest prefix first, then catalog order. An SSH key in a custom folder inside `~/.ssh` is ssh/critical and
     /// custom/high: ssh rules keep covering it, and the custom category's rules cover it too. Nothing
     /// is demoted or dropped, so a rule or an answer about one category never decides another.
     public func classifications(normalized path: String, truncated: Bool = false) -> [Classification] {
