@@ -21,6 +21,11 @@ The VM is `whoread-vm`, cloned from `ghcr.io/cirruslabs/macos-golden-gate-vanill
 `admin`, password `admin`, automatic login). It has no Xcode and no Command Line Tools; everything
 here works with what macOS itself ships (bash, jq, perl, sqlite3, codesign, mdutil).
 
+0. **Create the VM (once).** On the host, in Terminal:
+   ```
+   brew install cirruslabs/cli/tart
+   tart clone ghcr.io/cirruslabs/macos-golden-gate-vanilla:latest whoread-vm
+   ```
 1. **Disable SIP in the VM (once).** On the host: `tart run --recovery whoread-vm`. In the VM window
    choose Options → Continue (sign in as admin / admin if asked), then in the menu bar Utilities →
    Terminal, and type:
@@ -50,7 +55,8 @@ here works with what macOS itself ships (bash, jq, perl, sqlite3, codesign, mdut
    files, click Allow. Normally it installs a root LaunchDaemon. If that cannot read the share
    (privacy protection), it grants the runner Full Disk Access through the TCC database (SIP is off)
    and, failing that, falls back to a LaunchAgent in the admin session that runs each job as root
-   through a sudoers rule for the runner alone. Rerunning it is safe.
+   through a sudoers rule for the runner alone. It records the TCC rows it writes; rerunning it
+   (safe) or `uninstall.sh` puts them back as they were.
 5. **Check from the host:**
    ```
    scripts/vm/vmjob.sh ping
@@ -79,8 +85,9 @@ scripts/vm/vmjob.sh run m5 scripts/vm/acceptance-m5.sh -- --stop-test
 
 Run them from the checkout you want to test: a worktree under `.worktrees/` is inside the shared
 folder, so its own build and scripts are used. `provision.sh` installs that checkout's
-`.build-sc/debug/whoreadd` and `whoread` with `scripts/install-dev-daemon.sh --bin`, signs whoreadd ad
-hoc with the Endpoint Security entitlement, grants it Full Disk Access by writing the VM's TCC
+`.build-sc/debug/whoreadd` and `whoread` with `scripts/install-dev-daemon.sh --bin`, signs the
+installed whoreadd ad hoc with the Endpoint Security entitlement (the build in `.build-sc/debug`
+never carries one), grants it Full Disk Access by writing the VM's TCC
 database (`tcc-fda.sh`, which detects the table's columns at run time), creates
 `/Users/admin/WhoReadTestVault` as admin, reports Spotlight's indexing state, and reports the
 daemon's status. `-- eslogger` provisions the monitor-only source instead.
@@ -124,20 +131,28 @@ scripts/vm/vmjob.sh result ID [--wait]         # output and exit code of an earl
 
 ## Jobs
 
-- A script inside the shared folder runs in place (`$0` and paths relative to it work); any other
-  script, and `shell` commands, are copied into the job. Arguments go after `--`.
+- A job carries a copy of the script as it was when `vmjob.sh` queued it; in the VM that copy runs
+  from a folder only root can read, so editing the script afterwards (also while the job waits or
+  runs) changes nothing. A script inside the shared folder runs with `$0` its path there, so paths
+  relative to `$0` work; the other files it uses are read from the share when it uses them. Any
+  other script, and `shell` commands, start in the shared folder. Arguments go after `--`.
+- Scripts run with `/bin/bash`: one whose `#!` line names another interpreter, or options
+  (`#!/bin/bash -e`; use `set -e` in the script instead), is refused (exit code 64), as is one
+  holding a line `WHOREAD_VM_END_OF_SCRIPT` (it ends the copy).
 - Jobs run as root, one at a time, in their checkout, with a clean environment: `PATH` includes
   `/usr/local/bin`, `WHOREAD_LANG=en`, `WHOREAD_TEST_USER=admin`, `WHOREAD_VM_SHARE` (the shared
   folder in the VM) and `WHOREAD_VM_REPO` (the checkout). Accesses to the test vault must run as the
   test user (`sudo -u "$WHOREAD_TEST_USER"`): the acceptance scripts do that when they run as root.
 - Timeout: `--timeout N`, else a `# timeout: N` line among the script's first 20 lines, else 900 s.
   At the timeout the job's process group and every descendant get SIGTERM, 10 s later SIGKILL; exit
-  code 124.
+  code 124. Only time the VM runs counts: while the Mac sleeps the VM is paused, and the jump of
+  its clock on waking uses up neither the job's timeout nor the time `vmjob.sh` waits.
 - A job is renamed out of `jobs/` before it starts, so it never runs twice, also across runner or VM
-  restarts. One that was running when the runner stopped is reported as interrupted (exit code 125)
-  and not run again; if it is still running (a runner killed outright leaves the job's process group
-  behind), the next runner stops it first, identified by pid and start time, so it cannot overlap
-  with the next job.
+  restarts. If the runner is stopped while a job runs (the VM shuts down, `install.sh` runs again),
+  it stops the job and records it as interrupted (exit code 125); a job that had just ended keeps
+  its own exit code. Neither is run again. If the job is still running when the next runner starts
+  (a runner killed outright leaves the job's process group behind), that runner stops it first,
+  identified by pid and start time, so it cannot overlap with the next job.
 - If the heartbeat stops, `vmjob.sh` gives up instead of waiting out the timeout (exit code 69): a
   job the runner has not taken yet is withdrawn and never runs; for a running one, look later with
   `vmjob.sh result ID --wait`.
@@ -158,3 +173,4 @@ scripts/vm/vmjob.sh result ID [--wait]         # output and exit code of an earl
 - `measure-overhead.sh` stops the daemon while it measures. If that job was killed outright, start
   the daemon again: `scripts/vm/vmjob.sh shell 'launchctl bootstrap system /Library/LaunchDaemons/com.whoread.daemon.plist'`.
 - Remove the runner: `sudo bash /Users/admin/wr/whoread/scripts/vm/runner/uninstall.sh` (in the VM).
+  It also puts back the TCC rows `install.sh` wrote; the last line starts with `OK:` or `FAILED:`.
