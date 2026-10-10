@@ -397,7 +397,7 @@ wait $HELD
 r=$(cat "$TMPDIR/m5-ask")
 case "$r" in rc=0*) ok "the held cat went through after the answer: $r" ;; *) bad "held cat after the answer: $r" ;; esac
 # Unanswered: the access waits for its budget and is then denied. The time it waits is the deadline
-# budget on this Mac (deadline minus 20 %, headroom clamped to 1-5 s): record it in docs/STATUS.md.
+# budget on this Mac (deadline minus 20 %, headroom clamped to 1-5 s).
 s=$(t); as_user /bin/sh -c 'echo x >> "$1"' sh "$VAULT/ssh/m5-new" 2>/dev/null; rc=$?; e=$(t)
 [ $rc -ne 0 ] && ok "unanswered write denied after $(jq -n "($e - $s) * 100 | round / 100") s (the hold budget)" \
   || bad "unanswered write went through"
@@ -428,7 +428,7 @@ if [ "${1:-}" = "--stop-test" ]; then
     else
       echo "  the daemon was killed (pid $PID, now ${NEW_PID:-not running}); enforcement: $(enforcement_state)"
     fi
-    echo "  (record this in docs/STATUS.md: expected before macOS 27 (kill mode, WWDC20): client killed at the deadline,"
+    echo "  (expected before macOS 27 (kill mode, WWDC20): client killed at the deadline,"
     echo "   implicit allow; macOS 27 and later (fail-closed): the cat denied at the deadline, the daemon not killed)"
   fi
 fi

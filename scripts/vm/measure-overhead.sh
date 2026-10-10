@@ -53,4 +53,4 @@ STOPPED=1
 s=$(now); workload; e=$(now)
 echo "monitor stopped : $N opens in $(round "$e - $s") s"
 busy
-echo "Copy these numbers into docs/STATUS.md (M4)."
+echo "Done: compare the CPU time and the duration with the monitor running and stopped."

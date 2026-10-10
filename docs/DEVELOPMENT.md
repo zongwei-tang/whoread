@@ -157,8 +157,8 @@ open "$P/WhoRead.app"
    ```bash
    scripts/vm/acceptance-m5.sh [--stop-test]
    ```
-   Record the latencies, the ask-mode hold budget it prints and the pending-AUTH behaviour in
-   docs/STATUS.md. The SIGKILL step expects enforcement still on after launchd restarts the daemon,
+   Note the latencies, the ask-mode hold budget it prints and the pending-AUTH behaviour with the
+   test results. The SIGKILL step expects enforcement still on after launchd restarts the daemon,
    with `uncleanStop` set in `whoread status` (enforcement is never switched off automatically).
 
 ## System extension in development (manual)
@@ -182,6 +182,5 @@ open "$P/WhoRead.app"
 
 - No third-party dependencies in the core. The package uses only Foundation, SQLite3 and (macOS)
   EndpointSecurity, Security and SystemExtensions.
-- Code written on a non-Mac host that has not been compiled yet carries a `NOT YET COMPILED`
-  comment at the top and a `[~]` in docs/STATUS.md until it has been compiled on a Mac.
-- Each milestone ends with tests passing, an updated docs/STATUS.md and a commit.
+- Every change comes with tests, and the full suite passes before it is merged into `main`.
+- Development happens on `dev`; `main` only receives tested releases.
