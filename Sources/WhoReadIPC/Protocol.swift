@@ -6,7 +6,9 @@ import WhoReadCore
 /// scoping, status rulesLoadError/sourceDroppedEvents.
 /// 3: ask mode (asks, answerAsk, Verdict.ask, AlertKind.ask, AlertAction.trustApplePrograms,
 /// Rule.chainAgents, Settings.trustApplePrograms), no automatic enforcement trips.
-public let whoReadIPCVersion = 3
+/// 4: file operations setmode, setowner, setacl and mount (an older client cannot decode events that
+/// carry them), status sourceDeadlineMissMode.
+public let whoReadIPCVersion = 4
 
 /// Requests from the app / CLI to the daemon. Encoded as JSON over XPC (`Data` in, `Data` out)
 /// or over the development Unix socket.
@@ -160,6 +162,10 @@ public struct DaemonStatus: Codable, Sendable {
     /// The previous daemon instance stopped while AUTH events were subscribed (likely killed for a
     /// missed deadline). Enforcement stays as the user set it; this is for the user to know.
     public var uncleanStop: String?
+    /// Native source: what the kernel does with an AUTH message not answered by its deadline
+    /// ("fail-closed", "kill", "fail-open", "unknown"); nil for other sources or while no client exists.
+    /// Optional, so older clients and daemons still decode the status.
+    public var sourceDeadlineMissMode: String?
 
     public init(version: String, pid: Int32, startedAt: Date, mode: DaemonMode, source: SourceKind, sourceRunning: Bool,
                 sourceError: String?, sourceHint: String?, sourceCanEnforce: Bool, learning: Bool, learningEndsAt: Date,
@@ -168,7 +174,8 @@ public struct DaemonStatus: Codable, Sendable {
                 killSwitchFilePresent: Bool, latency: LatencyStats, parser: EsloggerParser.Stats?, counts: StoreCounts,
                 unreadAlerts: Int, lastEventAt: Date?, eventsProcessed: UInt64, writerDropped: UInt64, monitoredPrefixes: Int,
                 homeDirectories: [String], rulesLoadError: String? = nil, sourceDroppedEvents: UInt64? = nil,
-                sourceKernelDrops: UInt64? = nil, pendingAsks: Int? = nil, uncleanStop: String? = nil) {
+                sourceKernelDrops: UInt64? = nil, pendingAsks: Int? = nil, uncleanStop: String? = nil,
+                sourceDeadlineMissMode: String? = nil) {
         self.version = version
         self.pid = pid
         self.startedAt = startedAt
@@ -200,6 +207,7 @@ public struct DaemonStatus: Codable, Sendable {
         self.sourceKernelDrops = sourceKernelDrops
         self.pendingAsks = pendingAsks
         self.uncleanStop = uncleanStop
+        self.sourceDeadlineMissMode = sourceDeadlineMissMode
     }
 }
 

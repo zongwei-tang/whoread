@@ -264,17 +264,25 @@ final class PipelineFixTests: XCTestCase {
         let plan = NativeMutePlan.plan(prefixes: [nfc, "/Users/alice/documents/Secrets"], ancestors: ["/Users/alice"],
                                        resolve: { resolved[$0] })
         let prefixes = Set(plan.prefixes.map { Array($0.path.utf8) })
-        XCTAssertEqual(prefixes, Set([nfc, nfd, "/Users/alice/documents/Secrets", "/Users/alice/Documents/Secrets"].map { Array($0.utf8) }),
+        // Each spelling also under the data volume's root (files-4).
+        let spellings = [nfc, nfd, "/Users/alice/documents/Secrets", "/Users/alice/Documents/Secrets"]
+        XCTAssertEqual(prefixes, Set((spellings + spellings.map { "/System/Volumes/Data" + $0 }).map { Array($0.utf8) }),
                        "NFC and NFD are distinct to ES even though Swift strings compare equal")
-        XCTAssertEqual(plan.literals.map(\.path), ["/Users/alice"], "an identical resolved spelling is not duplicated")
-        XCTAssertEqual(NativeMutePlan.variants("/Users/alice/.ssh/", resolve: { _ in nil }), ["/Users/alice/.ssh/"])
+        XCTAssertEqual(Set(plan.literals.map(\.path)), ["/Users/alice", "/System/Volumes/Data/Users/alice"],
+                       "an identical resolved spelling is not duplicated")
+        XCTAssertEqual(NativeMutePlan.variants("/Users/alice/.ssh/", resolve: { _ in nil }),
+                       ["/Users/alice/.ssh/", "/System/Volumes/Data/Users/alice/.ssh/"])
     }
 
     func testMutePlanNeverSelectsTheRoot() {
         // A custom path that is a link to "/" must not become an inverted "/" prefix (every file event).
         let plan = NativeMutePlan.plan(prefixes: ["/Users/alice/notes"], ancestors: ["/Users/alice"], resolve: { _ in "/" })
-        XCTAssertEqual(plan.prefixes.map(\.path), ["/Users/alice/notes"])
-        XCTAssertEqual(plan.literals.map(\.path), ["/Users/alice"])
+        XCTAssertEqual(Set(plan.prefixes.map(\.path)), ["/Users/alice/notes", "/System/Volumes/Data/Users/alice/notes"])
+        XCTAssertEqual(Set(plan.literals.map(\.path)), ["/Users/alice", "/System/Volumes/Data/Users/alice"])
+        // Nor a link to the data volume's root, which normalizes to "/".
+        let data = NativeMutePlan.plan(prefixes: ["/Users/alice/notes"], ancestors: [], homes: ["/Users/alice"],
+                                       normalize: PathNormalizer().normalize, resolve: { _ in "/System/Volumes/Data" })
+        XCTAssertEqual(Set(data.prefixes.map(\.path)), ["/Users/alice/notes", "/System/Volumes/Data/Users/alice/notes"])
     }
 
     func testSourcesReportNoDroppedEventsByDefault() {

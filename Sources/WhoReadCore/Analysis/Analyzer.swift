@@ -133,7 +133,7 @@ public final class Analyzer: @unchecked Sendable {
     }
 
     /// Operations that carry a source's content (and, for directories, everything below it).
-    static let carryingOperations: Set<FileOperation> = [.rename, .clone, .link, .exchangedata, .copyfile]
+    static let carryingOperations = OperationSemantics.carryingOperations
 
     /// Classifies the targets of an activity for the AUTH path (no side effects). Directory listings
     /// are never blocked, so a `readdir` has no sensitive target here (it is still recorded, when
@@ -158,7 +158,12 @@ public final class Analyzer: @unchecked Sendable {
         for (i, t) in targets.enumerated() {
             let path = paths[i]
             let direct = classifier.classify(normalized: path, truncated: t.truncated)
-            let carriesOut = t.role == .source && Analyzer.carryingOperations.contains(activity.operation)
+            // The source of a move or clone, a directory a rename lands on (a swap carries its content out),
+            // and a directory a file system is mounted on: that replaces everything below it for whoever
+            // looks there, so it is judged like a directory carried away, though only as a write. Not on a
+            // home or above one: network, auto_home and FileVault homes are mounted there at every login.
+            let carriesOut = t.carriesContent(in: activity.operation)
+                || (activity.operation == .mount && !Analyzer.isHomeOrAbove(path, homes: classifier.normalizer.homeDirectories))
             // A new directory carries nothing (tools create ~/.config all the time); a new symlink at a
             // parent of monitored prefixes redirects them (`ln -s /tmp/evil ~/.config`). The type of a
             // create is known from its stat once it exists; an AUTH_CREATE may not say (nil).
@@ -236,6 +241,16 @@ public final class Analyzer: @unchecked Sendable {
             }
         }
         return out
+    }
+
+    /// A normalized path that is a home, or a directory containing one (the root included).
+    static func isHomeOrAbove(_ path: String, homes: [String]) -> Bool {
+        let key = PathNormalizer.fold(PathClassifier.stripTrailingSlash(path))
+        if key == "/" { return true }
+        return homes.contains { h in
+            let home = PathNormalizer.fold(PathClassifier.stripTrailingSlash(h))
+            return home == key || home.hasPrefix(key + "/")
+        }
     }
 
     public struct ClassifiedTarget: Sendable {

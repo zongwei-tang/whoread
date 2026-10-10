@@ -40,12 +40,18 @@ public struct SourceState: Sendable, Codable, Equatable {
     public var error: String?
     public var hint: String?
     public var finished: Bool
+    /// Native source: what the kernel does with an AUTH message the file client does not answer in
+    /// time ("fail-closed": denied; "kill": the client is killed and the access allowed, the only mode
+    /// before macOS 27; "fail-open"; "unknown"). nil while no file client exists, and for other sources.
+    public var deadlineMissMode: String?
 
-    public init(running: Bool = false, error: String? = nil, hint: String? = nil, finished: Bool = false) {
+    public init(running: Bool = false, error: String? = nil, hint: String? = nil, finished: Bool = false,
+                deadlineMissMode: String? = nil) {
         self.running = running
         self.error = error
         self.hint = hint
         self.finished = finished
+        self.deadlineMissMode = deadlineMissMode
     }
 }
 

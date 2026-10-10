@@ -38,8 +38,9 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
 
     public static func eventNames(readdir: Bool) -> [String] {
         // "create": symlink, mkdir and mknod have no open (the parser skips regular-file creates).
+        // setmode/setowner/setacl/setattrlist/mount: permission, owner and namespace changes.
         ["open", "close", "exec", "fork", "exit", "rename", "clone", "copyfile", "link", "unlink", "truncate", "exchangedata",
-         "create"]
+         "create", "setmode", "setowner", "setacl", "setattrlist", "mount"]
             + (readdir ? ["readdir"] : [])
     }
 

@@ -220,6 +220,7 @@ func cmdStatus(_ c: IPCClient) throws {
     out("WhoRead \(s.version) — \(m)")
     out("  source:       \(s.source.rawValue) \(s.sourceRunning ? "running" : "stopped")" + (s.sourceError.map { "  ERROR: \($0)" } ?? ""))
     if let h = s.sourceHint { out("                hint: \(h)") }
+    if let d = s.sourceDeadlineMissMode { out("  deadline:     AUTH " + NativeDeadlineMissMode.statusDescription(d)) }
     out("  enforcement:  \(s.enforcementActive ? "ACTIVE" : "inactive") (setting \(s.enforcementEnabled ? "on" : "off"))"
         + (s.enforcementInactiveReasons.isEmpty ? "" : " — " + s.enforcementInactiveReasons.map(\.rawValue).joined(separator: ", ")))
     out("  kill switch:  file \(s.killSwitchFilePresent ? "PRESENT (enforcement forced off)" : "absent")")
@@ -246,10 +247,12 @@ func cmdStatus(_ c: IPCClient) throws {
                        s.latency.p99Micros / 1000, t))
         }
     }
-    // Missed deadlines never switch enforcement off (the kernel allowed those accesses): only counted.
+    // Missed deadlines never switch enforcement off: only counted. The kernel allowed those accesses,
+    // unless the native client runs in fail-closed mode (macOS 27), where it denied them.
     if s.latency.deadlineMisses > 0 {
+        let outcome = NativeDeadlineMissMode.missesDenied(s.sourceDeadlineMissMode) ? "denied" : "allowed"
         out("  WARNING: \(s.latency.deadlineMisses) AUTH deadline miss\(s.latency.deadlineMisses == 1 ? "" : "es"): "
-            + "the kernel allowed those accesses; enforcement stays on (turn it off by hand: sudo whoread enforcement off)")
+            + "the kernel \(outcome) those accesses; enforcement stays on (turn it off by hand: sudo whoread enforcement off)")
     }
     if s.writerDropped > 0 { out("  WARNING: \(s.writerDropped) events dropped before storage") }
     if let d = s.sourceDroppedEvents, d > 0 {

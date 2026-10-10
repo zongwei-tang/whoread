@@ -7,7 +7,7 @@ import Foundation
 /// can possibly matter:
 /// - process lifecycle (`"exec":`, `"fork":`, `"exit":`) → always parse (the process tree needs them)
 /// - rename/clone/copyfile/link/exchangedata → always parse (split dir+name destinations;
-///   parents of sensitive dirs may be moved)
+///   parents of sensitive dirs may be moved); mount → always parse (on a parent, it hides them)
 /// - create → parse with a `new_path` (split dir+name) destination; an `existing_file` one carries
 ///   the full path, so it goes through the prefix test like an open (every file creation on the
 ///   system is a create event), or, at exactly a proper ancestor of a prefix (a symlink planted at
@@ -106,7 +106,8 @@ public final class LinePrefilter: @unchecked Sendable {
             if escaped.contains("/") { add(before + escaped.replacingOccurrences(of: "/", with: "\\/") + after, tag) }
         }
         for key in ["\"exec\":", "\"fork\":", "\"exit\":"] { add(key, .lifecycle) }
-        for key in ["\"rename\":", "\"clone\":", "\"copyfile\":", "\"link\":", "\"exchangedata\":"] {
+        // A mount on an ancestor of monitored prefixes (~/.config) names no prefix; mounts are rare.
+        for key in ["\"rename\":", "\"clone\":", "\"copyfile\":", "\"link\":", "\"exchangedata\":", "\"mount\":"] {
             add(key, .multiPath)
         }
         add("\"create\":", .create)

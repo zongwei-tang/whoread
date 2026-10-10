@@ -49,26 +49,29 @@ private func createLine(_ path: String, mode: Int?, seq: Int = 1) -> String {
 final class NativeMutePlanRound2Tests: XCTestCase {
     let homes = ["/Users/alice"]
 
+    /// The plan registers every spelling also under the data volume's root (files-4).
+    func withDataRoot(_ paths: [String]) -> Set<String> { Set(paths + paths.map { "/System/Volumes/Data" + $0 }) }
+
     func testMutePlanNeverSelectsDevForALinkedPrefix() {
         // ~/.zsh_history -> /dev/null (history turned off): every /dev/null open must not be selected.
         let plan = NativeMutePlan.plan(prefixes: ["/Users/alice/.zsh_history"], ancestors: ["/Users/alice"], homes: homes,
                                        resolve: { $0 == "/Users/alice/.zsh_history" ? "/dev/null" : nil })
-        XCTAssertEqual(plan.prefixes.map(\.path), ["/Users/alice/.zsh_history"])
+        XCTAssertEqual(Set(plan.prefixes.map(\.path)), withDataRoot(["/Users/alice/.zsh_history"]))
         for target in ["/dev", "/DEV/fd/3"] {
             let p = NativeMutePlan.plan(prefixes: ["/Users/alice/.mysql_history"], ancestors: [], homes: homes, resolve: { _ in target })
-            XCTAssertEqual(p.prefixes.map(\.path), ["/Users/alice/.mysql_history"], target)
+            XCTAssertEqual(Set(p.prefixes.map(\.path)), withDataRoot(["/Users/alice/.mysql_history"]), target)
         }
     }
 
     func testMutePlanSkipsAResolvedHomeOrAncestor() {
         for target in ["/Users/alice", "/Users", "/users/ALICE", "/Users/alice/notes"] {
             let plan = NativeMutePlan.plan(prefixes: ["/Users/alice/notes/link"], ancestors: [], homes: homes, resolve: { _ in target })
-            XCTAssertEqual(plan.prefixes.map(\.path), ["/Users/alice/notes/link"], "\(target) would select a whole tree")
+            XCTAssertEqual(Set(plan.prefixes.map(\.path)), withDataRoot(["/Users/alice/notes/link"]), "\(target) would select a whole tree")
         }
         // A usable target (a dotfile manager's) is still registered, on-disk case included.
         let plan = NativeMutePlan.plan(prefixes: ["/Users/alice/.aws/credentials"], ancestors: [], homes: homes,
                                        resolve: { _ in "/Users/alice/Dotfiles/aws/credentials" })
-        XCTAssertEqual(Set(plan.prefixes.map(\.path)), ["/Users/alice/.aws/credentials", "/Users/alice/Dotfiles/aws/credentials"])
+        XCTAssertEqual(Set(plan.prefixes.map(\.path)), withDataRoot(["/Users/alice/.aws/credentials", "/Users/alice/Dotfiles/aws/credentials"]))
     }
 
     func testMutePlanDropsPathsWithANul() {
@@ -76,7 +79,7 @@ final class NativeMutePlanRound2Tests: XCTestCase {
         var resolved: [String] = []
         let plan = NativeMutePlan.plan(prefixes: ["/Users/alice/\u{0}x", "/Users/alice/.ssh"], ancestors: ["/Users/alice/\u{0}y"],
                                        homes: homes, resolve: { resolved.append($0); return nil })
-        XCTAssertEqual(plan.prefixes.map(\.path), ["/Users/alice/.ssh"])
+        XCTAssertEqual(Set(plan.prefixes.map(\.path)), withDataRoot(["/Users/alice/.ssh"]))
         XCTAssertTrue(plan.literals.isEmpty)
         XCTAssertEqual(resolved, ["/Users/alice/.ssh"], "a NUL path is never resolved either")
     }

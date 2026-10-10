@@ -173,6 +173,27 @@ public final class EsloggerParser: @unchecked Sendable {
             // a creating open, which is already an event.
             if EsloggerParser.createsRegularFile(body) { return .ignored("create of a regular file") }
             return file(.create, OperationSemantics.create(dst))
+        case "setmode", "setowner", "setacl":
+            guard let t = J.file(body["target"]) else { return .malformed("\(kind) without target") }
+            return file(FileOperation(rawValue: kind) ?? .setmode, OperationSemantics.attributes(t))
+        case "setattrlist":
+            guard let t = J.file(body["target"]) else { return .malformed("setattrlist without target") }
+            // Only the attributes chmod, chown and chmod +a would change; times, Finder info and the
+            // like are not recorded. No attrlist.commonattr (an unexpected JSON shape) is malformed,
+            // so it shows in the parser's counts instead of dropping every such change unseen.
+            guard let common = J.int((body["attrlist"] as? [String: Any])?["commonattr"]).map({ UInt32(truncatingIfNeeded: $0) }) else {
+                return .malformed("setattrlist without attrlist.commonattr")
+            }
+            guard let op = OperationSemantics.setattrlistOperation(commonattr: common) else {
+                return .ignored("setattrlist without permission or owner attributes")
+            }
+            return file(op, OperationSemantics.attributes(t))
+        case "mount":
+            // es_event_mount_t: the file system's statfs; f_mntonname is where it is mounted.
+            guard let mountPoint = J.string((body["statfs"] as? [String: Any])?["f_mntonname"]) else {
+                return .malformed("mount without statfs.f_mntonname")
+            }
+            return file(.mount, OperationSemantics.mount(mountPoint: mountPoint))
         case "exec":
             guard let targetObject = body["target"] as? [String: Any], var target = EsloggerParser.process(targetObject) else {
                 return .malformed("exec without target")

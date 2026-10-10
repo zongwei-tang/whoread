@@ -452,14 +452,16 @@ public final class DaemonCore: @unchecked Sendable {
         analyzer.ignoredPIDs = [getpid()]
 
         // The previous instance died while AUTH events were subscribed: the kernel killed it for a missed
-        // deadline, it crashed, or the Mac lost power. Enforcement is never switched off automatically
+        // deadline (kill mode), its watchdog exited it with the file handler stuck (fail-closed mode, see
+        // NativeHandlerWatchdog), it crashed, or the Mac lost power. Enforcement is never switched off automatically
         // (ask mode): it stays as the user set it, and the stop is reported until the next clean stop.
         var unclean = (try? store.value(forKey: DaemonCore.uncleanStopKey))?.flatMap { String(data: $0, encoding: .utf8) }
         var marker = stat()
         if !config.inMemoryStore, lstat(config.authArmedMarkerPath, &marker) == 0 {
             // unlink, not removeItem: never a recursive delete, and a link goes, not its target.
             unlink(config.authArmedMarkerPath)
-            let note = "the previous daemon stopped while enforcing (killed for a missed AUTH deadline, a crash or a power loss); "
+            let note = "the previous daemon stopped while enforcing (killed for a missed AUTH deadline, exited by its watchdog "
+                + "with the event handler stuck, a crash or a power loss); "
                 + "found at start \(ISO8601DateFormatter().string(from: now))"
             unclean = note
             try? store.setValue(Data(note.utf8), forKey: DaemonCore.uncleanStopKey)
@@ -1665,7 +1667,8 @@ public final class DaemonCore: @unchecked Sendable {
             unreadAlerts: counts.unreadAlerts, lastEventAt: stats.lastEventAt, eventsProcessed: stats.processed,
             writerDropped: writer.droppedCount, monitoredPrefixes: analyzer.classifier.prefixes.count,
             homeDirectories: homes, rulesLoadError: rulesError, sourceDroppedEvents: source.droppedEvents,
-            sourceKernelDrops: source.kernelDroppedEvents, pendingAsks: askBroker.openRequests, uncleanStop: unclean)
+            sourceKernelDrops: source.kernelDroppedEvents, pendingAsks: askBroker.openRequests, uncleanStop: unclean,
+            sourceDeadlineMissMode: stats.source.deadlineMissMode)
     }
 }
 

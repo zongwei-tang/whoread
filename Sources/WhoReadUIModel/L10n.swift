@@ -65,6 +65,7 @@ public enum L: String, CaseIterable, Sendable {
     case yes, no, accessReadWrite
     // Operations
     case opOpen, opClose, opRename, opClone, opCopyfile, opLink, opUnlink, opTruncate, opExchangedata, opReaddir, opCreate
+    case opSetmode, opSetowner, opSetacl, opMount
     // Errors
     case errNotPermitted, errUnavailable, errVersionMismatchFormat, errDaemonFormat, errAdminFormat
 }
@@ -328,6 +329,10 @@ public enum L10n {
         .opExchangedata: ("exchange", "交换内容"),
         .opReaddir: ("list", "列目录"),
         .opCreate: ("create", "创建"),
+        .opSetmode: ("change permissions", "修改权限"),
+        .opSetowner: ("change owner", "修改所有者"),
+        .opSetacl: ("change ACL", "修改 ACL"),
+        .opMount: ("mount over", "挂载覆盖"),
 
         .errNotPermitted: ("Not permitted. Changes that weaken protection need the WhoRead app or sudo.", "没有权限：削弱保护的修改需要 WhoRead 应用或 sudo。"),
         .errUnavailable: ("The WhoRead daemon is not running.", "WhoRead 守护进程没有运行。"),
@@ -367,6 +372,10 @@ public enum L10n {
         case .exchangedata: return t(.opExchangedata, language)
         case .readdir: return t(.opReaddir, language)
         case .create: return t(.opCreate, language)
+        case .setmode: return t(.opSetmode, language)
+        case .setowner: return t(.opSetowner, language)
+        case .setacl: return t(.opSetacl, language)
+        case .mount: return t(.opMount, language)
         }
     }
 

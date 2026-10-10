@@ -31,8 +31,10 @@ public struct PathNormalizer: Sendable {
         self.firmlinkRoots = firmlinkRoots
         self.rootAliases = rootAliases
         self.homeDirectories = []
-        // Homes go through the same canonicalization so `~` expansion matches event paths.
-        self.homeDirectories = homeDirectories.map { self.normalize($0) }
+        // Homes go through the same canonicalization so `~` expansion matches event paths. A home and
+        // its realpath spelling (HomeDirectories adds both) can normalize to one path: keep it once.
+        var seen = Set<String>()
+        self.homeDirectories = homeDirectories.map { self.normalize($0) }.filter { seen.insert($0).inserted }
     }
 
     /// Canonical display form. Keeps the original case.
@@ -192,8 +194,13 @@ public struct RealpathSymlinkResolver: SymlinkResolver {
         return String(cString: resolved)
     }
 
-    /// lstat-based walk; does not follow directory links (their targets are reported instead).
+    /// lstat-based walk; does not follow directory links (their targets are reported instead). A link
+    /// to somewhere inside `dir` is not reported, whether its target is spelled like `dir` or like
+    /// `dir`'s realpath (`dir` is a normalized prefix; the targets are realpaths, so for a home under
+    /// /home they start with /System/Volumes/Data/home).
     public func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] {
+        let roots = [dir] + (resolve(dir).map { [$0] } ?? [])
+        func inside(_ target: String) -> Bool { roots.contains { target == $0 || target.hasPrefix($0 + "/") } }
         var out: [(String, String)] = []
         var visited = 0
         func walk(_ d: String, _ depth: Int) {
@@ -206,7 +213,7 @@ public struct RealpathSymlinkResolver: SymlinkResolver {
                 guard lstat(p, &st) == 0 else { continue }
                 let type = UInt32(st.st_mode) & 0o170000
                 if type == 0o120000 {
-                    if let target = resolve(p), !target.hasPrefix(dir + "/") && target != dir { out.append((p, target)) }
+                    if let target = resolve(p), !inside(target) { out.append((p, target)) }
                 } else if type == 0o040000 {
                     walk(p, depth + 1)
                 }

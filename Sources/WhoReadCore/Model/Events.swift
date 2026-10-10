@@ -16,6 +16,14 @@ public enum FileOperation: String, Codable, CaseIterable, Sendable {
     case readdir
     /// A brand-new file, directory or link was created at a path (AUTH_CREATE). Enforcement only.
     case create
+    /// Permission bits changed (chmod, or setattrlist with ATTR_CMN_ACCESSMASK).
+    case setmode
+    /// Owner or group changed (chown, or setattrlist with an owner or group attribute).
+    case setowner
+    /// ACL set or cleared (chmod +a, or setattrlist with ATTR_CMN_EXTENDED_SECURITY).
+    case setacl
+    /// A file system was mounted on the path, hiding what was there.
+    case mount
 }
 
 /// The part a path plays in an operation.
@@ -41,6 +49,20 @@ public struct FileTarget: Codable, Hashable, Sendable {
         self.access = access
         self.truncated = truncated
         self.isDirectory = isDirectory
+    }
+
+    /// Whether `operation` can move this path's content (for a directory, everything below it) to
+    /// another path: the source of a data-carrying operation, and an existing directory a rename
+    /// lands on. A rename onto a non-empty directory only succeeds as a swap (renamex_np RENAME_SWAP),
+    /// which moves the directory to the source path; ES reports no flags, and may report only that
+    /// direction. An existing *file* destination is not carried: atomic saves rename a temp file over it.
+    public func carriesContent(in operation: FileOperation) -> Bool {
+        guard OperationSemantics.carryingOperations.contains(operation) else { return false }
+        switch role {
+        case .source: return true
+        case .destination: return operation == .rename && isDirectory == true
+        case .target: return false
+        }
     }
 }
 
@@ -80,8 +102,15 @@ public struct ReportedPath: Sendable, Hashable {
 /// Data-carrying operations (rename, clone, copyfile, link, exchangedata) count as a *read* of
 /// their source: they can move sensitive content outside the monitored prefixes without an open.
 public enum OperationSemantics {
+    /// Operations that carry a source's content (and, for directories, everything below it).
+    public static let carryingOperations: Set<FileOperation> = [.rename, .clone, .link, .exchangedata, .copyfile]
+
     public static let fread: UInt32 = 0x1
     public static let fwrite: UInt32 = 0x2
+    /// O_TRUNC (sys/fcntl.h). The kernel fflag keeps the open(2) bits above FREAD/FWRITE, and XNU
+    /// authorizes WRITE_DATA for O_TRUNC whatever the access mode (vn_authorize_open_existing), so
+    /// open(O_RDONLY|O_TRUNC) can empty a file without FWRITE: a write.
+    public static let ftrunc: UInt32 = 0x400
     /// O_DIRECTORY as carried in the kernel fflag (the documented eslogger sample fflag 0x1100001
     /// is FREAD | O_DIRECTORY | O_CLOEXEC).
     public static let fdirectory: UInt32 = 0x0010_0000
@@ -92,7 +121,7 @@ public enum OperationSemantics {
     public static func openAccess(fflag: UInt32) -> AccessSet {
         var a: AccessSet = []
         if fflag & fread != 0 { a.insert(.read) }
-        if fflag & fwrite != 0 { a.insert(.write) }
+        if fflag & (fwrite | ftrunc) != 0 { a.insert(.write) }
         // An fflag with neither bit (O_EVTONLY-style opens) is metadata-only.
         return a
     }
@@ -101,10 +130,11 @@ public enum OperationSemantics {
     /// rather than as a read of the category.
     public static func open(_ file: ReportedPath, fflag: UInt32) -> (FileOperation, [FileTarget]) {
         let dir = file.isDirectory ?? (fflag & fdirectory != 0)
-        if dir && fflag & fwrite == 0 {
+        let access = openAccess(fflag: fflag)
+        if dir && !access.contains(.write) {
             return (.readdir, readdir(file))
         }
-        return (.open, [FileTarget(path: file.path, role: .target, access: openAccess(fflag: fflag), truncated: file.truncated,
+        return (.open, [FileTarget(path: file.path, role: .target, access: access, truncated: file.truncated,
                                    isDirectory: file.isDirectory)])
     }
 
@@ -121,10 +151,14 @@ public enum OperationSemantics {
         close(ReportedPath(path, truncated: truncated), modified: modified)
     }
 
+    /// A rename. An existing directory at the destination is read as well as written: a rename can only
+    /// land on a non-empty one as a swap, which moves it (and everything below it) to the source path
+    /// (see `FileTarget.carriesContent`). An existing file there is only overwritten (atomic saves).
     public static func rename(_ source: ReportedPath, _ destination: ReportedPath) -> [FileTarget] {
         [
             FileTarget(path: source.path, role: .source, access: .readWrite, truncated: source.truncated, isDirectory: source.isDirectory),
-            FileTarget(path: destination.path, role: .destination, access: .write, truncated: destination.truncated),
+            FileTarget(path: destination.path, role: .destination, access: destination.isDirectory == true ? .readWrite : .write,
+                       truncated: destination.truncated, isDirectory: destination.isDirectory),
         ]
     }
 
@@ -182,6 +216,44 @@ public enum OperationSemantics {
     }
 
     public static func create(path: String) -> [FileTarget] { create(ReportedPath(path)) }
+
+    /// A change of permission bits, owner or ACL (setmode, setowner, setacl): a write to the file's
+    /// metadata. `chmod 644 ~/.ssh/id_ed25519` or an ACL granting everyone read exposes a key to the
+    /// other users of the Mac without any open.
+    public static func attributes(_ file: ReportedPath) -> [FileTarget] {
+        [FileTarget(path: file.path, role: .target, access: .write, truncated: file.truncated, isDirectory: file.isDirectory)]
+    }
+
+    /// setattrlist(2) can change the same metadata as chmod, chown and chmod +a, but ES reports it as
+    /// its own event. Which operation a set of common attributes (`attrlist.commonattr`) amounts to, or
+    /// nil when it changes none of them (times, Finder info, flags…).
+    public static func setattrlistOperation(commonattr: UInt32) -> FileOperation? {
+        if commonattr & attrAccessMask != 0 { return .setmode }
+        if commonattr & attrExtendedSecurity != 0 { return .setacl }
+        if commonattr & (attrOwnerID | attrGroupID | attrUUID | attrGroupUUID) != 0 { return .setowner }
+        return nil
+    }
+
+    // sys/attr.h common attributes.
+    public static let attrOwnerID: UInt32 = 0x0000_8000
+    public static let attrGroupID: UInt32 = 0x0001_0000
+    public static let attrAccessMask: UInt32 = 0x0002_0000
+    public static let attrExtendedSecurity: UInt32 = 0x0040_0000
+    public static let attrUUID: UInt32 = 0x0080_0000
+    public static let attrGroupUUID: UInt32 = 0x0100_0000
+
+    /// A file system mounted on `mountPoint` (statfs f_mntonname) replaces what is visible there: a
+    /// write to it, and to everything below it (Analyzer: a mount on ~/.config is a write to gh,
+    /// gcloud…), except on a home or above one, where network and FileVault homes are mounted at
+    /// login. Nor is the usual place for volumes, /Volumes/<name>, judged: every disk, disk image,
+    /// share or decrypted vault is mounted there (the "volumes" category covers what is on them, not
+    /// their arrival), and a mount over a monitored path inside a volume is still seen.
+    public static func mount(mountPoint: String) -> [FileTarget] {
+        guard !mountPoint.isEmpty else { return [] }
+        let parts = PathNormalizer.components(PathNormalizer().normalize(mountPoint))
+        if parts.count == 2 && PathNormalizer.fold(parts[0]) == "volumes" { return [] }
+        return [FileTarget(path: mountPoint, role: .target, access: .write, isDirectory: true)]
+    }
 
     /// Joins a destination directory and a file name the way ES reports "new path" destinations.
     public static func join(dir: String, name: String) -> String {

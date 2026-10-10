@@ -15,11 +15,12 @@ enum NativeMutePlan {
 
     /// Muting applies to the path as VFS sees it (F_GETPATH, after symlink resolution). Register the
     /// catalog spelling, for non-ASCII paths both its NFC and NFD forms (APFS keeps whatever
-    /// normalization a name was created with), and the resolved on-disk spelling (realpath: on-disk
-    /// case, symlinks resolved) when the path exists and `accept` takes it. Never "/" (a link to the
-    /// root, as PathClassifier skips too): an inverted "/" prefix would select every file event on the
-    /// system. Nothing for a path with a NUL: realpath and es_mute_path see the C string cut there, so
-    /// "~/\0x" would select the whole home.
+    /// normalization a name was created with), the resolved on-disk spelling (realpath: on-disk
+    /// case, symlinks resolved) when the path exists and `accept` takes it, and each of them under the
+    /// data volume's root (`firmlinkSpellings`). Never "/" (a link to the root, as PathClassifier skips
+    /// too): an inverted "/" prefix would select every file event on the system. Nothing for a path
+    /// with a NUL: realpath and es_mute_path see the C string cut there, so "~/\0x" would select the
+    /// whole home.
     static func variants(_ p: String, resolve: (String) -> String?, accept: (String) -> Bool = { _ in true }) -> [String] {
         guard !p.utf8.contains(0) else { return [] }
         var out = [p]
@@ -28,21 +29,147 @@ enum NativeMutePlan {
             out.append(p.precomposedStringWithCanonicalMapping)
         }
         if let r = resolve(p), r != "/", accept(r) { out.append(r) }
-        return out
+        return out + out.flatMap(firmlinkSpellings)
+    }
+
+    /// `p` under /System/Volumes/Data, unless it is already there. PathNormalizer folds that root
+    /// away from every path, firmlinked or not, so classification never sees it; VFS does report it
+    /// for data-volume paths outside the firmlinks (a home under /home, which is a symlink to the
+    /// autofs mount point /System/Volumes/Data/home, or one created under /System/Volumes/Data
+    /// directly). Without it those homes would never be selected. For a firmlinked path (/Users,
+    /// /Volumes, /private…) it is the same file, so selecting it costs nothing; elsewhere it names a
+    /// path that does not exist. The eslogger prefilter adds the same spelling.
+    static func firmlinkSpellings(_ p: String) -> [String] {
+        guard p.hasPrefix("/"), p != "/" else { return [] }
+        let key = PathNormalizer.fold(p)
+        return PathNormalizer.defaultFirmlinkRoots.compactMap { root in
+            let r = PathNormalizer.fold(root)
+            return key == r || key.hasPrefix(r + "/") ? nil : root + p
+        }
     }
 
     /// A prefix's resolved spelling passes the same filters as a link target in PathClassifier: never
     /// /dev (`~/.zsh_history -> /dev/null` would select every /dev/null open on the system), a home,
-    /// or a directory containing a home or the prefix itself. Literal ancestors match one path only.
+    /// or a directory containing a home or the prefix itself. Those filters compare normalized paths
+    /// (the homes are normalized, as the classifier's are), so the resolved spelling is normalized
+    /// before it is judged and registered as resolved: realpath of a home under /home is
+    /// /System/Volumes/Data/home/…, which only the normalized form recognises as inside a home.
+    /// Literal ancestors match one path only.
     static func plan(prefixes: [String], ancestors: [String], homes: [String] = [],
+                     normalize: (String) -> String = { $0 },
                      resolve: (String) -> String?) -> (prefixes: Set<Path>, literals: Set<Path>) {
         (Set(prefixes.flatMap { p in
-            variants(p, resolve: resolve) {
-                PathClassifier.isMonitorableTarget($0) && PathClassifier.isUsableLinkTarget($0, inside: p, homes: homes)
+            variants(p, resolve: resolve) { r in
+                let n = normalize(r)
+                return PathClassifier.isMonitorableTarget(n) && PathClassifier.isUsableLinkTarget(n, inside: p, homes: homes)
             }
          }.map(Path.init)),
          Set(ancestors.flatMap { variants($0, resolve: resolve) }.map(Path.init)))
     }
+}
+
+/// What the kernel does with an AUTH message the file client does not answer by its deadline
+/// (es_deadline_miss_mode_t; raw values in the header's declaration order). Outside the
+/// EndpointSecurity guard so it is unit-tested on any host.
+public enum NativeDeadlineMissMode: UInt32, Sendable, CaseIterable {
+    /// Default, and the only mode before macOS 27: the client is killed and the access allowed.
+    case kill = 0
+    /// The access is denied and the client lives. Also: an AUTH message dropped from a full queue is
+    /// denied instead of allowed.
+    case failClosed = 1
+    /// The access is allowed and the client lives.
+    case failOpen = 2
+
+    /// How status and logs name it (`SourceState.deadlineMissMode`).
+    public var name: String {
+        switch self {
+        case .kill: return "kill"
+        case .failClosed: return "fail-closed"
+        case .failOpen: return "fail-open"
+        }
+    }
+
+    public init?(name: String) {
+        guard let m = NativeDeadlineMissMode.allCases.first(where: { $0.name == name }) else { return nil }
+        self = m
+    }
+
+    /// `whoread status` text for a reported mode name.
+    public static func statusDescription(_ name: String) -> String {
+        switch NativeDeadlineMissMode(name: name) {
+        case .failClosed?:
+            return "fail-closed (an access not answered in time is denied; the daemon is not killed)"
+        case .kill?:
+            return "kill (a missed deadline kills the daemon and allows that access, and accesses the kernel drops "
+                + "from a full queue are allowed; fail-closed needs macOS 27)"
+        case .failOpen?:
+            return "fail-open (WARNING: an access not answered in time is allowed)"
+        case nil:
+            return "\(name) (could not be read back)"
+        }
+    }
+
+    /// Whether the kernel denied the accesses whose deadline the daemon missed (only in fail-closed).
+    public static func missesDenied(_ name: String?) -> Bool { name.flatMap(NativeDeadlineMissMode.init(name:)) == .failClosed }
+
+    /// The file client always asks for fail-closed: unanswered means denied, and enforcement is never
+    /// switched off (in the default kill mode a missed deadline kills the client and allows the access,
+    /// and AUTH messages the kernel drops from a full queue are allowed). The price: a daemon whose
+    /// handler hangs is no longer killed and restarted by launchd; every access it is asked about is
+    /// denied at its deadline until it recovers, a kill switch turns enforcement off, or it is stopped.
+    static let wanted = NativeDeadlineMissMode.failClosed
+
+    /// The outcome of `configure`: the mode in force (nil if it could not be read back) and what to log
+    /// when it is not the wanted one.
+    struct Outcome: Equatable {
+        let mode: NativeDeadlineMissMode?
+        let problem: String?
+
+        /// For `SourceState.deadlineMissMode`.
+        var name: String { mode?.name ?? "unknown" }
+    }
+
+    /// Sets `wanted` and reads back what is in force. `set` and `get` are nil when the running system
+    /// lacks es_set_deadline_miss_mode / es_get_deadline_miss_mode (before macOS 27): the kernel then
+    /// uses kill, which is not a problem to report on every start. `set` returns whether it succeeded;
+    /// `get` returns the raw mode, or nil when it failed.
+    static func configure(set: ((UInt32) -> Bool)?, get: (() -> UInt32?)?) -> Outcome {
+        guard let set else {
+            // A getter without a setter would be a strange libEndpointSecurity: trust it if it answers.
+            if let raw = get?(), let mode = NativeDeadlineMissMode(rawValue: raw) { return Outcome(mode: mode, problem: nil) }
+            return Outcome(mode: .kill, problem: nil)
+        }
+        let ok = set(wanted.rawValue)
+        guard let get else {
+            return Outcome(mode: ok ? nil : .kill,
+                           problem: ok ? "es_get_deadline_miss_mode is missing; the deadline miss mode could not be verified"
+                                       : "es_set_deadline_miss_mode(fail-closed) failed; the kernel keeps the default (kill)")
+        }
+        guard let raw = get() else {
+            return Outcome(mode: nil, problem: ok ? "es_get_deadline_miss_mode failed after setting fail-closed"
+                                                  : "es_set_deadline_miss_mode(fail-closed) and es_get_deadline_miss_mode failed")
+        }
+        guard let mode = NativeDeadlineMissMode(rawValue: raw) else {
+            return Outcome(mode: nil, problem: "es_get_deadline_miss_mode returned an unknown mode \(raw)")
+        }
+        if mode == wanted { return Outcome(mode: mode, problem: nil) }
+        return Outcome(mode: mode, problem: (ok ? "es_set_deadline_miss_mode(fail-closed) succeeded but the client is in "
+                                                : "es_set_deadline_miss_mode(fail-closed) failed; the client is in ") + mode.name)
+    }
+
+    /// Looks a libEndpointSecurity function up at run time: the macOS 27 ones are not declared by the
+    /// SDKs older Xcode versions build with, and calling them directly would also need macOS 27 to load.
+    static func symbol(_ name: String) -> UnsafeMutableRawPointer? {
+        #if canImport(Darwin)
+        // RTLD_DEFAULT (dlfcn.h), which Swift does not import: every image loaded in the process.
+        return dlsym(UnsafeMutableRawPointer(bitPattern: -2), name)
+        #else
+        return nil
+        #endif
+    }
+
+    static let setterName = "es_set_deadline_miss_mode"
+    static let getterName = "es_get_deadline_miss_mode"
 }
 
 /// Denials queued for recording (the AUTH callback only counts under a lock). Every denial is
@@ -218,11 +345,14 @@ final class NativeHeldMessages: @unchecked Sendable {
         return true
     }
 
+    /// How long `denyAll` waits by default for answers still running elsewhere.
+    static let denyAllWait: TimeInterval = 2
+
     /// Denies everything still held, then waits (bounded) for answers already running elsewhere (a
     /// backstop, the broker queue) to return. Returns how many it denied: none when the broker's
     /// denyAll kept its contract.
     @discardableResult
-    func denyAll(waitAtMost timeout: TimeInterval = 2) -> Int {
+    func denyAll(waitAtMost timeout: TimeInterval = NativeHeldMessages.denyAllWait) -> Int {
         lock.lock()
         let all = Array(held.values)
         lock.unlock()
@@ -232,6 +362,155 @@ final class NativeHeldMessages: @unchecked Sendable {
         while inFlight > 0 && lock.wait(until: until) {}
         lock.unlock()
         return denied
+    }
+}
+
+/// es_delete_client is the header's one exception to "every es_* function is safe from any thread": it
+/// must not run concurrently with any other es_* call on the client, es_respond_* included. Those come
+/// from the handler block (AUTH answers; es_exec_arg for the process client's execs) and from other
+/// queues (a held message's answer). Each runs
+/// inside `use`; `close` lets nothing new in and waits for what is inside, so the caller then has the
+/// exclusive access es_delete_client needs. One gate per client, never reopened. Outside the
+/// EndpointSecurity guard so it is unit-tested on any host.
+final class NativeClientGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var inside = 0
+    private var closed = false
+
+    /// Runs `body` unless the gate is closed. False when it did not run: the client is being deleted.
+    @discardableResult
+    func use(_ body: () -> Void) -> Bool {
+        condition.lock()
+        guard !closed else {
+            condition.unlock()
+            return false
+        }
+        inside += 1
+        condition.unlock()
+        body()
+        condition.lock()
+        inside -= 1
+        if inside == 0 { condition.broadcast() }
+        condition.unlock()
+        return true
+    }
+
+    /// Lets nothing new in and waits (bounded) for the calls inside to return. False if one was still
+    /// running at the timeout: the client must not be deleted then.
+    func close(waitAtMost timeout: TimeInterval) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        closed = true
+        let until = Date().addingTimeInterval(timeout)
+        while inside > 0 {
+            if !condition.wait(until: until) { return inside == 0 }
+        }
+        return true
+    }
+}
+
+/// Liveness of the file client's handler block, which the kernel calls serially: one call that never
+/// returns holds up every message behind it. In the default kill mode the kernel kills the daemon at
+/// the first missed AUTH deadline and launchd starts a new one. In fail-closed mode (macOS 27) nothing
+/// does: every AUTH access behind the stuck call is denied at its deadline, for as long as the daemon
+/// lives, and nothing is recorded. The watchdog notices one call that has been running far longer than
+/// any deadline and calls `onStall` (the source logs and exits, so launchd starts a fresh daemon; the
+/// enforcement setting is untouched, and the auth-armed marker left behind makes the next start report
+/// an unclean stop). Only a call that entered and has not returned counts, never idle time. Uptime
+/// clock: it pauses while the Mac sleeps. Outside the EndpointSecurity guard so it is unit-tested on
+/// any host.
+final class NativeHandlerWatchdog: @unchecked Sendable {
+    /// No AUTH deadline comes near this (they are seconds to tens of seconds). A restart costs the
+    /// ancestry of processes started before it, so only a real wedge may cause one.
+    static let minimumStall: TimeInterval = 120
+    /// And a stall lasts at least this many times the longest AUTH deadline seen so far…
+    static let deadlineFactor: Double = 4
+    /// …up to this, so that one absurd deadline cannot switch the watchdog off.
+    static let maximumStall: TimeInterval = 900
+    /// How often the timer looks.
+    static let interval: TimeInterval = 10
+
+    private let lock = NSLock()
+    /// When the call inside started (uptime ns), nil while none is.
+    private var enteredAt: UInt64?
+    /// The longest time an AUTH message was given to its deadline (ns).
+    private var longestDeadline: UInt64 = 0
+    private var fired = false
+    private var cancelled = false
+    private var timer: DispatchSourceTimer?
+    private let now: () -> UInt64
+
+    init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) {
+        self.now = now
+    }
+
+    /// A handler call starts. `deadlineSpan`: for an AUTH message, the nanoseconds between its creation
+    /// and its deadline; 0 otherwise.
+    func enter(deadlineSpan: UInt64 = 0) {
+        let t = now()
+        lock.lock()
+        enteredAt = t
+        if deadlineSpan > longestDeadline { longestDeadline = deadlineSpan }
+        lock.unlock()
+    }
+
+    /// The handler call returned.
+    func leave() {
+        lock.lock()
+        enteredAt = nil
+        lock.unlock()
+    }
+
+    /// How long a call must have been inside to count as a stall.
+    var limit: TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        return limitLocked
+    }
+
+    private var limitLocked: TimeInterval {
+        let byDeadline = min(NativeHandlerWatchdog.deadlineFactor * Double(longestDeadline) / 1e9, NativeHandlerWatchdog.maximumStall)
+        return max(NativeHandlerWatchdog.minimumStall, byDeadline)
+    }
+
+    /// How long the call inside has been running, when that is past `limit`; nil otherwise. A stall is
+    /// reported once.
+    func stalled() -> TimeInterval? {
+        let t = now()
+        lock.lock(); defer { lock.unlock() }
+        guard !fired, !cancelled, let since = enteredAt, t > since else { return nil }
+        let inside = Double(t - since) / 1e9
+        guard inside >= limitLocked else { return nil }
+        fired = true
+        return inside
+    }
+
+    /// Looks every `interval` seconds (uptime) on `queue` until cancelled; `onStall` runs at most once.
+    func start(every interval: TimeInterval = NativeHandlerWatchdog.interval, queue: DispatchQueue,
+               onStall: @escaping @Sendable (TimeInterval) -> Void) {
+        lock.lock()
+        // Checked before the timer exists: libdispatch traps on releasing a source never resumed.
+        guard !cancelled, timer == nil else {
+            lock.unlock()
+            return
+        }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(Int(interval * 100)))
+        t.setEventHandler { [weak self] in
+            if let seconds = self?.stalled() { onStall(seconds) }
+        }
+        timer = t
+        lock.unlock()
+        t.resume()
+    }
+
+    /// Stops looking, for good (the client is going away; any thread). A stall is never reported after.
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let t = timer
+        timer = nil
+        lock.unlock()
+        t?.cancel()
     }
 }
 
@@ -248,14 +527,17 @@ import WhoReadIPC
 
 // Native Endpoint Security source (monitoring + enforcement).
 //
-// NOT YET COMPILED: written on a Linux host against the API facts in docs/RESEARCH.md and
-// docs/research/endpoint-security-api.md (DocC + SDK header text). First compile on the Mac.
+// Compiled against the real SDK headers (macOS 27 SDK; the macOS 27 calls are looked up at run time,
+// so older SDKs build it too) and checked against their documentation. Its ES calls only run in the
+// test VM: the message conversion is unit-tested on hand-built messages (NativeFindingsEngineTests).
 //
 // Two clients, as the brief requires:
 // - file client: target-path muting INVERTED, so only events touching monitored prefixes (or the
-//   literal ancestor directories) are delivered. NOTIFY events always; AUTH events only while
-//   enforcement is active. A multi-target event (rename/clone/copyfile/link/exchangedata) is
-//   delivered if ANY of its targets is selected (header), so covering source paths is enough.
+//   literal ancestor directories) are delivered (MOUNT supports no target muting: every mount is).
+//   NOTIFY events always; AUTH events only while enforcement is active. Deadline miss mode
+//   fail-closed on macOS 27 and later (NativeDeadlineMissMode). A multi-target event
+//   (rename/clone/copyfile/link/exchangedata) is delivered if ANY of its targets is selected
+//   (header), so covering source paths is enough.
 //   AUTH_CREATE covers new files (open(O_CREAT) of a new file has no AUTH_OPEN). Listings and
 //   directory opens are never blocked, so AUTH_READDIR is not subscribed.
 // - process client: NOTIFY_FORK/EXEC/EXIT, no muting configuration shared with the file client.
@@ -275,10 +557,19 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private let stateBox = StateBox()
     private var sink: EventSink?
 
-    // ES client handles are only created/deleted on `clientThread` (es_delete_client must be called
-    // from the thread that called es_new_client).
+    // ES client handles are only created/deleted on `clientThread`, so a delete never races a create,
+    // a mute or another delete (es_delete_client needs exclusive access to its client).
     private var fileClient: OpaquePointer?
     private var procClient: OpaquePointer?
+    /// The clients' gates (client thread only). The file client's AUTH handler and held answers call
+    /// es_* functions (respond, retain, release); the process client's handler calls es_exec_arg_count
+    /// and es_exec_arg on every exec.
+    private var fileGate: NativeClientGate?
+    private var procGate: NativeClientGate?
+    /// The file client's handler watchdog, armed once the client is connected. Under `lock`: stop()
+    /// cancels it before waiting for the client thread.
+    private var fileWatchdog: NativeHandlerWatchdog?
+    private static let watchdogQueue = DispatchQueue(label: "whoread.native.watchdog", qos: .utility)
     private let clientThread = ClientThread()
     private let eventQueue = DispatchQueue(label: "whoread.native.events", qos: .userInitiated)
     private let deniedQueue = DispatchQueue(label: "whoread.native.denied", qos: .utility)
@@ -313,6 +604,13 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private var lastCacheClear = Date.distantPast
     private var cacheClearPending = false
 
+    /// How long `delete` waits for the es_* calls still running on a client before giving up on it.
+    static let deleteWait: TimeInterval = 1
+    /// How long `stop` waits for the client thread. It covers closeAsks' bounded wait and both clients'
+    /// deletes (`stopWaitCovers`), plus some for the broker's own denyAll, so that held accesses are
+    /// answered and the clients deleted by us before the process exits.
+    static let stopWait: TimeInterval = 5
+    static var stopWaitCovers: TimeInterval { NativeHeldMessages.denyAllWait + 2 * deleteWait }
     private static let initialRetryDelay: TimeInterval = 5
     private static let maxRetryDelay: TimeInterval = 60
     /// NOTIFY events queued for analysis. Past this, new ones are dropped (and counted) instead of
@@ -346,15 +644,22 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     // MARK: - Event lists
 
+    // SETMODE, SETOWNER, SETACL and SETATTRLIST support target-path muting (header list), so only
+    // monitored paths are delivered. MOUNT does not: every mount on the system is delivered (they are
+    // rare), and only a mount point at or inside a monitored prefix classifies.
     static let notifyFileEvents: [es_event_type_t] = [
         ES_EVENT_TYPE_NOTIFY_OPEN, ES_EVENT_TYPE_NOTIFY_CLOSE, ES_EVENT_TYPE_NOTIFY_RENAME, ES_EVENT_TYPE_NOTIFY_CLONE,
         ES_EVENT_TYPE_NOTIFY_COPYFILE, ES_EVENT_TYPE_NOTIFY_LINK, ES_EVENT_TYPE_NOTIFY_UNLINK, ES_EVENT_TYPE_NOTIFY_TRUNCATE,
         ES_EVENT_TYPE_NOTIFY_EXCHANGEDATA, ES_EVENT_TYPE_NOTIFY_CREATE,
+        ES_EVENT_TYPE_NOTIFY_SETMODE, ES_EVENT_TYPE_NOTIFY_SETOWNER, ES_EVENT_TYPE_NOTIFY_SETACL, ES_EVENT_TYPE_NOTIFY_SETATTRLIST,
+        ES_EVENT_TYPE_NOTIFY_MOUNT,
     ]
     static let authFileEvents: [es_event_type_t] = [
         ES_EVENT_TYPE_AUTH_OPEN, ES_EVENT_TYPE_AUTH_RENAME, ES_EVENT_TYPE_AUTH_CLONE, ES_EVENT_TYPE_AUTH_COPYFILE,
         ES_EVENT_TYPE_AUTH_LINK, ES_EVENT_TYPE_AUTH_UNLINK, ES_EVENT_TYPE_AUTH_TRUNCATE, ES_EVENT_TYPE_AUTH_EXCHANGEDATA,
         ES_EVENT_TYPE_AUTH_CREATE,
+        ES_EVENT_TYPE_AUTH_SETMODE, ES_EVENT_TYPE_AUTH_SETOWNER, ES_EVENT_TYPE_AUTH_SETACL, ES_EVENT_TYPE_AUTH_SETATTRLIST,
+        ES_EVENT_TYPE_AUTH_MOUNT,
     ]
     static let processEvents: [es_event_type_t] = [ES_EVENT_TYPE_NOTIFY_FORK, ES_EVENT_TYPE_NOTIFY_EXEC, ES_EVENT_TYPE_NOTIFY_EXIT]
 
@@ -369,25 +674,37 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     public func stop() {
         // A clean stop is not a death while enforcing (see DaemonCore's start-up check).
         disarm()
+        // A stop that takes a while is no stall: the watchdog must not exit under it.
+        lock.lock()
+        let watchdog = fileWatchdog
+        lock.unlock()
+        watchdog?.cancel()
         // Waits (bounded): the process exits right after Daemon.stop(), and held accesses must be
         // denied and the clients deleted by us first, not left to the kernel's teardown.
-        clientThread.runAndWait(timeout: 3) {
+        clientThread.runAndWait(timeout: NativeESSource.stopWait) {
             // After this, a retry that was already queued finds `stopped` and creates nothing.
             self.stopped = true
             self.retryTimer?.cancel()
             self.retryTimer = nil
+            // Armed by a connect that ran after the cancel above.
+            self.disarmWatchdog()
             self.closeAsks()
             if let c = self.fileClient {
                 _ = es_unsubscribe_all(c)
-                _ = es_delete_client(c)
+                NativeESSource.delete(c, gate: self.fileGate)
             }
             if let c = self.procClient {
                 _ = es_unsubscribe_all(c)
-                _ = es_delete_client(c)
+                NativeESSource.delete(c, gate: self.procGate)
             }
             self.fileClient = nil
             self.procClient = nil
-            self.publish { $0.running = false }
+            self.fileGate = nil
+            self.procGate = nil
+            self.publish {
+                $0.running = false
+                $0.deadlineMissMode = nil
+            }
         }
     }
 
@@ -401,18 +718,29 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private func connect() {
         guard !stopped, fileClient == nil else { return }
         var proc: OpaquePointer?
-        let r1 = es_new_client(&proc) { [weak self] _, message in self?.handleProcess(message) }
+        let pGate = NativeClientGate()
+        let r1 = es_new_client(&proc, NativeESSource.gated(pGate) { [weak self] _, message in self?.handleProcess(message) })
         guard r1 == ES_NEW_CLIENT_RESULT_SUCCESS, let proc else {
             fail(r1)
             return
         }
+        procGate = pGate
         var file: OpaquePointer?
-        let r2 = es_new_client(&file) { [weak self] client, message in self?.handleFile(client, message) }
+        let gate = NativeClientGate()
+        let watchdog = NativeHandlerWatchdog()
+        let r2 = es_new_client(&file, NativeESSource.watched(watchdog) { [weak self] client, message in
+            self?.handleFile(client, message, gate)
+        })
         guard r2 == ES_NEW_CLIENT_RESULT_SUCCESS, let file else {
+            // Subscribed to nothing yet, so its handler never runs: no wait needed.
             _ = es_delete_client(proc)
+            procGate = nil
             fail(r2)
             return
         }
+        fileGate = gate
+        // Before anything is subscribed: the file client is the one that answers AUTH messages.
+        let deadlineMode = NativeESSource.setDeadlineMissMode(file)
         var token = NativeESSource.selfAuditToken()
         _ = es_mute_process(proc, &token)
         _ = es_mute_process(file, &token)
@@ -468,8 +796,39 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             $0.running = true
             $0.error = nil
             $0.hint = nil
+            $0.deadlineMissMode = deadlineMode.name
         }
-        Log.info("Endpoint Security clients connected (\(mutedPrefixes.count) prefixes, \(mutedLiterals.count) literal ancestors)")
+        lock.lock()
+        fileWatchdog = watchdog
+        lock.unlock()
+        watchdog.start(queue: NativeESSource.watchdogQueue) { NativeESSource.exitForStall($0) }
+        Log.info("Endpoint Security clients connected (\(mutedPrefixes.count) prefixes, \(mutedLiterals.count) literal ancestors, "
+                 + "deadline miss mode \(deadlineMode.name))")
+    }
+
+    /// es_set_deadline_miss_mode(file, FAIL_CLOSED) where the running macOS has it (27 and later),
+    /// verified with es_get_deadline_miss_mode. Looked up at run time and called through C function
+    /// pointers with the raw enum value, so the source still builds with SDKs that do not declare them.
+    /// Older systems keep the default: kill. Client thread (it logs).
+    static func setDeadlineMissMode(_ client: OpaquePointer) -> NativeDeadlineMissMode.Outcome {
+        typealias SetFn = @convention(c) (OpaquePointer, UInt32) -> UInt32
+        typealias GetFn = @convention(c) (OpaquePointer, UnsafeMutablePointer<UInt32>) -> UInt32
+        let success = ES_RETURN_SUCCESS.rawValue
+        let setter = NativeDeadlineMissMode.symbol(NativeDeadlineMissMode.setterName).map { unsafeBitCast($0, to: SetFn.self) }
+        let getter = NativeDeadlineMissMode.symbol(NativeDeadlineMissMode.getterName).map { unsafeBitCast($0, to: GetFn.self) }
+        let outcome = NativeDeadlineMissMode.configure(
+            set: setter.map { f in { mode in f(client, mode) == success } },
+            get: getter.map { f in {
+                var mode: UInt32 = .max
+                return f(client, &mode) == success ? mode : nil
+            } })
+        if let problem = outcome.problem {
+            Log.error("Endpoint Security deadline miss mode: \(problem)")
+        } else if setter == nil {
+            Log.info("Endpoint Security deadline miss mode: kill (es_set_deadline_miss_mode needs macOS 27): a missed AUTH "
+                     + "deadline kills the client and allows the access")
+        }
+        return outcome
     }
 
     private func fail(_ r: es_new_client_result_t) {
@@ -482,16 +841,80 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         }
     }
 
-    /// Setup failed after both clients exist: delete them (still on the creating thread) and retry.
+    /// Setup failed after both clients exist: delete them (on the client thread) and retry.
     private func abortSetup(_ proc: OpaquePointer, _ file: OpaquePointer, _ message: String) {
         disarm()
+        disarmWatchdog()
         closeAsks()
-        _ = es_delete_client(file)
-        _ = es_delete_client(proc)
+        _ = es_unsubscribe_all(file)
+        NativeESSource.delete(file, gate: fileGate)
+        // The process client may already be subscribed (a later step failed): its handler may be running.
+        _ = es_unsubscribe_all(proc)
+        NativeESSource.delete(proc, gate: procGate)
         procClient = nil
         fileClient = nil
+        fileGate = nil
+        procGate = nil
         report(error: message, hint: "Endpoint Security setup failed; retrying.")
         scheduleRetry()
+    }
+
+    /// es_delete_client once no other es_* call on the client is running (header: not safe concurrently
+    /// with any of them). If one still is after the wait, the client is not deleted under it: the process
+    /// is stopping (the kernel tears the client down), or a retry replaces it. Client thread.
+    static func delete(_ client: OpaquePointer, gate: NativeClientGate?) {
+        guard gate?.close(waitAtMost: deleteWait) ?? true else {
+            Log.error("Endpoint Security client not deleted: a call on it was still running after \(Int(deleteWait)) s")
+            return
+        }
+        _ = es_delete_client(client)
+    }
+
+    /// Cancels the file client's watchdog (client thread; stop() also cancels it from its own thread).
+    private func disarmWatchdog() {
+        lock.lock()
+        let w = fileWatchdog
+        fileWatchdog = nil
+        lock.unlock()
+        w?.cancel()
+    }
+
+    /// A handler block that tells `watchdog` when each call of `body` starts and returns. One lock and
+    /// one clock read each way: it runs for every message.
+    static func watched(_ watchdog: NativeHandlerWatchdog, _ body: @escaping es_handler_block_t) -> es_handler_block_t {
+        { client, message in
+            watchdog.enter(deadlineSpan: deadlineSpan(message))
+            defer { watchdog.leave() }
+            body(client, message)
+        }
+    }
+
+    /// For an AUTH message, the nanoseconds the kernel gave it from its creation to its deadline (Mach
+    /// ticks, header); 0 for a NOTIFY message, or when it cannot tell (no creation time).
+    static func deadlineSpan(_ message: UnsafePointer<es_message_t>) -> UInt64 {
+        guard message.pointee.action_type == ES_ACTION_TYPE_AUTH else { return 0 }
+        let deadline = message.pointee.deadline
+        let created = message.pointee.mach_time
+        guard created > 0, deadline > created, timebase.denom != 0 else { return 0 }
+        let ticks = deadline - created
+        let (ns, overflow) = ticks.multipliedReportingOverflow(by: UInt64(timebase.numer))
+        return overflow ? .max : ns / UInt64(timebase.denom)
+    }
+
+    /// The file client's handler is stuck (NativeHandlerWatchdog): exit, so launchd starts a fresh
+    /// daemon. Touches nothing the stuck call may hold (Log's lock, the source's locks, the client
+    /// thread): one write(2) to stderr, where Log writes as well, then _exit. The auth-armed marker
+    /// stays, so the next start reports an unclean stop; the enforcement setting is untouched.
+    static func exitForStall(_ seconds: TimeInterval) {
+        let line = "\(RFC3339.format(Date(), fractionDigits: 3)) ERROR Endpoint Security file handler stuck in one call for "
+            + "\(Int(seconds)) s: exiting so launchd starts a new daemon (enforcement setting unchanged)\n"
+        line.withCString { _ = write(STDERR_FILENO, $0, strlen($0)) }
+        _exit(70) // EX_SOFTWARE
+    }
+
+    /// A handler block that runs `body` inside `gate` (nothing once the gate is closed for deletion).
+    static func gated(_ gate: NativeClientGate, _ body: @escaping es_handler_block_t) -> es_handler_block_t {
+        { client, message in gate.use { body(client, message) } }
     }
 
     /// Before the ES clients are deleted (client thread): hold nothing more, then deny everything held
@@ -515,6 +938,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             $0.running = false
             $0.error = error
             $0.hint = hint
+            // No file client exists any more (setup failed or never got that far).
+            $0.deadlineMissMode = nil
         }
         Log.warning("Endpoint Security setup failed: \(error)")
     }
@@ -580,8 +1005,9 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private func applyMuting(prefixes: [String], ancestors: [String]) -> Bool {
         guard let file = fileClient else { return true }
         let resolver = RealpathSymlinkResolver()
-        let homes = core?.analyzer.classifier.normalizer.homeDirectories ?? []
-        let plan = NativeMutePlan.plan(prefixes: prefixes, ancestors: ancestors, homes: homes, resolve: resolver.resolve)
+        let normalizer = core?.analyzer.classifier.normalizer ?? PathNormalizer()
+        let plan = NativeMutePlan.plan(prefixes: prefixes, ancestors: ancestors, homes: normalizer.homeDirectories,
+                                       normalize: normalizer.normalize, resolve: resolver.resolve)
         lock.lock()
         let oldPrefixes = mutedPrefixes
         let oldLiterals = mutedLiterals
@@ -737,37 +1163,12 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         sink?.receive(event, context: .monitorOnly)
     }
 
-    private func handleFile(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>) {
+    private func handleFile(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ gate: NativeClientGate) {
         let m = msg.pointee
         if m.action_type == ES_ACTION_TYPE_AUTH {
-            let start = mach_absolute_time()
-            let activity = NativeESSource.activity(msg)
-            var decision = activity.map { decider.decide($0) } ?? .failOpen()
-            if decision.verdict == .ask, let activity {
-                // Held: the broker answers it later, and held accesses stay out of the latency stats.
-                if hold(client, msg, activity, decision) {
-                    lock.lock()
-                    if m.version >= 4 { fileSequence.note(m.global_seq_num) }
-                    lock.unlock()
-                    return
-                }
-                // Not held (no broker or question, too little time, too many held, nobody to answer,
-                // stopping): denied at once, recorded and timed like any other denial.
-                decision = NativeESSource.askDenial(decision)
-            }
-            NativeESSource.respond(client, msg, decision)
-            let end = mach_absolute_time()
-            let tb = NativeESSource.timebase
-            // Measured from the event's Mach time (comparable to mach_absolute_time, header), so time
-            // spent queued behind other messages counts toward the p99 statistics. Stats only: a slow
-            // response or a missed deadline never switches enforcement off.
-            let begin = m.mach_time > 0 ? min(start, m.mach_time) : start
-            let micros = (end &- begin) &* UInt64(tb.numer) / UInt64(tb.denom) / 1000
-            decider.recordResponse(micros: micros, missedDeadline: end >= m.deadline)
-            lock.lock()
-            if m.version >= 4 { fileSequence.note(m.global_seq_num) }
-            lock.unlock()
-            if decision.verdict == .deny, let activity { recordDenial(activity, decision) }
+            // Its es_* calls (respond, retain) stay inside the gate: es_delete_client must not run
+            // alongside. Closed means the client is being deleted; the message is left to its teardown.
+            gate.use { handleAuth(client, msg, gate) }
             return
         }
         let activity = NativeESSource.activity(msg)
@@ -796,10 +1197,42 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         }
     }
 
+    private func handleAuth(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ gate: NativeClientGate) {
+        let m = msg.pointee
+        let start = mach_absolute_time()
+        let activity = NativeESSource.activity(msg)
+        var decision = activity.map { decider.decide($0) } ?? .failOpen()
+        if decision.verdict == .ask, let activity {
+            // Held: the broker answers it later, and held accesses stay out of the latency stats.
+            if hold(client, msg, activity, decision, gate) {
+                lock.lock()
+                if m.version >= 4 { fileSequence.note(m.global_seq_num) }
+                lock.unlock()
+                return
+            }
+            // Not held (no broker or question, too little time, too many held, nobody to answer,
+            // stopping): denied at once, recorded and timed like any other denial.
+            decision = NativeESSource.askDenial(decision)
+        }
+        NativeESSource.respond(client, msg, decision)
+        let end = mach_absolute_time()
+        let tb = NativeESSource.timebase
+        // Measured from the event's Mach time (comparable to mach_absolute_time, header), so time
+        // spent queued behind other messages counts toward the p99 statistics. Stats only: a slow
+        // response or a missed deadline never switches enforcement off.
+        let begin = m.mach_time > 0 ? min(start, m.mach_time) : start
+        let micros = (end &- begin) &* UInt64(tb.numer) / UInt64(tb.denom) / 1000
+        decider.recordResponse(micros: micros, missedDeadline: end >= m.deadline)
+        lock.lock()
+        if m.version >= 4 { fileSequence.note(m.global_seq_num) }
+        lock.unlock()
+        if decision.verdict == .deny, let activity { recordDenial(activity, decision) }
+    }
+
     /// Ask mode: hands a `.ask` access to the broker. True when held (the broker answers it, exactly
     /// once, through the closure); false when the caller must deny it at once.
     private func hold(_ client: OpaquePointer, _ msg: UnsafePointer<es_message_t>, _ activity: FileActivity,
-                      _ ask: RuleDecision) -> Bool {
+                      _ ask: RuleDecision, _ gate: NativeClientGate) -> Bool {
         guard let broker = decider.askBroker, let request = decider.askRequest(for: activity, decision: ask) else { return false }
         let tb = NativeESSource.timebase
         let plan = NativeAskBudget(deadline: msg.pointee.deadline, now: mach_absolute_time(), numer: tb.numer, denom: tb.denom)
@@ -828,8 +1261,11 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
                 final = again.verdict == .allow ? again : (again.verdict == .ask ? NativeESSource.askDenial(again) : again)
             }
             let allowed = final.verdict == .allow
-            NativeESSource.respond(client, msg, allow: allowed, cache: false)
-            es_release_message(msg)
+            // closeAsks answers every held message before the gate closes, so it is open here.
+            gate.use {
+                NativeESSource.respond(client, msg, allow: allowed, cache: false)
+                es_release_message(msg)
+            }
             if !allowed { self?.recordDenial(activity, final) }
         }, release: { es_release_message(msg) })
         let heldMessages = self.heldMessages
@@ -891,7 +1327,10 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             // denies already makes the verdict deny.
             result = es_respond_flags_result(client, msg, allow ? UInt32.max : 0, allow && cache)
         } else {
-            // CREATE, RENAME, CLONE, COPYFILE, LINK, UNLINK, TRUNCATE, EXCHANGEDATA: no caching (header).
+            // CREATE, RENAME, CLONE, COPYFILE, LINK, UNLINK, TRUNCATE, EXCHANGEDATA, SETACL, SETATTRLIST: no
+            // caching (header). SETMODE, SETOWNER and MOUNT could be cached, but their cache key (executable,
+            // file) ignores the process chain, so a cached allow would also let the same program through
+            // under an AI agent: never cached.
             result = es_respond_auth_result(client, msg, allow ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY, false)
         }
         if result != ES_RESPOND_RESULT_SUCCESS {
@@ -925,6 +1364,15 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     /// A "new path" destination: parent directory + file name.
     static func newPath(_ dir: UnsafeMutablePointer<es_file_t>, _ name: es_string_token_t) -> ReportedPath {
         ReportedPath(OperationSemantics.join(dir: string(dir.pointee.path), name: string(name)), truncated: dir.pointee.path_truncated)
+    }
+
+    /// statfs f_mntonname: a NUL-terminated char[MAXPATHLEN] (cut at the buffer's end if it is not).
+    static func mountPoint(_ sfs: UnsafeMutablePointer<statfs>) -> String {
+        withUnsafeBytes(of: &sfs.pointee.f_mntonname) { raw in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            let end = bytes.firstIndex(of: 0) ?? bytes.endIndex
+            return String(decoding: bytes[..<end], as: UTF8.self)
+        }
     }
 
     static func record(_ p: UnsafeMutablePointer<es_process_t>, version: UInt32) -> ProcessRecord {
@@ -1042,6 +1490,24 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
                 dst = path
             }
             targets = OperationSemantics.create(dst)
+        case ES_EVENT_TYPE_AUTH_SETMODE, ES_EVENT_TYPE_NOTIFY_SETMODE:
+            op = .setmode
+            targets = OperationSemantics.attributes(reported(e.setmode.target))
+        case ES_EVENT_TYPE_AUTH_SETOWNER, ES_EVENT_TYPE_NOTIFY_SETOWNER:
+            op = .setowner
+            targets = OperationSemantics.attributes(reported(e.setowner.target))
+        case ES_EVENT_TYPE_AUTH_SETACL, ES_EVENT_TYPE_NOTIFY_SETACL:
+            op = .setacl
+            targets = OperationSemantics.attributes(reported(e.setacl.target))
+        case ES_EVENT_TYPE_AUTH_SETATTRLIST, ES_EVENT_TYPE_NOTIFY_SETATTRLIST:
+            // Only when it changes what chmod, chown or chmod +a would: anything else is allowed (AUTH)
+            // and not recorded.
+            guard let o = OperationSemantics.setattrlistOperation(commonattr: e.setattrlist.attrlist.commonattr) else { return nil }
+            op = o
+            targets = OperationSemantics.attributes(reported(e.setattrlist.target))
+        case ES_EVENT_TYPE_AUTH_MOUNT, ES_EVENT_TYPE_NOTIFY_MOUNT:
+            op = .mount
+            targets = OperationSemantics.mount(mountPoint: mountPoint(e.mount.statfs))
         default:
             return nil
         }

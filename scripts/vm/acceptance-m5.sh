@@ -20,6 +20,9 @@ fi
 VAULT="$HOME/WhoReadTestVault"
 KEY="$VAULT/ssh/id_ed25519"
 CREDS="$VAULT/aws/credentials"
+# Canaries for the coverage checks (truncate, swap, chmod…): a check that fails never damages the key.
+CANARY="$VAULT/ssh/m5-canary"
+SWAPDIR="$VAULT/m5-swap"
 WR="${WHOREAD:-whoread}"
 TMPDIR="${TMPDIR:-/tmp}"
 PASS=0; FAIL=0
@@ -40,7 +43,13 @@ cleanup() {
   sudo "$WR" rules dry-run template.block-agents-critical >/dev/null 2>&1
   sudo "$WR" rules disable template.block-agents-critical >/dev/null 2>&1
   sudo "$WR" rules delete m5-deny-vault >/dev/null 2>&1
+  for r in m5-cov-canary-read m5-cov-canary-write m5-cov-swap-write m5-cov-swap-read; do
+    sudo "$WR" rules delete "$r" >/dev/null 2>&1
+  done
   [ -f "$TMPDIR/m5-moved" ] && [ ! -e "$KEY" ] && /bin/mv "$TMPDIR/m5-moved" "$KEY"
+  # A swap that went through left the vault folder's content in the decoy: swap it back.
+  [ -f "$TMPDIR/m5-decoy/secret" ] && [ -x "$TMPDIR/m5-swap" ] && "$TMPDIR/m5-swap" "$TMPDIR/m5-decoy" "$SWAPDIR"
+  [ -d "$TMPDIR/m5-decoy" ] && { rm -f "$TMPDIR/m5-decoy"/*; rmdir "$TMPDIR/m5-decoy"; }
   rm -f ${RULE:+"$RULE"} "$TMPDIR"/m5-* "$VAULT/ssh/m5-new"
 }
 trap cleanup EXIT
@@ -48,6 +57,11 @@ trap 'exit 130' INT TERM HUP
 
 # Left over from an interrupted run, it would turn the AUTH_CREATE check below into an open.
 rm -f "$VAULT/ssh/m5-new"
+# The canaries are (re)written with enforcement off: with it on, an undecided write to the vault is
+# asked and, with no app answering, denied.
+sudo "$WR" enforcement off >/dev/null
+printf 'canary\n' > "$CANARY" && chmod 600 "$CANARY" && chmod -N "$CANARY" 2>/dev/null
+mkdir -p "$SWAPDIR" && printf 'inside\n' > "$SWAPDIR/secret"
 RULE=$(mktemp)
 cat > "$RULE" <<JSON
 {"id":"m5-deny-vault","name":"M5: block non-owners from the test vault","enabled":true,"enforce":true,
@@ -88,6 +102,89 @@ denied /bin/mv "$KEY" "$TMPDIR/m5-moved" && ok "rename out (mv) denied" || bad "
 denied /bin/ln "$KEY" "$TMPDIR/m5-link" && ok "hard link denied" || bad "hard link not denied"
 [ -f "$KEY" ] && ok "key still in place" || bad "key moved!"
 
+echo "== coverage: other spellings, permission and namespace changes (deny rule on the vault)"
+# files-4: the data volume's spelling of a firmlinked path must be selected too.
+if [ -e "/System/Volumes/Data$CANARY" ]; then
+  denied /bin/cat "/System/Volumes/Data$CANARY" && ok "open through /System/Volumes/Data… denied" \
+    || bad "open through the /System/Volumes/Data spelling was not denied (files-4)"
+fi
+# macos-5: muting compares bytes; is an open through a different-case spelling delivered (RESEARCH item 10)?
+CASED="${CANARY/WhoReadTestVault/WHOREADTESTVAULT}"
+if [ -e "$CASED" ]; then
+  denied /bin/cat "$CASED" && ok "open through a different-case spelling denied (case variants are delivered)" \
+    || bad "open through a different-case spelling was NOT denied: case variants are not delivered (macos-5)"
+else
+  echo "SKIP  case variants: the volume is case-sensitive"
+fi
+# files-10: permission, ACL and owner changes are AUTH events now.
+denied /bin/chmod 644 "$CANARY" && ok "chmod of a vault file denied (AUTH_SETMODE)" \
+  || { bad "chmod of a vault file was not denied"; chmod 600 "$CANARY"; }
+denied /bin/chmod +a "everyone allow read" "$CANARY" && ok "chmod +a of a vault file denied (AUTH_SETACL)" \
+  || { bad "chmod +a of a vault file was not denied"; chmod -N "$CANARY"; }
+denied sudo /usr/sbin/chown "$(id -u):$(id -g)" "$CANARY" && ok "chown of a vault file denied (AUTH_SETOWNER)" \
+  || bad "chown of a vault file was not denied"
+# A disk image mounted over a vault folder (AUTH_MOUNT). hdiutil fails in its own words, also for
+# reasons that have nothing to do with WhoRead, so a PASS needs the denied mount event as well.
+if hdiutil create -quiet -size 1m -fs HFS+ -volname m5 "$TMPDIR/m5.dmg" 2>/dev/null; then
+  hdiutil attach -quiet -nobrowse -mountpoint "$SWAPDIR" "$TMPDIR/m5.dmg" >/dev/null 2>"$TMPDIR/err"
+  # Mounted = the folder now sits on another device. `mount` may print the mount point under the data
+  # volume's root instead of $SWAPDIR, which a text match would miss (and leave the image attached).
+  if [ "$(stat -f %d "$SWAPDIR")" != "$(stat -f %d "$VAULT")" ]; then
+    bad "a disk image was mounted over a vault folder (AUTH_MOUNT not denied)"
+    hdiutil detach -quiet "$SWAPDIR"
+  else
+    sleep 1   # denials are stored in batches
+    if "$WR" events --denied --since 2m --json | python3 -c '
+import json, sys
+sys.exit(0 if any(e.get("operation") == "mount" and e.get("path") == sys.argv[1] for e in json.load(sys.stdin)) else 1)' "$SWAPDIR"; then
+      ok "mount over a vault folder denied (AUTH_MOUNT, recorded)"
+    else
+      echo "INCONCLUSIVE  mount over a vault folder failed, but no denied mount event was recorded: $(tr '\n' ' ' < "$TMPDIR/err")"
+    fi
+  fi
+fi
+
+echo "== coverage: truncate and swap (read and write decided apart)"
+# Path rules that tell reads from writes, so that a check passes only if the access kind is right:
+# the canary may be read but not written, the swap folder written but not read.
+sudo "$WR" rules disable m5-deny-vault >/dev/null
+cat > "$RULE" <<JSON
+[{"id":"m5-cov-canary-read","enabled":true,"enforce":true,"target":{"pathPrefix":"$CANARY"},
+  "subject":{"type":"anyNonOwner"},"access":"read","action":"allow","includePlatformBinaries":true},
+ {"id":"m5-cov-canary-write","enabled":true,"enforce":true,"target":{"pathPrefix":"$CANARY"},
+  "subject":{"type":"anyNonOwner"},"access":"write","action":"deny","includePlatformBinaries":true},
+ {"id":"m5-cov-swap-write","enabled":true,"enforce":true,"target":{"pathPrefix":"$SWAPDIR"},
+  "subject":{"type":"anyNonOwner"},"access":"write","action":"allow","includePlatformBinaries":true},
+ {"id":"m5-cov-swap-read","enabled":true,"enforce":true,"target":{"pathPrefix":"$SWAPDIR"},
+  "subject":{"type":"anyNonOwner"},"access":"read","action":"deny","includePlatformBinaries":true}]
+JSON
+sudo "$WR" rules add --json-file "$RULE" >/dev/null
+sleep 0.3
+allowed /bin/cat "$CANARY" && ok "precondition: the canary may be read" || bad "precondition: reading the canary was denied"
+# files-8: open(O_RDONLY|O_TRUNC) empties the file without FWRITE: it is a write.
+denied /usr/bin/python3 -c 'import os, sys; os.open(sys.argv[1], os.O_RDONLY | os.O_TRUNC)' "$CANARY" \
+  && ok "open(O_RDONLY|O_TRUNC) denied as a write" || bad "open(O_RDONLY|O_TRUNC) was not denied (files-8)"
+[ -s "$CANARY" ] && ok "canary not truncated" || bad "canary was truncated by a read-only open (files-8)"
+# files-5: renamex_np(RENAME_SWAP) onto an existing vault folder moves the folder out (a read of it).
+mkdir -p "$TMPDIR/m5-decoy"
+cat > "$TMPDIR/m5-swap.c" <<'C'
+#include <stdio.h>
+int main(int c, char **v) { if (c != 3 || renamex_np(v[1], v[2], RENAME_SWAP) != 0) { perror("renamex_np"); return 1; } return 0; }
+C
+if cc -w -o "$TMPDIR/m5-swap" "$TMPDIR/m5-swap.c" 2>"$TMPDIR/err"; then
+  if denied "$TMPDIR/m5-swap" "$TMPDIR/m5-decoy" "$SWAPDIR"; then
+    ok "RENAME_SWAP onto a vault folder denied (the folder counts as read)"
+  else
+    bad "RENAME_SWAP onto a vault folder was not denied (files-5): $(cat "$TMPDIR/err")"
+    [ -f "$TMPDIR/m5-decoy/secret" ] && "$TMPDIR/m5-swap" "$TMPDIR/m5-decoy" "$SWAPDIR"
+  fi
+else
+  bad "cannot build the renamex_np helper (xcode-select --install): $(cat "$TMPDIR/err")"
+fi
+for r in m5-cov-canary-read m5-cov-canary-write m5-cov-swap-write m5-cov-swap-read; do sudo "$WR" rules delete "$r" >/dev/null; done
+sudo "$WR" rules enable m5-deny-vault >/dev/null
+sleep 0.3
+
 echo "== AI agent chain rule"
 sudo "$WR" rules disable m5-deny-vault >/dev/null
 sudo "$WR" rules enforce template.block-agents-critical >/dev/null
@@ -120,6 +217,15 @@ echo "== latency"
 "$WR" status --json | python3 -c '
 import json,sys; s=json.load(sys.stdin)["latency"]
 print("  AUTH responses: %d (%d in the window), p50 %.0f µs, p99 %.0f µs, max %.0f µs, deadline misses %d" % (s["totalResponses"], s["samples"], s["p50Micros"], s["p99Micros"], s["maxMicros"], s["deadlineMisses"]))'
+# macOS 27 and later: the file client runs in ES_DEADLINE_MISS_MODE_FAIL_CLOSED (a missed deadline
+# or a message dropped from a full queue is denied, the daemon is not killed); before 27, kill.
+dmode=$("$WR" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sourceDeadlineMissMode") or "")')
+major=$(sw_vers -productVersion | cut -d. -f1)
+if [ "$major" -ge 27 ]; then
+  [ "$dmode" = "fail-closed" ] && ok "AUTH deadline miss mode: fail-closed" || bad "AUTH deadline miss mode on macOS $major: '$dmode' (expected fail-closed)"
+else
+  [ "$dmode" = "kill" ] && ok "AUTH deadline miss mode: kill (macOS $major has no other)" || bad "AUTH deadline miss mode: '$dmode' (expected kill)"
+fi
 active=$("$WR" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin).get("enforcementActive"))')
 [ "$active" = "True" ] && ok "enforcement still on after the burst (never switched off automatically)" \
   || bad "enforcement went off after the burst"
@@ -211,7 +317,8 @@ if [ "${1:-}" = "--stop-test" ]; then
     else
       echo "  the daemon was killed (pid $PID, now ${NEW_PID:-not running}); enforcement: $(enforcement_state)"
     fi
-    echo "  (record this in docs/STATUS.md: expected per WWDC20 — client killed at the deadline, implicit allow)"
+    echo "  (record this in docs/STATUS.md: expected before macOS 27 (kill mode, WWDC20): client killed at the deadline,"
+    echo "   implicit allow; macOS 27 and later (fail-closed): the cat denied at the deadline, the daemon not killed)"
   fi
 fi
 
