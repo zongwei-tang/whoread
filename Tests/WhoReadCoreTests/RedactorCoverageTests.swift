@@ -88,6 +88,26 @@ final class RedactorCoverageTests: XCTestCase {
         ])
     }
 
+    /// MySQL's `PASSWORD('x')` and pgcrypto's `crypt('x', …)` take the password in any statement: the
+    /// root password reset that sets `authentication_string = PASSWORD('x')` was kept.
+    func testSQLFunctionsThatTakeAPassword() {
+        assertRedacted(["mysql", "-e", "UPDATE mysql.user SET authentication_string=PASSWORD('Hunter2pw') WHERE User='root'"],
+                       ["mysql", "-e", "UPDATE mysql.user SET authentication_string=PASSWORD('\(R)') WHERE User='root'"])
+        assertRedacted(["/bin/sh", "-c", "mysql -uroot <<EOF\nUPDATE mysql.user SET authentication_string=PASSWORD('Hunter2pw') WHERE User='root';\nFLUSH PRIVILEGES;\nEOF"],
+                       ["/bin/sh", "-c", "mysql -uroot <<EOF\nUPDATE mysql.user SET authentication_string=PASSWORD('\(R)') WHERE User='root';\nFLUSH PRIVILEGES;\nEOF"])
+        assertRedacted(["mysql", "-e", "SELECT OLD_PASSWORD(\"Hunter2pw\")"], ["mysql", "-e", "SELECT OLD_PASSWORD(\"\(R)\")"])
+        assertRedacted(["psql", "-c", "INSERT INTO users (name, pw) VALUES ('bob', crypt('Hunter2pw', gen_salt('bf')))"],
+                       ["psql", "-c", "INSERT INTO users (name, pw) VALUES ('bob', crypt('\(R)', gen_salt('bf')))"])
+        assertRedacted(["/bin/sh", "-c", "psql -c \"UPDATE users SET pw = crypt('Hunter2pw', gen_salt('bf')) WHERE id = 1\""],
+                       ["/bin/sh", "-c", "psql -c \"UPDATE users SET pw = crypt('\(R)', gen_salt('bf')) WHERE id = 1\""])
+        assertRedacted(["python3", "-c", "import crypt; print(crypt.crypt('Hunter2pw', crypt.mksalt()))"],
+                       ["python3", "-c", "import crypt; print(crypt.crypt('\(R)', crypt.mksalt()))"])
+        assertKept([
+            ["psql", "-c", "SELECT crypt(pw, gen_salt('bf')) FROM users"], ["psql", "-c", "CREATE EXTENSION pgcrypto"],
+            ["mysql", "-e", "SELECT user, authentication_string FROM mysql.user"], ["gpg", "--encrypt", "-r", "bob", "file.txt"],
+        ])
+    }
+
     func testSQLThatOnlyMentionsPasswordsIsKept() {
         assertKept([
             ["psql", "-c", "SELECT usename, passwd IS NOT NULL FROM pg_shadow"],
@@ -336,6 +356,28 @@ final class RedactorCoverageTests: XCTestCase {
         assertKept([
             ["node", "-e", "console.log({user: 'bob', author: 'alice', mode: 'x'})"],
             ["node", "-e", "f({tokenFile: '/Users/alice/x', secretName: 'prod'})"],
+        ])
+    }
+
+    /// Calls that take a user name and then a password: mongosh's `db.auth` and
+    /// `db.changeUserPassword` (MongoDB's ALTER USER), and Python's basic-auth tuple and `login`.
+    func testCredentialCalls() {
+        assertRedacted(["mongosh", "--eval", "db.changeUserPassword('bob', 'Hunter2pw')"],
+                       ["mongosh", "--eval", "db.changeUserPassword('bob', '\(R)')"])
+        assertRedacted(["mongosh", "admin", "--eval=db.auth('bob','Hunter2pw')"], ["mongosh", "admin", "--eval=db.auth('bob','\(R)')"])
+        assertRedacted(["/bin/sh", "-c", "mongosh --quiet --eval 'db.getSiblingDB(\"admin\").changeUserPassword(\"bob\", \"Hunter2pw\")'"],
+                       ["/bin/sh", "-c", "mongosh --quiet --eval 'db.getSiblingDB(\"admin\").changeUserPassword(\"bob\", \"\(R)\")'"])
+        assertRedacted(["/bin/sh", "-c", "mongosh --eval \"db.auth(\\\"bob\\\", \\\"Hunter2pw\\\")\""],
+                       ["/bin/sh", "-c", "mongosh --eval \"db.auth(\\\"bob\\\", \\\"\(R)\\\")\""])
+        assertRedacted(["python3", "-c", "import requests; print(requests.get('https://x', auth=('bob', 'Hunter2pw')).status_code)"],
+                       ["python3", "-c", "import requests; print(requests.get('https://x', auth=('bob', '\(R)')).status_code)"])
+        assertRedacted(["python3", "-c", "requests.get(u, auth=HTTPBasicAuth('bob', 'Hunter2pw'))"],
+                       ["python3", "-c", "requests.get(u, auth=HTTPBasicAuth('bob', '\(R)'))"])
+        assertRedacted(["python3", "-c", "s = smtplib.SMTP_SSL('smtp.example.com'); s.login('bob@example.com', 'Hunter2pw')"],
+                       ["python3", "-c", "s = smtplib.SMTP_SSL('smtp.example.com'); s.login('bob@example.com', '\(R)')"])
+        assertKept([
+            ["mongosh", "--eval", "db.auth(user, pass)"], ["mongosh", "--eval", "db.getUsers()"], ["node", "-e", "auth()"],
+            ["python3", "-c", "print(login('a'))"], ["gh", "auth", "login"], ["python3", "-c", "auth(\"a\") + f(\"b\", \"c\")"],
         ])
     }
 

@@ -170,6 +170,11 @@ public enum ArgvRedactor {
     /// The same key unquoted, with a quoted value: JavaScript objects (`mongosh --eval
     /// 'db.createUser({user: "bob", pwd: "x"})'`, `node -e`) and YAML (`secret: "x"`).
     static let barePair = regex(#"(?i)(?<![a-z0-9_$"'\\.\-])("# + secretKeyNames + #")(\s*:\s*)(\\?["'])"#)
+    /// A call that takes a user name and then a password, both quoted: mongosh `db.auth('bob', 'x')`
+    /// and `db.changeUserPassword('bob', 'x')`, `smtp.login('bob', 'x')`, Python's `auth=('bob', 'x')`
+    /// and `HTTPBasicAuth('bob', 'x')`. The opening quote of the second argument is group 3.
+    static let credentialCall = regex(
+        #"(?i)(?<![a-z0-9_$])(changeUserPassword|auth|login|HTTPBasicAuth|HTTPDigestAuth|BasicAuth)\s*=?\s*\(\s*(\\?["'])[^\r\n()"'\\]*\2\s*,\s*(\\?["'])"#)
     /// AppleScript run with administrator rights: `do shell script "…" [user name "bob"] password "x"`
     /// (`osascript -e`), and the same inside a double-quoted shell word (`password \"x\"`).
     static let appleScriptPassword = regex(#"(?i)(\bdo\s+shell\s+script\b[^\r\n]*?\bpassword\s+")((?:[^"\\\r\n]|\\.)*)(")"#)
@@ -1336,7 +1341,7 @@ public enum ArgvRedactor {
     /// is one literal here and read again when its own command line is redacted.
     static func redactSQLCredentials(_ s: String) -> String {
         let lower = s.lowercased()
-        guard lower.contains("password") || lower.contains("identified") || lower.contains("conn") else { return s }
+        guard lower.contains("password") || lower.contains("identified") || lower.contains("conn") || lower.contains("crypt") else { return s }
         var scanner = SQLScanner(Array(s.unicodeScalars))
         scanner.run()
         guard !scanner.secrets.isEmpty else { return s }
@@ -1575,6 +1580,14 @@ public enum ArgvRedactor {
                         ddl = ["OR", "REPLACE"].contains(k) ? ddl - 1 : 0
                         if ddl > 0 { continue }
                     }
+                    // MySQL's `PASSWORD('x')` (`UPDATE mysql.user SET authentication_string =
+                    // PASSWORD('x')`, `SELECT PASSWORD('x')`) and pgcrypto's `crypt('x', gen_salt(…))`
+                    // take the password itself, in any statement.
+                    if ["PASSWORD", "OLD_PASSWORD", "CRYPT"].contains(k) && peek() == .punct("(") {
+                        _ = next()
+                        value(open: false)
+                        continue
+                    }
                     switch k {
                     case "ALTER", "CREATE":
                         ddl = 3
@@ -1682,10 +1695,12 @@ public enum ArgvRedactor {
 
     /// `"password": "x"` → `"password": "‹redacted›"`, `pwd: 'x'` → `pwd: '‹redacted›'`, unless the key
     /// only refers to a secret (`"token_file": "/path"`, `secretName: 'prod'`) or the value is a path.
+    /// Also the password of a `credentialCall` (`db.auth('bob', '‹redacted›')`).
     static func redactQuotedPairs(_ s: String) -> String {
         let range = NSRange(location: 0, length: (s as NSString).length)
         var matches: [(key: NSRange, open: NSRange)] = quotedPair.matches(in: s, range: range).map { ($0.range(at: 2), $0.range(at: 4)) }
         matches += barePair.matches(in: s, range: range).map { ($0.range(at: 1), $0.range(at: 3)) }
+        if s.contains("(") { matches += credentialCall.matches(in: s, range: range).map { ($0.range(at: 1), $0.range(at: 3)) } }
         guard !matches.isEmpty else { return s }
         let units = Array(s.utf16)
         let ns = s as NSString
