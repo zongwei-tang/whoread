@@ -341,6 +341,32 @@ final class RedactorCoverageTests: XCTestCase {
                        ["/bin/bash", "-c", "diff <(echo \(R)) ~/WhoReadTestVault/n && curl -u admin:\(R) https://x"])
     }
 
+    /// A command line run by a shell, eval or ssh writes where that command's output goes:
+    /// `sh -c 'echo pw' > FILE` writes pw to FILE.
+    func testCommandLinesRunByAShellWriteWhereItsOutputGoes() {
+        assertRedacted(["/bin/bash", "-c", "sh -c 'echo Hunter2pw' > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "sh -c 'echo \(R)' > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "sudo bash -lc \"printf '%s' \(pg)\" | tee ~/WhoReadTestVault/pgpass"],
+                       ["/bin/bash", "-c", "sudo bash -lc \"printf '\(R)' '\(R)'\" | tee ~/WhoReadTestVault/pgpass"])
+        assertRedacted(["/bin/bash", "-c", "eval 'echo Hunter2pw' >> ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "eval 'echo \(R)' >> ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "ssh host 'echo Hunter2pw' > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "ssh host 'echo \(R)' > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "{ zsh -c 'echo Hunter2pw'; } > ~/WhoReadTestVault/n"],
+                       ["/bin/bash", "-c", "{ zsh -c 'echo \(R)'; } > ~/WhoReadTestVault/n"])
+        assertRedacted(["/bin/bash", "-c", "exec > ~/WhoReadTestVault/n\nsh -c 'sh -c \"echo Hunter2pw\"'"],
+                       ["/bin/bash", "-c", "exec > ~/WhoReadTestVault/n\nsh -c 'sh -c \"echo \(R)\"'"])
+        // zsh's `repeat N` runs the command after it.
+        assertRedacted(["/bin/zsh", "-c", "repeat 1 echo Hunter2pw > ~/WhoReadTestVault/n"],
+                       ["/bin/zsh", "-c", "repeat 1 echo \(R) > ~/WhoReadTestVault/n"])
+        assertKept([
+            ["/bin/bash", "-c", "sh -c 'echo hello'"], ["/bin/bash", "-c", "sh -c 'echo hello' 2>/dev/null"],
+            ["/bin/bash", "-c", "sh -c 'cd /tmp && ls' > out.txt"], ["/bin/bash", "-c", "sh -c 'echo hello'; ls > out.txt"],
+            ["/bin/bash", "-c", "git commit -m 'echo hello' > log.txt"], ["/bin/bash", "-c", "grep 'echo foo' src/*.sh > hits.txt"],
+            ["/bin/bash", "-c", "timeout 10s sh -c 'echo hello'"],
+        ])
+    }
+
     /// The command after `if`, `while`, `until`, `elif` and `!` is a program with its own rules.
     func testCommandsInConditionsKeepTheirFlagRules() {
         assertRedacted(["/bin/sh", "-c", "if curl -u admin:Hunter2pw https://x; then echo ok; fi"],

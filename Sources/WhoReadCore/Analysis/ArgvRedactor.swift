@@ -69,7 +69,7 @@ public enum ArgvRedactor {
 
     /// Programs that run another program (`sudo curl …`).
     static let wrappers: Set<String> = ["sudo", "doas", "env", "exec", "nohup", "time", "command", "builtin", "nice",
-                                        "caffeinate", "arch", "timeout", "gtimeout", "xargs", "stdbuf", "chronic"]
+                                        "caffeinate", "arch", "timeout", "gtimeout", "xargs", "stdbuf", "chronic", "repeat"]
     /// sudo options that take a value.
     static let sudoValueOptions: Set<String> = ["-u", "-g", "-U", "-C", "-D", "-h", "-p", "-r", "-t", "-T"]
 
@@ -250,8 +250,10 @@ public enum ArgvRedactor {
 
     /// Redacts a sequence of arguments (an argv, or the tokens of a command line). `firstIsProgram`:
     /// element 0 is the program and is kept as is. `lineStarts`: indices of tokens that begin a new
-    /// line of a command line (a new command, or a heredoc's body and end).
-    static func redactSequence(_ tokens: [String], firstIsProgram: Bool, depth: Int = 0, lineStarts: Set<Int> = []) -> [String] {
+    /// line of a command line (a new command, or a heredoc's body and end). `outputRedirected`: what
+    /// the command line writes goes to a file or a pipe (`sh -c '…' > FILE`).
+    static func redactSequence(_ tokens: [String], firstIsProgram: Bool, depth: Int = 0, lineStarts: Set<Int> = [],
+                               outputRedirected: Bool = false) -> [String] {
         var out = tokens
         var pending: ValueRule?
         var program: String?
@@ -276,8 +278,9 @@ public enum ArgvRedactor {
         let shell = !firstIsProgram
         // Loops, conditionals, groups and process substitutions whose output goes to a file or a pipe.
         let groups = shell ? compound(tokens, lineStarts: lineStarts) : Compound()
-        // `exec > FILE`: from then on the shell's own output goes to FILE, on every later line.
-        var execRedirect = false
+        // `exec > FILE`: from then on the shell's own output goes to FILE, on every later line. A
+        // command line run by `sh -c '…' > FILE` writes there from the start.
+        var execRedirect = outputRedirected
         func resetCommand(at i: Int) {
             pending = nil; program = nil; expectProgram = true; skipNext = false
             flags = ([:], [:]); positional = [:]
@@ -445,8 +448,12 @@ public enum ArgvRedactor {
                 }
             }
             if t.contains(where: \.isWhitespace) {
-                // A command line passed as one argument (`zsh -c "…"`), or a quoted phrase in one.
-                emit(depth < maxNesting ? redactCommandLine(t, depth: depth + 1) : redactToken(t))
+                // A command line passed as one argument (`zsh -c "…"`), or a quoted phrase in one. One
+                // that a shell, eval or ssh runs writes where that command's output goes.
+                let writes = shell && commandLineRunners.contains(program ?? "")
+                    && (execRedirect || outputBeforeProgram || groups.redirected.contains(i)
+                        || writesOutput(tokens, after: commandStart, lineStarts: lineStarts))
+                emit(depth < maxNesting ? redactCommandLine(t, depth: depth + 1, outputRedirected: writes) : redactToken(t))
                 continue
             }
             if expectProgram {
@@ -458,7 +465,8 @@ public enum ArgvRedactor {
                     continue
                 }
                 if t.contains("=") { emit(redactToken(t)); continue }
-                if !t.isEmpty && t.allSatisfy({ $0.isNumber || ".smhd".contains($0) }) { continue }
+                // A count or a duration (`10`, `1.5s`), not `sh`.
+                if t.contains(where: \.isNumber) && t.allSatisfy({ $0.isNumber || ".smhd".contains($0) }) { continue }
                 // `(echo …) > FILE`: a subshell's parenthesis is not part of the program's name.
                 startProgram(basename(String(t.drop { $0 == "(" })), at: i)
                 continue
@@ -657,6 +665,9 @@ public enum ArgvRedactor {
 
     /// Programs whose words are data (`echo pw > FILE`, `printf … | git credential approve`).
     static let dataWriters: Set<String> = ["echo", "printf", "print"]
+    /// Programs that run a command line given as one word, with their own output.
+    static let commandLineRunners: Set<String> = ["sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "csh", "tcsh",
+                                                  "eval", "su", "ssh"]
 
     /// True when the command starting after `start` sends its standard output to a file
     /// (`>`, `>>`, `1>`, `&>`, `>|`, attached or not) or into a pipe (`|`, also inside a word:
@@ -995,7 +1006,8 @@ public enum ArgvRedactor {
     }
 
     /// A command line in one element: headers first (they span tokens), then token by token.
-    static func redactCommandLine(_ line: String, depth: Int = 1) -> String {
+    /// `outputRedirected`: see `redactSequence`.
+    static func redactCommandLine(_ line: String, depth: Int = 1, outputRedirected: Bool = false) -> String {
         if let header = redactWholeHeader(line) { return header }
         // Words that put a single quote inside single quotes (`'… PASSWORD '\''pw'\'''`, as commands
         // are quoted for `sh -c` or `eval`) or use ANSI-C quoting are read as the same value in double
@@ -1039,7 +1051,8 @@ public enum ArgvRedactor {
                 index += 1
             }
         }
-        var redacted = redactSequence(words, firstIsProgram: false, depth: depth, lineStarts: lineStarts)
+        var redacted = redactSequence(words, firstIsProgram: false, depth: depth, lineStarts: lineStarts,
+                                      outputRedirected: outputRedirected)
         if !asWritten.isEmpty {
             let normalized = tokenize(read).filter { !$0.isSpace }.map(\.text)
             if normalized.count == words.count {
