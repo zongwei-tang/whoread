@@ -43,6 +43,9 @@ public enum ArgvRedactor {
         case logon
         /// A Redis ACL rule: `>password`, `<password`, `#hash`, `!hash` keep their first character.
         case redisACL
+        /// Left as written: a word whose name would otherwise make the next word a secret
+        /// (`rabbitmqctl change_password USER PW`: the next word is the user).
+        case keep
     }
 
     /// Flags whose next argument is a secret, for every program.
@@ -119,8 +122,13 @@ public enum ArgvRedactor {
                      "-srckeypass": .secret, "-destkeypass": .secret, "-new": .secret], [:])
         case "openssl":
             return (["-pass": .opensslPass, "-passin": .opensslPass, "-passout": .opensslPass, "-k": .secret, "-K": .secret], [:])
-        case "ldapsearch", "ldapmodify", "ldapadd", "ldapdelete", "ldapwhoami", "ldappasswd":
+        case "ldappasswd":
+            // The bind password, and the user's old (-a) and new (-s) passwords.
+            return (["-w": .secret, "-a": .secret, "-s": .secret], [:])
+        case "ldapsearch", "ldapmodify", "ldapadd", "ldapdelete", "ldapwhoami":
             return (["-w": .secret], [:])
+        case "rabbitmqctl", "rabbitmq-diagnostics", "rabbitmq-plugins", "rabbitmq-queues", "rabbitmq-upgrade":
+            return (["--erlang-cookie": .secret], [:])
         case "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport", "mongoimport":
             return (["-p": .secret], [:])
         case "az":
@@ -588,7 +596,8 @@ public enum ArgvRedactor {
                                                   "--rdb", "--eval", "--tls-ciphers", "--tls-ciphersuites"]
 
     /// Passwords given as plain arguments, by index into `tokens`:
-    /// `htpasswd -b[n] [FILE] USER PW`, `mysqladmin password PW`, `dscl . -passwd PATH [OLD] NEW`,
+    /// `htpasswd -b[n] [FILE] USER PW` (also `htdbm` and `mosquitto_passwd`), `rabbitmqctl add_user |
+    /// change_password | authenticate_user USER PW`, `mysqladmin password PW`, `dscl . -passwd PATH [OLD] NEW`,
     /// `dscl . -authonly USER PW`, `dscl . -create PATH Password PW`, `networksetup
     /// -setairportnetwork DEV SSID PW` (and the other Wi-Fi and proxy forms), `openssl passwd PW`,
     /// redis `AUTH [USER] PW`, `CONFIG SET requirepass PW`, `ACL SETUSER … >PW`, Oracle logons
@@ -596,7 +605,8 @@ public enum ArgvRedactor {
     /// user U using PW`.
     static func positionalSecrets(_ program: String, tokens: [String], program p: Int, lineStarts: Set<Int>,
                                   shell: Bool) -> [Int: ValueRule] {
-        let known: Set<String> = ["htpasswd", "mysqladmin", "dscl", "networksetup", "openssl", "db2"]
+        let known: Set<String> = ["htpasswd", "htdbm", "mosquitto_passwd", "rabbitmqctl", "mysqladmin", "dscl", "networksetup",
+                                  "openssl", "db2"]
         guard known.contains(program) || redisClients.contains(program) || oracleClients.contains(program) else { return [:] }
         let words = commandWords(tokens, program: p, lineStarts: lineStarts, shell: shell)
         let text = words.map { word -> String in
@@ -609,22 +619,34 @@ public enum ArgvRedactor {
             for j in start..<words.count where !text[j].hasPrefix("-") { out[words[j]] = rule }
         }
         switch program {
-        case "htpasswd":
-            // Options come first; -C and -r take a value. With -b the password is the last argument:
-            // FILE USER PW, or USER PW with -n (not with -D, which deletes USER).
+        case "htpasswd", "htdbm", "mosquitto_passwd":
+            // Options come first; -C, -r, -T, -H and -I take a value. With -b the password follows the
+            // file and the user: FILE USER PW, or USER PW with htpasswd -n (none with -D, which deletes
+            // USER). It goes from there on: htdbm takes a comment after it, and a stray word after the
+            // password is no reason to keep it.
             var batch = false, display = false, fromStdin = false, skip = false
             var positionals: [Int] = []
             for j in words.indices {
                 if skip { skip = false; continue }
                 let w = text[j]
                 if positionals.isEmpty && w.hasPrefix("-") && w.count > 1 {
-                    if w == "-C" || w == "-r" { skip = true; continue }
-                    batch = batch || w.contains("b"); display = display || w.contains("n"); fromStdin = fromStdin || w.contains("i")
+                    if ["-C", "-r", "-T", "-H", "-I"].contains(w) { skip = true; continue }
+                    batch = batch || w.contains("b")
+                    display = display || (program != "mosquitto_passwd" && w.contains("n"))
+                    fromStdin = fromStdin || (program == "htpasswd" && w.contains("i"))
                     continue
                 }
                 positionals.append(words[j])
             }
-            if batch && !fromStdin && positionals.count >= (display ? 2 : 3), let last = positionals.last { out[last] = .secret }
+            if batch && !fromStdin { for j in positionals.dropFirst(display ? 1 : 2) { out[j] = .secret } }
+        case "rabbitmqctl":
+            // `rabbitmqctl [OPTIONS] add_user USER PW`: the word after the user. The command's own name
+            // (`change_password`) is not a setting whose value follows.
+            guard let c = words.indices.first(where: { j in
+                !text[j].hasPrefix("-") && !(j > 0 && ["-n", "--node", "-t", "--timeout", "--erlang-cookie"].contains(text[j - 1]))
+            }), ["add_user", "change_password", "authenticate_user"].contains(text[c]) else { break }
+            out[words[c]] = .keep
+            if c + 2 < words.count && !text[c + 2].hasPrefix("-") { out[words[c + 2]] = .secret }
         case "mysqladmin":
             for j in words.indices.dropLast() where ["password", "old-password"].contains(text[j].lowercased()) && !text[j + 1].hasPrefix("-") {
                 out[words[j + 1]] = .secret
@@ -1831,6 +1853,8 @@ public enum ArgvRedactor {
         case .redisACL:
             guard let first = value.first, value.count > 1 else { return value }
             return String(first) + placeholder
+        case .keep:
+            return value
         }
     }
 

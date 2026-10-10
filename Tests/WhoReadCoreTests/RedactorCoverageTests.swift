@@ -121,6 +121,44 @@ final class RedactorCoverageTests: XCTestCase {
         assertKept([["htpasswd", "-bD", "f", "bob"], ["htpasswd", "-c", "f", "bob"], ["htpasswd", "-v", "f", "bob"], ["htpasswd", "-n", "bob"]])
     }
 
+    /// The password is the word after the user, not the last word: a stray word after it (htpasswd
+    /// refuses the command, but it ran and its argv is stored) used to be redacted instead.
+    /// htdbm and mosquitto_passwd take the same arguments.
+    func testBatchModePasswordIsFoundByPosition() {
+        assertRedacted(["htpasswd", "-b", "f", "bob", "Hunter2pw", "extra"], ["htpasswd", "-b", "f", "bob", R, R])
+        assertRedacted(["htpasswd", "-nb", "bob", "Hunter2pw", "extra"], ["htpasswd", "-nb", "bob", R, R])
+        assertRedacted(["htpasswd", "-bv", "f", "bob", "Hunter2pw"], ["htpasswd", "-bv", "f", "bob", R])
+        assertRedacted(["htdbm", "-bt", "-T", "SDBM", "users.db", "bob", "Hunter2pw", "a comment"],
+                       ["htdbm", "-bt", "-T", "SDBM", "users.db", "bob", R, R])
+        assertRedacted(["mosquitto_passwd", "-b", "/opt/homebrew/etc/mosquitto/passwd", "bob", "Hunter2pw"],
+                       ["mosquitto_passwd", "-b", "/opt/homebrew/etc/mosquitto/passwd", "bob", R])
+        assertRedacted(["mosquitto_passwd", "-c", "-H", "sha512", "-b", "passwd", "bob", "Hunter2pw"],
+                       ["mosquitto_passwd", "-c", "-H", "sha512", "-b", "passwd", "bob", R])
+        assertRedacted(["/bin/sh", "-c", "docker exec mqtt mosquitto_passwd -b /mosquitto/config/passwd bob Hunter2pw"],
+                       ["/bin/sh", "-c", "docker exec mqtt mosquitto_passwd -b /mosquitto/config/passwd bob \(R)"])
+        assertKept([
+            ["htdbm", "-l", "users.db"], ["htdbm", "-bx", "users.db", "bob"], ["mosquitto_passwd", "-U", "passwd"],
+            ["mosquitto_passwd", "-D", "passwd", "bob"], ["mosquitto_passwd", "-c", "passwd", "bob"],
+            ["mosquitto_sub", "-h", "localhost", "-t", "home/#"],
+        ])
+    }
+
+    /// `rabbitmqctl add_user USER PW`: the password is the word after the user. `change_password`
+    /// used to read as a setting's name, so the user was redacted and the password kept.
+    func testRabbitMQUserPasswords() {
+        assertRedacted(["rabbitmqctl", "add_user", "bob", "Hunter2pw"], ["rabbitmqctl", "add_user", "bob", R])
+        assertRedacted(["rabbitmqctl", "change_password", "bob", "Hunter2pw"], ["rabbitmqctl", "change_password", "bob", R])
+        assertRedacted(["rabbitmqctl", "-n", "rabbit@host", "authenticate_user", "bob", "Hunter2pw"],
+                       ["rabbitmqctl", "-n", "rabbit@host", "authenticate_user", "bob", R])
+        assertRedacted(["/bin/sh", "-c", "docker exec rabbit rabbitmqctl add_user bob Hunter2pw && rabbitmqctl set_user_tags bob administrator"],
+                       ["/bin/sh", "-c", "docker exec rabbit rabbitmqctl add_user bob \(R) && rabbitmqctl set_user_tags bob administrator"])
+        assertRedacted(["rabbitmqctl", "--erlang-cookie", "Hunter2pw", "status"], ["rabbitmqctl", "--erlang-cookie", R, "status"])
+        assertKept([
+            ["rabbitmqctl", "change_password", "bob"], ["rabbitmqctl", "add_user", "bob"], ["rabbitmqctl", "list_users"],
+            ["rabbitmqctl", "set_user_tags", "bob", "administrator"], ["rabbitmqctl", "delete_user", "bob"],
+        ])
+    }
+
     func testPositionalPasswordsOfOtherTools() {
         // mysqladmin's `password NEW`.
         assertRedacted(["mysqladmin", "-u", "root", "-pOld2pwxx", "password", "Hunter2pw"],
@@ -210,6 +248,9 @@ final class RedactorCoverageTests: XCTestCase {
                        ["security", "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", R, "build.keychain"])
         assertRedacted(["security", "set-keychain-password", "-o", "Old2pwxx", "-p", "Hunter2pw", "build.keychain"],
                        ["security", "set-keychain-password", "-o", R, "-p", R, "build.keychain"], secrets: [secret, "Old2pwxx"])
+        // ldappasswd: the bind password, the old (-a) and the new (-s) password. Elsewhere -s is a scope.
+        assertRedacted(["ldappasswd", "-x", "-D", "cn=admin", "-w", "Hunter2pw", "-a", "Old2pwxx", "-s", "Hunter2pw", "uid=bob"],
+                       ["ldappasswd", "-x", "-D", "cn=admin", "-w", R, "-a", R, "-s", R, "uid=bob"], secrets: [secret, "Old2pwxx"])
         // SQL Server tools.
         assertRedacted(["sqlcmd", "-S", "db", "-U", "sa", "-P", "Hunter2pw", "-Q", "SELECT 1"], ["sqlcmd", "-S", "db", "-U", "sa", "-P", R, "-Q", "SELECT 1"])
         assertRedacted(["bcp", "t", "out", "f", "-S", "db", "-U", "sa", "-P", "Hunter2pw"], ["bcp", "t", "out", "f", "-S", "db", "-U", "sa", "-P", R])
@@ -228,6 +269,7 @@ final class RedactorCoverageTests: XCTestCase {
         assertKept([
             ["security", "create-keychain", "-P", "build.keychain"], ["security", "export", "-k", "build.keychain", "-t", "certs", "-o", "/tmp/certs.pem"],
             ["security", "find-generic-password", "-s", "svc", "-w"], ["curl", "-a", "-T", "f", "ftp://h/x"], ["http", "-a", "bob", "https://x"],
+            ["ldapsearch", "-x", "-s", "base", "-b", "dc=example,dc=com"], ["ldappasswd", "-x", "-D", "cn=admin", "-W", "-S", "uid=bob"],
             ["osascript", "-e", "display dialog \"Enter your password\" default answer \"\" with hidden answer"],
         ])
     }
