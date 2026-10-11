@@ -1,0 +1,477 @@
+# WhoRead CI report
+commit: ceaafc6fc53d2aa0f34ed87496fdc71b71bd2782
+runner: macOS 14.8.9 (23J631), arm64
+xcode: Xcode 16.2 Build version 16C5032a 
+swift: swift-driver version: 1.115.1 Apple Swift version 6.0.3 (swiftlang-6.0.3.1.10 clang-1600.0.30.1)
+
+## swift-build: FAIL (exit 1, 27 s)
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+--- diagnostics
+72-[81/121] Compiling WhoReadEngine Log.swift
+73-[82/121] Compiling WhoReadEngine OwnerResolver.swift
+74-[83/121] Compiling WhoReadEngine Pipeline.swift
+75:/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+76-1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+77-1944 |         }
+78-1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+79:     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+80-1946 |         return ProcessRecord(
+81-1947 |             pid: pid,
+82-[84/121] Compiling WhoReadEngine ServiceHandler.swift
+83:/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+84-1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+85-1944 |         }
+86-1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+87:     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+88-1946 |         return ProcessRecord(
+89-1947 |             pid: pid,
+90-[85/121] Compiling WhoReadEngine EsloggerSource.swift
+91:/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+92-1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+93-1944 |         }
+94-1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+95:     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+96-1946 |         return ProcessRecord(
+97-1947 |             pid: pid,
+98-[86/121] Compiling WhoReadEngine EventSource.swift
+99:/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+100-1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+101-1944 |         }
+102-1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+103:     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+104-1946 |         return ProcessRecord(
+105-1947 |             pid: pid,
+106-[87/121] Compiling WhoReadEngine LineReader.swift
+107:/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+108-1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+109-1944 |         }
+110-1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+111:     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+112-1946 |         return ProcessRecord(
+113-1947 |             pid: pid,
+114-[88/121] Compiling WhoReadEngine NativeESSource.swift
+115:/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+116-1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+117-1944 |         }
+118-1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+119:     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+120-1946 |         return ProcessRecord(
+121-1947 |             pid: pid,
+--- last 40 lines
+[84/121] Compiling WhoReadEngine ServiceHandler.swift
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+1944 |         }
+1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+1946 |         return ProcessRecord(
+1947 |             pid: pid,
+[85/121] Compiling WhoReadEngine EsloggerSource.swift
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+1944 |         }
+1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+1946 |         return ProcessRecord(
+1947 |             pid: pid,
+[86/121] Compiling WhoReadEngine EventSource.swift
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+1944 |         }
+1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+1946 |         return ProcessRecord(
+1947 |             pid: pid,
+[87/121] Compiling WhoReadEngine LineReader.swift
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+1944 |         }
+1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+1946 |         return ProcessRecord(
+1947 |             pid: pid,
+[88/121] Compiling WhoReadEngine NativeESSource.swift
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+1944 |         }
+1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+1946 |         return ProcessRecord(
+1947 |             pid: pid,
+
+## swift-test: FAIL (exit 1, 8 s)
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+error: fatalError
+--- diagnostics
+9-[7/37] Compiling WhoReadStoreTests SQLiteEventStoreTests.swift
+10-[8/37] Emitting module WhoReadStoreTests
+11-[9/37] Compiling WhoReadEngine LineReader.swift
+12:/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+13-1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+14-1944 |         }
+15-1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+16:     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+17-1946 |         return ProcessRecord(
+18-1947 |             pid: pid,
+19-[10/37] Compiling WhoReadEngine NativeESSource.swift
+20:/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+21-1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+22-1944 |         }
+23-1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+24:     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+25-1946 |         return ProcessRecord(
+26-1947 |             pid: pid,
+27-[11/38] Compiling WhoReadEngine ReplaySource.swift
+28-[12/38] Compiling WhoReadEngine DaemonCore.swift
+29-[13/38] Compiling WhoReadEngine Daemon.swift
+30-[14/38] Emitting module WhoReadCoreTests
+31:error: fatalError
+--- last 40 lines
+[0/1] Planning build
+Building for debugging...
+[0/9] Write swift-version-4657CCE4B953477C.txt
+[2/33] Compiling WhoReadEngine EsloggerSource.swift
+[3/33] Compiling WhoReadEngine EventSource.swift
+[4/35] Emitting module WhoReadEngine
+[5/35] Compiling WhoReadEngine Pipeline.swift
+[6/35] Compiling WhoReadEngine ServiceHandler.swift
+[7/37] Compiling WhoReadStoreTests SQLiteEventStoreTests.swift
+[8/37] Emitting module WhoReadStoreTests
+[9/37] Compiling WhoReadEngine LineReader.swift
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+1944 |         }
+1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+1946 |         return ProcessRecord(
+1947 |             pid: pid,
+[10/37] Compiling WhoReadEngine NativeESSource.swift
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+1944 |         }
+1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+1946 |         return ProcessRecord(
+1947 |             pid: pid,
+[11/38] Compiling WhoReadEngine ReplaySource.swift
+[12/38] Compiling WhoReadEngine DaemonCore.swift
+[13/38] Compiling WhoReadEngine Daemon.swift
+[14/38] Emitting module WhoReadCoreTests
+error: fatalError
+
+## e2e-dev-socket: FAIL (exit 1, 2 s)
+--- diagnostics
+--- last 40 lines
+
+## brew-tools: PASS (4 s)
+
+## xcodegen: PASS (0 s)
+Created project at /Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj
+
+## xcode-build: FAIL (exit 65, 30 s)
+** BUILD FAILED **
+--- diagnostics
+3-⚙️  Generating project...
+4-⚙️  Writing project...
+5-Created project at /Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj
+6:--- xcodebuild: WARNING: Using the first of multiple matching destinations:
+7-{ platform:macOS, arch:arm64e, id:0000FE00-7CCC9802DA488B9F, name:My Mac }
+8-{ platform:macOS, arch:arm64, id:0000FE00-7CCC9802DA488B9F, name:My Mac }
+9-{ platform:macOS, arch:x86_64, id:0000FE00-7CCC9802DA488B9F, name:My Mac }
+10-{ platform:macOS, arch:arm64e, variant:Mac Catalyst, id:0000FE00-7CCC9802DA488B9F, name:My Mac }
+11-{ platform:macOS, arch:arm64, variant:Mac Catalyst, id:0000FE00-7CCC9802DA488B9F, name:My Mac }
+12-{ platform:macOS, arch:x86_64, variant:Mac Catalyst, id:0000FE00-7CCC9802DA488B9F, name:My Mac }
+13-{ platform:macOS, arch:arm64, variant:DriverKit, id:0000FE00-7CCC9802DA488B9F, name:My Mac }
+14-{ platform:macOS, arch:arm64, variant:Designed for [iPad,iPhone], id:0000FE00-7CCC9802DA488B9F, name:My Mac }
+15-{ platform:DriverKit, name:Any DriverKit Host }
+16-{ platform:iOS, id:dvtdevice-DVTiPhonePlaceholder-iphoneos:placeholder, name:Any iOS Device }
+17-{ platform:iOS Simulator, id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-iphonesimulator:placeholder, name:Any iOS Simulator Device }
+18-{ platform:macOS, name:Any Mac }
+19-{ platform:macOS, variant:Mac Catalyst, name:Any Mac }
+20-{ platform:tvOS, id:dvtdevice-DVTiOSDevicePlaceholder-appletvos:placeholder, name:Any tvOS Device }
+21-{ platform:tvOS Simulator, id:dvtdevice-DVTiOSDeviceSimulatorPlaceholder-appletvsimulator:placeholder, name:Any tvOS Simulator Device }
+--- last 40 lines
+{ platform:iOS Simulator, id:B67BB802-8F6F-4830-A0C0-81D202D4AE98, OS:17.5, name:iPhone 15 Pro Max }
+{ platform:iOS Simulator, id:A5B144E6-A071-4106-B457-76AA34C952DD, OS:18.1, name:iPhone 16 }
+{ platform:iOS Simulator, id:A5B144E6-A071-4106-B457-76AA34C952DD, OS:18.1, name:iPhone 16 }
+{ platform:iOS Simulator, id:EDC4F281-97FB-4004-B8FA-3ED2BD36749C, OS:18.2, name:iPhone 16 }
+{ platform:iOS Simulator, id:EDC4F281-97FB-4004-B8FA-3ED2BD36749C, OS:18.2, name:iPhone 16 }
+{ platform:iOS Simulator, id:CDBA815E-750D-4478-84CE-3B56660EA7E2, OS:18.1, name:iPhone 16 Plus }
+{ platform:iOS Simulator, id:CDBA815E-750D-4478-84CE-3B56660EA7E2, OS:18.1, name:iPhone 16 Plus }
+{ platform:iOS Simulator, id:21915B6B-125F-4295-A2C0-EC803AABBF05, OS:18.2, name:iPhone 16 Plus }
+{ platform:iOS Simulator, id:21915B6B-125F-4295-A2C0-EC803AABBF05, OS:18.2, name:iPhone 16 Plus }
+{ platform:iOS Simulator, id:E6F7DFB4-78AF-4B8D-A285-B24000457240, OS:18.1, name:iPhone 16 Pro }
+{ platform:iOS Simulator, id:E6F7DFB4-78AF-4B8D-A285-B24000457240, OS:18.1, name:iPhone 16 Pro }
+{ platform:iOS Simulator, id:154781AA-E525-424F-9768-390D4DED6241, OS:18.2, name:iPhone 16 Pro }
+{ platform:iOS Simulator, id:154781AA-E525-424F-9768-390D4DED6241, OS:18.2, name:iPhone 16 Pro }
+{ platform:iOS Simulator, id:D93350B9-61EE-4432-BD8E-E25978972F13, OS:18.1, name:iPhone 16 Pro Max }
+{ platform:iOS Simulator, id:D93350B9-61EE-4432-BD8E-E25978972F13, OS:18.1, name:iPhone 16 Pro Max }
+{ platform:iOS Simulator, id:F4C49282-5F1D-44F0-B0C6-178B582DB734, OS:18.2, name:iPhone 16 Pro Max }
+{ platform:iOS Simulator, id:F4C49282-5F1D-44F0-B0C6-178B582DB734, OS:18.2, name:iPhone 16 Pro Max }
+{ platform:iOS Simulator, id:3E23127D-2EE4-4591-89A5-FD2CEE2A05CE, OS:17.0.1, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:3E23127D-2EE4-4591-89A5-FD2CEE2A05CE, OS:17.0.1, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:1EEC7A8C-5A8B-4FBE-B86E-AE7A34D4A64A, OS:17.2, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:1EEC7A8C-5A8B-4FBE-B86E-AE7A34D4A64A, OS:17.2, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:1A195176-A999-41D7-A7D6-84FCB41A26EF, OS:17.4, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:1A195176-A999-41D7-A7D6-84FCB41A26EF, OS:17.4, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:52978592-8BD6-4A5C-8913-43711812C97D, OS:17.5, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:52978592-8BD6-4A5C-8913-43711812C97D, OS:17.5, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:55BC56C5-67CD-46A7-BB04-A0B19A8F0AAC, OS:18.1, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:55BC56C5-67CD-46A7-BB04-A0B19A8F0AAC, OS:18.1, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:A9044B95-7ADA-4C87-9EE0-0393C5CC6805, OS:18.2, name:iPhone SE (3rd generation) }
+{ platform:iOS Simulator, id:A9044B95-7ADA-4C87-9EE0-0393C5CC6805, OS:18.2, name:iPhone SE (3rd generation) }
+** BUILD FAILED **
+
+
+The following build commands failed:
+	SwiftCompile normal arm64 Compiling\ Pipeline.swift,\ ServiceHandler.swift,\ EsloggerSource.swift,\ EventSource.swift,\ LineReader.swift,\ NativeESSource.swift /Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Pipeline.swift /Users/runner/work/whoread/whoread/Sources/WhoReadEngine/ServiceHandler.swift /Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/EsloggerSource.swift /Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/EventSource.swift /Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/LineReader.swift /Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift (in target 'WhoReadEngine' from project 'WhoRead' at path '/Users/runner/work/whoread/whoread/Package.swift')
+	SwiftCompile normal arm64 /Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift (in target 'WhoReadEngine' from project 'WhoRead' at path '/Users/runner/work/whoread/whoread/Package.swift')
+	Building project WhoRead with scheme whoread and configuration Debug
+(3 failures)
+    cd /Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj
+    builtin-Swift-Compilation-Requirements -- /Applications/Xcode_16.2.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name whoread -Onone -enforce-exclusivity\=checked @/Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/whoread.build/Objects-normal/arm64/whoread.SwiftFileList -DSWIFT_PACKAGE -DDEBUG -DXcode -plugin-path /Applications/Xcode_16.2.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode_16.2.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.2.sdk -target arm64-apple-macos14.0 -g -module-cache-path /Users/runner/work/whoread/whoread/build/DerivedData/ModuleCache.noindex -Xfrontend -serialize-debugging-options -enable-testing -index-store-path /Users/runner/work/whoread/whoread/build/DerivedData/Index.noindex/DataStore -enable-experimental-feature OpaqueTypeErasure -Xcc -D_LIBCPP_HARDENING_MODE\=_LIBCPP_HARDENING_MODE_DEBUG -swift-version 5 -I /Users/runner/work/whoread/whoread/build/DerivedData/Build/Products/Debug -I /Applications/Xcode_16.2.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F /Users/runner/work/whoread/whoread/build/DerivedData/Build/Products/Debug/PackageFrameworks -F /Users/runner/work/whoread/whoread/build/DerivedData/Build/Products/Debug/PackageFrameworks -F /Users/runner/work/whoread/whoread/build/DerivedData/Build/Products/Debug/PackageFrameworks -F /Users/runner/work/whoread/whoread/build/DerivedData/Build/Products/Debug/PackageFrameworks -F /Users/runner/work/whoread/whoread/build/DerivedData/Build/Products/Debug -F /Applications/Xcode_16.2.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -emit-localized-strings -emit-localized-strings-path /Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/whoread.build/Objects-normal/arm64 -c -j3 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /Users/runner/work/whoread/whoread/build/DerivedData/SDKStatCaches.noindex/macosx15.2-24C94-31fdc9072c14abf0650164f087001267.sdkstatcache -output-file-map /Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/whoread.build/Objects-normal/arm64/whoread-OutputFileMap.json -use-frontend-parseable-output -save-temps -no-color-diagnostics -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/whoread.build/Objects-normal/arm64/whoread.swiftmodule -validate-clang-modules-once -clang-build-session-file /Users/runner/work/whoread/whoread/build/DerivedData/ModuleCache.noindex/Session.modulevalidation -package-name whoread -emit-const-values -Xfrontend -const-gather-protocols-file -Xfrontend /Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/whoread.build/Objects-normal/arm64/whoread_const_extract_protocols.json -Xcc -I/Users/runner/work/whoread/whoread/build/DerivedData/Build/Products/Debug/include -Xcc -I/Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/whoread.build/DerivedSources-normal/arm64 -Xcc -I/Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/whoread.build/DerivedSources/arm64 -Xcc -I/Users/runner/work/whoread/whoread/build/DerivedData/Build/Intermediates.noindex/WhoRead.build/Debug/whoread.build/DerivedSources -Xcc -DSWIFT_PACKAGE -Xcc -DDEBUG\=1 -working-directory /Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj -experimental-emit-module-separately -disable-cmo
+
+
+## shellcheck: FAIL (exit 1, 3 s)
+^--------^ SC2164 (warning): Use 'cd ... || exit' or 'cd ... || return' in case cd fails.
+                          ^-- SC1010 (warning): Use semicolon or linefeed before 'done' (or quote to make it literal).
+                         ^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+        ^---------------------^ SC2206 (warning): Quote to prevent word splitting/globbing, or split robustly with mapfile or read -a.
+  https://www.shellcheck.net/wiki/SC1010 -- Use semicolon or linefeed before ...
+  https://www.shellcheck.net/wiki/SC2164 -- Use 'cd ... || exit' or 'cd ... |...
+  https://www.shellcheck.net/wiki/SC2206 -- Quote to prevent word splitting/g...
+--- diagnostics
+--- last 40 lines
+cd "$ROOT"
+^--------^ SC2164 (warning): Use 'cd ... || exit' or 'cd ... || return' in case cd fails.
+
+Did you mean:
+cd "$ROOT" || exit
+
+
+In scripts/vm/selftest.sh line 189:
+[ $rc -eq 0 ] && grep -qx done "$T/jump.out" \
+                          ^-- SC1010 (warning): Use semicolon or linefeed before 'done' (or quote to make it literal).
+
+
+In scripts/vm/selftest.sh line 206:
+[ $rc -eq 0 ] && grep -qx done "$T/hjump.out" \
+                          ^-- SC1010 (warning): Use semicolon or linefeed before 'done' (or quote to make it literal).
+
+
+In scripts/vm/runner/uninstall.sh line 21:
+[ "$VM_USER" = root ] && VM_USER=admin
+                         ^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+
+
+In scripts/vm/runner/install.sh line 29:
+[ "$VM_USER" = root ] && VM_USER=admin
+                         ^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+
+
+In scripts/vm/runner/runner.sh line 52:
+VM_USER=admin
+^-----^ SC2209 (warning): Use var=$(command) to assign output (or quote to assign string).
+
+
+In scripts/dev/sc-build.sh line 38:
+        ${WHOREAD_SWIFTFLAGS:-})
+        ^---------------------^ SC2206 (warning): Quote to prevent word splitting/globbing, or split robustly with mapfile or read -a.
+
+For more information:
+  https://www.shellcheck.net/wiki/SC1010 -- Use semicolon or linefeed before ...
+  https://www.shellcheck.net/wiki/SC2164 -- Use 'cd ... || exit' or 'cd ... |...
+  https://www.shellcheck.net/wiki/SC2206 -- Quote to prevent word splitting/g...
+
+## bash-syntax: PASS (1 s)
+
+## es-stub: PASS (1 s)
+skipped: the stub mirrors the macOS 27 SDK, this SDK is 15.2
+
+## vm-harness-selftest: PASS (197 s)
+112 passed, 0 failed (files: /private/var/folders/s6/5hzmn6lx4dz5nxs7k_0slzph0000gn/T/whoread-vm-selftest.Iu1QhJ)
+
+## app-bundle: FAIL (exit 1, 16 s)
+/Users/runner/work/whoread/whoread/scripts/dev/xcconfig.sh: line 172: printf: write error: Broken pipe
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+FAIL app mode
+--- diagnostics
+9-ok   quotes are kept
+10-ok   empty value
+11-ok   expand --xml escapes values, not the template
+12:/Users/runner/work/whoread/whoread/scripts/dev/xcconfig.sh: line 172: printf: write error: Broken pipe
+13-ok   expand without --xml
+14-ok   undefined setting
+15-ok   reference to an undefined setting
+16-ok   template reference to an undefined setting
+17-ok   reference cycle
+18-ok   missing mandatory #include
+19-ok   conditional setting (unsupported)
+20-ok   $(inherited) (unsupported)
+21-ok   operators (unsupported)
+22-ok   operator followed by a reference (unsupported)
+23-ok   nested reference (unsupported)
+24-ok   ${} operator followed by a reference (unsupported)
+25-ok   template: operator (unsupported)
+26-ok   template: operator followed by a reference (unsupported)
+27-== sc-app.sh verification helpers
+--
+39-== WhoReadStore
+40-== WhoReadIPC
+41-== WhoReadEngine
+42:/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+43-1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+44-1944 |         }
+45-1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+46:     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+47-1946 |         return ProcessRecord(
+48-1947 |             pid: pid,
+49-FAIL app mode
+--- last 40 lines
+ok   empty value
+ok   expand --xml escapes values, not the template
+/Users/runner/work/whoread/whoread/scripts/dev/xcconfig.sh: line 172: printf: write error: Broken pipe
+ok   expand without --xml
+ok   undefined setting
+ok   reference to an undefined setting
+ok   template reference to an undefined setting
+ok   reference cycle
+ok   missing mandatory #include
+ok   conditional setting (unsupported)
+ok   $(inherited) (unsupported)
+ok   operators (unsupported)
+ok   operator followed by a reference (unsupported)
+ok   nested reference (unsupported)
+ok   ${} operator followed by a reference (unsupported)
+ok   template: operator (unsupported)
+ok   template: operator followed by a reference (unsupported)
+== sc-app.sh verification helpers
+ok   ad hoc: the team in Local.xcconfig is not used, its prefix is
+ok   ad hoc: the extension's client and app requirements name no team
+ok   check_links: a library outside the OS
+ok   check_links: only libSystem
+ok   check_signature: linker signature has no hardened runtime
+ok   check_signature: runtime, no entitlements
+ok   check_signature: unexpected entitlements
+ok   check_signature: different entitlements
+ok   check_signature: expected entitlements
+== sc-build.sh app (default)
+== WhoReadCore
+== WhoReadStore
+== WhoReadIPC
+== WhoReadEngine
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1945:70: error: value of type 'es_process_t' has no member 'cs_validation_category'
+1943 |                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
+1944 |         }
+1945 |         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+     |                                                                      `- error: value of type 'es_process_t' has no member 'cs_validation_category'
+1946 |         return ProcessRecord(
+1947 |             pid: pid,
+FAIL app mode
+
+## eslogger-events: PASS (0 s)
+access
+authentication
+authorization_judgement
+authorization_petition
+btm_launch_item_add
+btm_launch_item_remove
+chdir
+chroot
+clone
+close
+copyfile
+create
+cs_invalidated
+deleteextattr
+dup
+exchangedata
+exec
+exit
+fcntl
+file_provider_materialize
+file_provider_update
+fork
+fsgetpath
+get_task
+get_task_inspect
+get_task_name
+get_task_read
+getattrlist
+getextattr
+iokit_open
+kextload
+kextunload
+link
+listextattr
+login_login
+login_logout
+lookup
+lw_session_lock
+lw_session_login
+lw_session_logout
+lw_session_unlock
+mmap
+mount
+mprotect
+od_attribute_set
+od_attribute_value_add
+od_attribute_value_remove
+od_create_group
+od_create_user
+od_delete_group
+od_delete_user
+od_disable_user
+od_enable_user
+od_group_add
+od_group_remove
+od_group_set
+od_modify_password
+open
+openssh_login
+openssh_logout
+proc_check
+proc_suspend_resume
+profile_add
+profile_remove
+pty_close
+pty_grant
+readdir
+readlink
+remote_thread_create
+remount
+rename
+screensharing_attach
+screensharing_detach
+searchfs
+setacl
+setattrlist
+setegid
+seteuid
+setextattr
+setflags
+setgid
+setmode
+setowner
+setregid
+setreuid
+settime
+setuid
+signal
+stat
+su
+sudo
+trace
+truncate
+uipc_bind
+uipc_connect
+unlink
+unmount
+utimes
+write
+xp_malware_detected
+xp_malware_remediated
+xpc_connect
+
+OVERALL: FAIL

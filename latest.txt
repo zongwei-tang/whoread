@@ -1,5 +1,5 @@
-commit: 4089364ff59364e81735d3466590d62e2e8faf8c
-run: https://github.com/zongwei-tang/whoread/actions/runs/38095503118
+commit: ceaafc6fc53d2aa0f34ed87496fdc71b71bd2782
+run: https://github.com/zongwei-tang/whoread/actions/runs/38095865085
 macos-14: OVERALL: FAIL
 macos-15: OVERALL: FAIL
 macos-latest: OVERALL: FAIL
