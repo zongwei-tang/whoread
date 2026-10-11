@@ -294,7 +294,9 @@ final class NativeProcessRecordTests: XCTestCase {
         fake.set(\.original_ppid, Int32(500))
         fake.set(\.parent_audit_token, FakeESProcess.token(pid: 500, version: 5_000))
         fake.set(\.responsible_audit_token, FakeESProcess.token(pid: 501, version: 5_010))
+        #if compiler(>=6.2)
         fake.set(\.cs_validation_category, ES_CS_VALIDATION_CATEGORY_DEVELOPMENT)
+        #endif
         fake.set(\.codesigning_flags, UInt32(0x2201_3b15))
 
         let r = NativeESSource.record(fake.process, version: 10)
@@ -302,7 +304,11 @@ final class NativeProcessRecordTests: XCTestCase {
         XCTAssertEqual(r.pidVersion, 5_010)
         XCTAssertEqual(r.parentToken, ProcessToken(pid: 500, pidVersion: 5_000))
         XCTAssertNil(r.responsiblePID, "the process itself: no responsible process")
+        #if compiler(>=6.2)
         XCTAssertEqual(r.signingCategory, .development)
+        #else
+        XCTAssertNil(r.signingCategory, "an SDK older than macOS 26 cannot read the field")
+        #endif
         XCTAssertEqual(r.codeSigningFlags, 0x2201_3b15)
         XCTAssertTrue(r.isControllable, "CS_GET_TASK_ALLOW")
         XCTAssertFalse(r.hasDistributionSignature)

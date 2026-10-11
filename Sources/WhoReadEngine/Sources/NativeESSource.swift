@@ -1942,7 +1942,11 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
             parent = ProcessToken(pid: audit_token_to_pid(proc.parent_audit_token),
                                   pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.parent_audit_token)))
         }
+        // The field is declared from the macOS 26 SDK on (shipped with Swift 6.2 toolchains). A build
+        // with an older SDK cannot read it and keeps the location and team checks alone.
+        #if compiler(>=6.2)
         if version >= 10 { category = SigningCategory(rawValue: proc.cs_validation_category.rawValue) }
+        #endif
         return ProcessRecord(
             pid: pid,
             pidVersion: UInt32(bitPattern: audit_token_to_pidversion(proc.audit_token)),

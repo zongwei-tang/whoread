@@ -418,6 +418,8 @@ mkdir -p "$OLDSHARE/.vm"
     /bin/sleep 0.5
   done ) &
 OLDBEAT=$!
+# On a loaded machine the background writer may not have written its first beat yet.
+for _ in $(seq 50); do [ -f "$OLDSHARE/.vm/heartbeat" ] && break; sleep 0.1; done
 OLDVMJOB() { WHOREAD_VM_HOST_DIR="$OLDSHARE" bash "$ROOT/scripts/vm/vmjob.sh" "$@"; }
 out=$(OLDVMJOB ping 2>&1); rc=$?
 [ $rc -eq 69 ] && grep -q 'runner/install.sh' <<< "$out" \

@@ -416,8 +416,11 @@ final class NativeDrainTests: XCTestCase {
     }
 
     func testEsSyncClientIsFoundOnlyWhereTheSystemHasIt() {
+        // The SDK says macOS 27, but earlier releases (15 and 26 on CI) already export it: only
+        // macOS 27 and later must have it.
         let has27 = ProcessInfo.processInfo.isOperatingSystemAtLeast(OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0))
-        XCTAssertEqual(NativeDeadlineMissMode.symbol(NativeDrain.syncClientName) != nil, has27)
+        if has27 { XCTAssertNotNil(NativeDeadlineMissMode.symbol(NativeDrain.syncClientName)) }
+        XCTAssertNil(NativeDeadlineMissMode.symbol("es_no_such_function"))
     }
 
     func testQuietNeedsNoCallForTheWholePeriod() {
