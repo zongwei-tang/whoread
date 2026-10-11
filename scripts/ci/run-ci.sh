@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REPORT="${1:?usage: run-ci.sh REPORT_FILE}"
 LOGS="$ROOT/build/ci-logs"
 mkdir -p "$LOGS"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 FAILED=0
 : > "$REPORT"
 {

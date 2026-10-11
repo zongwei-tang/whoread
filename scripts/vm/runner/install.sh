@@ -26,7 +26,7 @@ is_vm() {
 is_vm || fail "this Mac is not a virtual machine (kern.hv_vmm_present is not 1, hw.model is $(sysctl -n hw.model 2>/dev/null)). The runner is only for the test VM."
 HERE="$(cd "$(dirname "$0")" && pwd)"
 VM_USER="${WHOREAD_VM_USER:-${SUDO_USER:-admin}}"
-[ "$VM_USER" = root ] && VM_USER=admin
+[ "$VM_USER" = root ] && VM_USER="admin"
 case "$VM_USER" in ''|*[!A-Za-z0-9_.-]*) fail "unexpected user name: $VM_USER" ;; esac
 VM_UID=$(id -u "$VM_USER" 2>/dev/null) || fail "no user $VM_USER in this VM"
 VM_HOME=$(dscl . -read "/Users/$VM_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')

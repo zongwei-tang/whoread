@@ -18,7 +18,7 @@ else
 fi
 lc() { [ -n "$LAUNCHCTL" ] || return 1; "$LAUNCHCTL" "$@"; }
 VM_USER="${WHOREAD_VM_USER:-${SUDO_USER:-admin}}"
-[ "$VM_USER" = root ] && VM_USER=admin
+[ "$VM_USER" = root ] && VM_USER="admin"
 VM_UID=$(id -u "$VM_USER" 2>/dev/null || echo 501)
 TCC_RECORD="$R/usr/local/etc/whoread-vmrunner.tcc"
 

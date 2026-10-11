@@ -49,7 +49,7 @@ TEST_MODE="${WHOREAD_VM_RUNNER_TEST:-}"
 # Where jobs get their private folders (exec_job).
 TMPROOT="${TMPDIR:-/tmp}"
 TMPROOT="${TMPROOT%/}"
-VM_USER=admin
+VM_USER="admin"
 MOUNT=/Users/admin/wr
 TAGS="whoread com.apple.virtio-fs.automount"
 BEAT_EVERY=5

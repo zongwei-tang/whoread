@@ -19,7 +19,7 @@ elif [ -n "${WHOREAD_NO_ES:-}" ]; then
   # it cannot install the extension.
   EXTRA+=(CODE_SIGN_ENTITLEMENTS=)
 fi
-for scheme in whoread whoreadd WhoRead; do
+for scheme in whoread-cli whoreadd WhoRead; do
   xcodebuild -project WhoRead.xcodeproj -scheme "$scheme" -configuration "$CONFIG" \
     -derivedDataPath "$ROOT/build/DerivedData" ${EXTRA[@]+"${EXTRA[@]}"} build | tail -n 3
 done

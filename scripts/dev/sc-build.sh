@@ -34,8 +34,12 @@ PLUGINS="$(dirname "$SWIFTC")/../lib/swift/host/plugins"
 TARGET="$(uname -m)-apple-macosx14.0"
 JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
 COMMON=(-target "$TARGET" -sdk "$SDK" -module-cache-path "$MC" -swift-version 5 -Onone -g
-        -enable-testing -DDEBUG -DSWIFT_PACKAGE -I "$OUT" -L "$OUT" -j"$JOBS" -plugin-path "$PLUGINS"
-        ${WHOREAD_SWIFTFLAGS:-})
+        -enable-testing -DDEBUG -DSWIFT_PACKAGE -I "$OUT" -L "$OUT" -j"$JOBS" -plugin-path "$PLUGINS")
+# Extra compiler flags, split on spaces.
+if [ -n "${WHOREAD_SWIFTFLAGS:-}" ]; then
+  read -r -a EXTRA_FLAGS <<< "$WHOREAD_SWIFTFLAGS"
+  COMMON+=("${EXTRA_FLAGS[@]}")
+fi
 XCT=(-F "$PLAT/Developer/Library/Frameworks" -I "$PLAT/Developer/usr/lib" -L "$PLAT/Developer/usr/lib")
 RPATH=(-Xlinker -rpath -Xlinker "$PLAT/Developer/Library/Frameworks" -Xlinker -rpath -Xlinker "$PLAT/Developer/usr/lib")
 SYSLIBS=(-lsqlite3 -lEndpointSecurity -lbsm)

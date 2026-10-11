@@ -51,8 +51,10 @@ fi
 probe() { # name, expected leaf name, command...
   local name="$1" leaf="$2"; shift 2
   local start; start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  local t0; t0=$(now)
   as_user "$@" >/dev/null 2>&1
+  # Latency is counted from the end of the command: an interpreter that takes a second to start
+  # (python3 on a loaded machine) says nothing about how fast the access was recorded.
+  local t0; t0=$(now)
   # The chain must be complete: rooted at launchd (pid 1) with this script ($$) above the leaf.
   local found="" result=""
   for _ in $(seq 40); do

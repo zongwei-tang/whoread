@@ -184,7 +184,9 @@ public final class UnixSocketServer: @unchecked Sendable {
             throw IPCError(.unavailable, "bind(\(path)): \(String(cString: strerror(errno)))")
         }
         chmod(path, mode)
-        guard listen(fd, 16) == 0 else {
+        // A backlog below the connection limit refuses connects (ECONNREFUSED on Darwin) whenever
+        // clients arrive faster than the accept loop takes them, well before any slot is short.
+        guard listen(fd, Int32(UnixSocketServer.maxConnections * 2)) == 0 else {
             close(fd)
             throw IPCError(.unavailable, "listen(): \(String(cString: strerror(errno)))")
         }

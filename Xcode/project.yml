@@ -49,7 +49,7 @@ targets:
       - target: WhoReadExtension
       # The CLI ships team-signed in the app so it satisfies the extension's client requirement.
       # Not Contents/MacOS: on a case-insensitive volume "whoread" is the app's own executable.
-      - target: whoread
+      - target: whoread-cli
         embed: true
         link: false
         codeSign: true
@@ -158,8 +158,10 @@ targets:
         CREATE_INFOPLIST_SECTION_IN_BINARY: YES
         GENERATE_INFOPLIST_FILE: YES
 
-  # Command line client (also embedded in the app as Contents/Helpers/whoread).
-  whoread:
+  # Command line client (also embedded in the app as Contents/Helpers/whoread). The target is not
+  # called "whoread": its build folders would then differ from the app's (WhoRead) only in case and
+  # collide on a case-insensitive volume. The product keeps the name whoread.
+  whoread-cli:
     type: tool
     platform: macOS
     sources:
@@ -169,6 +171,7 @@ targets:
         product: WhoReadEngine
     settings:
       base:
+        PRODUCT_NAME: whoread
         PRODUCT_BUNDLE_IDENTIFIER: "$(BUNDLE_ID_PREFIX).whoread.cli"
         CREATE_INFOPLIST_SECTION_IN_BINARY: YES
         GENERATE_INFOPLIST_FILE: YES
