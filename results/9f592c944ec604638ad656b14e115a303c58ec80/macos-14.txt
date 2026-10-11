@@ -1,0 +1,351 @@
+# WhoRead CI report
+commit: 9f592c944ec604638ad656b14e115a303c58ec80
+runner: macOS 14.8.9 (23J631), arm64
+xcode: Xcode 16.2 Build version 16C5032a 
+swift: swift-driver version: 1.115.1 Apple Swift version 6.0.3 (swiftlang-6.0.3.1.10 clang-1600.0.30.1)
+
+## swift-build: PASS (40 s)
+/Users/runner/work/whoread/whoread/Sources/WhoReadEngine/Sources/NativeESSource.swift:1933:13: warning: variable 'category' was never mutated; consider changing to 'let' constant
+/Users/runner/work/whoread/whoread/Tests/WhoReadUIModelTests/QuestionsUIModelTests.swift:36:28: warning: converting non-sendable function value to '@Sendable () -> uid_t?' (aka '@Sendable () -> Optional<UInt32>') may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadUIModelTests/QuestionsUIModelTests.swift:261:28: warning: converting non-sendable function value to '@Sendable () -> uid_t?' (aka '@Sendable () -> Optional<UInt32>') may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadUIModelTests/QuestionsUIModelTests.swift:274:28: warning: converting non-sendable function value to '@Sendable () -> uid_t?' (aka '@Sendable () -> Optional<UInt32>') may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadUIModelTests/QuestionsUIModelTests.swift:661:28: warning: converting non-sendable function value to '@Sendable () -> uid_t?' (aka '@Sendable () -> Optional<UInt32>') may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadUIModelTests/QuestionsUIModelTests.swift:721:28: warning: converting non-sendable function value to '@Sendable () -> uid_t?' (aka '@Sendable () -> Optional<UInt32>') may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadUIModelTests/QuestionsUIModelTests.swift:877:28: warning: converting non-sendable function value to '@Sendable () -> uid_t?' (aka '@Sendable () -> Optional<UInt32>') may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:159:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:160:77: warning: reference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:160:129: warning: reference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:187:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:203:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:217:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:229:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:238:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:281:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:490:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:544:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessAncestryTests.swift:69:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessAncestryTests.swift:92:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessAncestryTests.swift:107:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessAncestryTests.swift:193:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessAncestryTests.swift:204:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessAncestryTests.swift:213:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessAncestryTests.swift:223:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessAncestryTests.swift:237:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessAncestryTests.swift:368:31: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/ProcessTreeTests.swift:94:29: warning: converting non-sendable function value to '@Sendable (Int32) -> ProcessRecord?' may introduce data races
+
+## swift-test: PASS (309 s)
+Test Suite 'All tests' started at 2026-10-11 04:11:17.676.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 8.218 (8.218) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.906 (0.907) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.109 (0.109) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.356 (0.356) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.069 (0.069) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 1.394 (1.395) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.393 (0.394) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 2.900 (2.900) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.119 (0.119) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.126 (0.126) seconds
+	 Executed 15 tests, with 0 failures (0 unexpected) in 28.440 (28.441) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.069 (0.069) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.084 (0.084) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.008 (0.008) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.009 (0.009) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.163 (0.163) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.289 (0.289) seconds
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.614 (0.615) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.660 (0.660) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 6.537 (6.538) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.207 (0.207) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 2.848 (2.848) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.634 (0.635) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.328 (0.329) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.064 (0.064) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.688 (0.688) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.419 (0.419) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.008 (0.009) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.005 (0.005) seconds
+	 Executed 15 tests, with 0 failures (0 unexpected) in 26.453 (26.455) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.100 (0.100) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.677 (0.677) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.267 (0.267) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 25.222 (25.223) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.217 (0.218) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.178 (0.178) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.055 (0.055) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.664 (0.664) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.584 (0.584) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.274 (0.274) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.686 (0.687) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.071 (0.071) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 12.983 (12.983) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 1.193 (1.194) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 6.878 (6.879) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.128 (0.128) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.045 (0.045) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 2.779 (2.779) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.013 (0.013) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.004 (0.004) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 6.581 (6.582) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.629 (0.630) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.008 (0.008) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.088 (0.089) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.063 (0.064) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 3.879 (3.880) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.067 (0.068) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.569 (0.569) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.016 (0.016) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.067 (0.067) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.153 (0.153) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.061 (0.061) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.038 (0.039) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.037 (0.037) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.042 (0.042) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.004 (0.004) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 4.716 (4.717) seconds
+	 Executed 15 tests, with 0 failures (0 unexpected) in 4.156 (4.157) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.003 (0.003) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.004 (0.004) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.406 (0.407) seconds
+	 Executed 18 tests, with 0 failures (0 unexpected) in 14.701 (14.703) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.210 (0.211) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.206 (0.207) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.162 (0.162) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.052 (0.052) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.950 (0.951) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.047 (0.047) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.183 (0.183) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.547 (0.547) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.124 (0.124) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.057 (0.058) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.079 (0.079) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.105 (0.105) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.022 (0.022) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.211 (0.212) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.849 (0.849) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.034 (0.034) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.248 (0.249) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.277 (0.277) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.010 (0.011) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.478 (0.478) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.184 (0.184) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 6.146 (6.147) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.158 (1.158) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.258 (0.258) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 4.458 (4.458) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.988 (0.989) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.241 (0.242) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.176 (0.176) seconds
+	 Executed 29 tests, with 0 failures (0 unexpected) in 46.895 (46.897) seconds
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testDevUninstallKeepsTheReleaseCLILink] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testDevUninstallKeepsTheReleaseCLILink]' skipped (0.003 seconds).
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testDevUninstallPurgeRemovesNothingWhileTheExtensionIsActive] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testDevUninstallPurgeRemovesNothingWhileTheExtensionIsActive]' skipped (0.001 seconds).
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testUninstallProceedsWhenNoExtensionIsActive] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testUninstallProceedsWhenNoExtensionIsActive]' skipped (0.000 seconds).
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testUninstallStopsWhenAnExtensionIsActiveAndTheAppIsMissing] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testUninstallStopsWhenAnExtensionIsActiveAndTheAppIsMissing]' skipped (0.000 seconds).
+	 Executed 11 tests, with 4 tests skipped and 0 failures (0 unexpected) in 3.658 (3.659) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.135 (0.135) seconds
+	 Executed 35 tests, with 0 failures (0 unexpected) in 0.178 (0.180) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.023 (0.024) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.134 (0.134) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.289 (0.290) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.074 (0.074) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.319 (0.319) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.864 (0.864) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 2.285 (2.285) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.271 (0.271) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 33.429 (33.430) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.064 (0.064) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.721 (0.722) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.401 (0.401) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 10.699 (10.701) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 1.365 (1.367) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 5.719 (5.720) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.186 (0.186) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.269 (0.270) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.149 (0.149) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.483 (0.484) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.343 (0.344) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.263 (0.263) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.421 (0.421) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.028 (1.029) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.183 (0.183) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.018 (0.018) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.106 (0.106) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.234 (0.235) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.355 (0.356) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.101 (0.101) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.162 (0.163) seconds
+
+## e2e-dev-socket: PASS (13 s)
+== status
+== events --agents-only
+== alerts
+== apps
+== files
+== agents
+== export csv (first 3 lines)
+== rules
+== enforcement on (replay/eslogger cannot enforce)
+== kill switch
+== settings set language (zh means zh-Hans; an unknown value is refused, not 'system')
+== status: no learning period, enforcement never switched off automatically
+== asks (ask mode; eslogger cannot hold an access, so nothing is waiting)
+== settings set trust-apple on|off (round trip)
+== catalog add-path refuses a home or a folder above one (or the whole disk), however spelled
+== export pages past undecodable rows
+== no daemon vs. a refusal the daemon answered
+== daemon log
+
+## brew-tools: PASS (5 s)
+
+## xcodegen: PASS (0 s)
+Created project at /Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj
+
+## xcode-build: PASS (71 s)
+** BUILD SUCCEEDED **
+
+## shellcheck: FAIL (exit 1, 5 s)
+                          ^-- SC1010 (warning): Use semicolon or linefeed before 'done' (or quote to make it literal).
+  https://www.shellcheck.net/wiki/SC1010 -- Use semicolon or linefeed before ...
+--- diagnostics
+--- last 40 lines
+
+In scripts/vm/selftest.sh line 189:
+[ $rc -eq 0 ] && grep -qx done "$T/jump.out" \
+                          ^-- SC1010 (warning): Use semicolon or linefeed before 'done' (or quote to make it literal).
+
+
+In scripts/vm/selftest.sh line 206:
+[ $rc -eq 0 ] && grep -qx done "$T/hjump.out" \
+                          ^-- SC1010 (warning): Use semicolon or linefeed before 'done' (or quote to make it literal).
+
+For more information:
+  https://www.shellcheck.net/wiki/SC1010 -- Use semicolon or linefeed before ...
+
+## bash-syntax: PASS (0 s)
+
+## es-stub: PASS (1 s)
+skipped: the stub mirrors the macOS 27 SDK, this SDK is 15.2
+
+## vm-harness-selftest: PASS (197 s)
+112 passed, 0 failed (files: /private/var/folders/s6/5hzmn6lx4dz5nxs7k_0slzph0000gn/T/whoread-vm-selftest.GG0nj3)
+
+## app-bundle: PASS (57 s)
+/Users/runner/work/whoread/whoread/scripts/dev/xcconfig.sh: line 172: printf: write error: Broken pipe
+== 0 failure(s)
+
+## eslogger-events: PASS (0 s)
+access
+authentication
+authorization_judgement
+authorization_petition
+btm_launch_item_add
+btm_launch_item_remove
+chdir
+chroot
+clone
+close
+copyfile
+create
+cs_invalidated
+deleteextattr
+dup
+exchangedata
+exec
+exit
+fcntl
+file_provider_materialize
+file_provider_update
+fork
+fsgetpath
+get_task
+get_task_inspect
+get_task_name
+get_task_read
+getattrlist
+getextattr
+iokit_open
+kextload
+kextunload
+link
+listextattr
+login_login
+login_logout
+lookup
+lw_session_lock
+lw_session_login
+lw_session_logout
+lw_session_unlock
+mmap
+mount
+mprotect
+od_attribute_set
+od_attribute_value_add
+od_attribute_value_remove
+od_create_group
+od_create_user
+od_delete_group
+od_delete_user
+od_disable_user
+od_enable_user
+od_group_add
+od_group_remove
+od_group_set
+od_modify_password
+open
+openssh_login
+openssh_logout
+proc_check
+proc_suspend_resume
+profile_add
+profile_remove
+pty_close
+pty_grant
+readdir
+readlink
+remote_thread_create
+remount
+rename
+screensharing_attach
+screensharing_detach
+searchfs
+setacl
+setattrlist
+setegid
+seteuid
+setextattr
+setflags
+setgid
+setmode
+setowner
+setregid
+setreuid
+settime
+setuid
+signal
+stat
+su
+sudo
+trace
+truncate
+uipc_bind
+uipc_connect
+unlink
+unmount
+utimes
+write
+xp_malware_detected
+xp_malware_remediated
+xpc_connect
+
+OVERALL: FAIL
