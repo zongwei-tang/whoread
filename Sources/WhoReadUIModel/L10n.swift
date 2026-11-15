@@ -12,6 +12,7 @@ public enum L: String, CaseIterable, Sendable {
     case appName, modeMonitoring, modeEnforcing, modePaused, modeError, unreadAlertsFormat, openWindow
     case pauseMonitoring, resumeMonitoring, enforcement, enforcementOn, enforcementOff, enforcementInactiveFormat
     case killSwitchAdmin, quit, daemonUnreachable, recentAlerts, noAlerts
+    case killSwitchAdminPrompt
     // Ask mode: open questions (menu bar, Alerts tab, notifications)
     case asksTitle, asksWaitingFormat, asksMoreFormat, askDeniedIn, askNotHeld
     case askAllowOnce, askAlwaysAllow, askDeny, askAlwaysDeny, askTrustApple
@@ -38,8 +39,10 @@ public enum L: String, CaseIterable, Sendable {
     case detected, notDetected, search, refresh, save, revert, add, remove, delete, cancel, done, close
     // Live
     case showSystemNoise, pauseFeed, resumeFeed, liveEmpty
+    case liveSkippedNote
     // Alerts
     case markAllRead, unreadOnly, statusUnread, statusRead, statusResolved, alertsEmpty, pathsSeen
+    case alertsCappedFormat
     // Agents / apps / files
     case agentsEmpty, appsEmpty, filesEmpty
     // Rules
@@ -115,6 +118,8 @@ public enum L10n {
         .enforcementOff: ("Off", "关"),
         .enforcementInactiveFormat: ("Not active: %@", "未生效：%@"),
         .killSwitchAdmin: ("Turn enforcement off now (administrator)…", "立即关闭拦截（需要管理员密码）…"),
+        .killSwitchAdminPrompt: ("WhoRead needs an administrator's password to change its kill-switch file (enforcement stays off while the file exists).",
+                                 "WhoRead 需要管理员密码来修改紧急关闭文件（该文件存在时拦截保持关闭）。"),
         .quit: ("Quit WhoRead", "退出 WhoRead"),
         .daemonUnreachable: ("Cannot reach the WhoRead daemon", "无法连接 WhoRead 守护进程"),
         .recentAlerts: ("Recent alerts", "最近告警"),
@@ -242,6 +247,8 @@ public enum L10n {
         .pauseFeed: ("Pause feed", "暂停滚动"),
         .resumeFeed: ("Resume feed", "继续滚动"),
         .liveEmpty: ("No sensitive file access yet.", "还没有敏感文件访问。"),
+        .liveSkippedNote: ("More accesses came at once than the live feed reads: some are not listed here. Every one is recorded; in Terminal: sudo whoread events",
+                           "一次到来的访问超过了实时列表能读取的数量，有些没有列在这里。每一次访问都已记录；在终端里运行：sudo whoread events"),
 
         .markAllRead: ("Mark all read", "全部标为已读"),
         .unreadOnly: ("Unread only", "只看未读"),
@@ -250,6 +257,8 @@ public enum L10n {
         .statusResolved: ("Handled", "已处理"),
         .alertsEmpty: ("No alerts. WhoRead only alerts on unusual access.", "没有告警。WhoRead 只在出现异常时提醒。"),
         .pathsSeen: ("Paths", "涉及路径"),
+        .alertsCappedFormat: ("Only the %ld most recently updated are listed here, of %ld. In Terminal, %@ lists them all.",
+                              "这里只列出最近更新的 %ld 条，共 %ld 条。在终端里运行 %@ 可以列出全部。"),
 
         .agentsEmpty: ("No AI agent has touched a sensitive file yet.", "还没有 AI agent 碰过敏感文件。"),
         .appsEmpty: ("No app has touched a sensitive file yet.", "还没有应用碰过敏感文件。"),

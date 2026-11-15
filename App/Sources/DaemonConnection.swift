@@ -27,8 +27,12 @@ final class DaemonConnection {
     @ObservationIgnored private var askClient: XPCClient
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var askTimer: Timer?
+    /// Held while the polls must stay on time (`keepPollsTimely`).
+    @ObservationIgnored private var timelyActivity: NSObjectProtocol?
     @ObservationIgnored private var askTimerInterval: TimeInterval = 0
     @ObservationIgnored private var schedule = PollSchedule()
+    /// The views on screen: full polls read the summaries only while one shows them.
+    @ObservationIgnored private var views = PollViews()
     @ObservationIgnored private var inFlight = false
     @ObservationIgnored private var askInFlight = false
     /// Reopen a connection the daemon did not take for the app (a wrong guess when it was accepted).
@@ -91,19 +95,35 @@ final class DaemonConnection {
     }
 
     /// Status and history every second; the questions every second, every 250 ms while any is open
-    /// (that timer is re-armed when it changes).
+    /// (that timer is re-armed when it changes). Both fire on the main run loop in its common modes
+    /// (`PollTimer`), so also while a menu is open or a window is resized: the daemon holds an access
+    /// for a question only while the app has read the questions in the last 5 seconds.
     private func armTimers() {
+        keepPollsTimely(model.needsTimelyPolls)
         if timer == nil {
-            timer = Timer.scheduledTimer(withTimeInterval: PollSchedule.idleInterval, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.timerFired() }
+            timer = PollTimer.repeating(every: PollSchedule.idleInterval) { [weak self] in
+                MainActor.assumeIsolated { self?.timerFired() }
             }
         }
         let interval = model.pollInterval
         guard askTimer == nil || interval != askTimerInterval else { return }
         askTimer?.invalidate()
         askTimerInterval = interval
-        askTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pollAsks() }
+        askTimer = PollTimer.repeating(every: interval) { [weak self] in
+            MainActor.assumeIsolated { self?.pollAsks() }
+        }
+    }
+
+    /// While questions can be asked (enforcement active) or are open, App Nap must not stretch the polls
+    /// past the daemon's 5 seconds: a menu bar app with no window open is a candidate. Monitor-only
+    /// installations do not hold it (nothing waits for an answer, and it costs battery).
+    private func keepPollsTimely(_ timely: Bool) {
+        if timely, timelyActivity == nil {
+            timelyActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                   reason: "Reading WhoRead's questions in time")
+        } else if !timely, let activity = timelyActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            timelyActivity = nil
         }
     }
 
@@ -125,13 +145,31 @@ final class DaemonConnection {
         let cursor = model.liveCursor
         let benign = model.showSystemNoise
         let hello = needsHello
+        // Every second only the alerts that changed; every 10 s (and after a change) the whole list.
+        let alertsSince = full ? nil : model.alertsSince
+        let summaries = views.needsSummaries
+        let unread = views.needsUnreadAlerts(unreadOnly: model.alertsUnreadOnly)
         queue.async {
-            let snapshot = SnapshotFetcher.fetch(client, liveAfter: cursor, includeBenign: benign, full: full, hello: hello)
+            let snapshot = SnapshotFetcher.fetch(client, liveAfter: cursor, includeBenign: benign, full: full, hello: hello,
+                                                 alertsSince: alertsSince, summaries: summaries, unreadAlerts: unread)
             Task { @MainActor in
                 self.inFlight = false
                 self.received(snapshot)
                 if self.pendingFull { self.poll(full: true) }
             }
+        }
+    }
+
+    /// A view that needs more than the fast poll appeared or disappeared (`PollViews`). One that needs
+    /// the summaries (or the unread alerts on their own) is filled at once, not at the next poll.
+    func setShown(_ view: PollViews.View, _ shown: Bool) {
+        let before = views
+        views.set(view, shown: shown)
+        let unreadOnly = model.alertsUnreadOnly
+        if views.needsSummaries && !before.needsSummaries {
+            poll(full: true)
+        } else if views.needsUnreadAlerts(unreadOnly: unreadOnly) && !before.needsUnreadAlerts(unreadOnly: unreadOnly) {
+            poll(full: false)
         }
     }
 
@@ -236,9 +274,11 @@ final class DaemonConnection {
         guard snapshot.error == nil else { return }
         if let status = model.status { planNotices(status) }
         if let settings = model.settings {
-            // Only alerts read by this poll (nil when refused or failed): the first read seeds.
-            for n in planner.plan(snapshot.alerts, settings: settings.notifications, formatter: model.formatter,
-                                  agentName: model.agentName) {
+            // Only when this poll read the alerts (nil when refused or failed): the first read seeds. The
+            // whole list as listed now, not only what changed since the last fast poll: the planner
+            // forgets alerts the list no longer has.
+            for n in planner.plan(snapshot.alerts == nil ? nil : model.alerts, settings: settings.notifications,
+                                  formatter: model.formatter, agentName: model.agentName) {
                 NotificationManager.shared.post(n)
             }
         }
@@ -260,7 +300,7 @@ final class DaemonConnection {
     /// One banner per open question; banners of questions no longer open are withdrawn.
     private func planAsks() {
         // The daemon lists at most 200 questions; a capped reply must not withdraw banners.
-        let complete = model.asks.count < 200 && (model.status?.pendingAsks ?? 0) <= model.asks.count
+        let complete = model.asksListComplete
         // Before the first full poll, category and AI agent names are not known yet: such banners are
         // replaced once they are.
         let plan = planner.plan(asks: model.asks, formatter: model.formatter, complete: complete, agentName: model.agentName,
@@ -314,7 +354,7 @@ final class DaemonConnection {
     /// saved a rule that cannot block right now. A question's alert is answered like the question, on
     /// the questions' connection.
     func act(on alert: Int64, _ action: AlertAction, fromNotification: Bool = false) {
-        let kind = model.alerts.first { $0.id == alert }?.kind
+        let kind = model.alert(id: alert)?.kind
         run({ try $0.call(.alertAction(alertID: alert, action: action)) }, questions: kind == .ask, failed: { e in
             // The rule limit, an answer applied but not saved, no reply: said as such, not "refused".
             let text = self.model.alertActionError(e, alertID: alert, action: action, kind: kind)
@@ -435,30 +475,30 @@ final class DaemonConnection {
     }
 
     private func enableEnforcement() {
-        if model.status?.killSwitchFilePresent == true {
-            // The UI's own fallback (or `whoread kill-switch engage`) left the file: remove it.
-            guard runAsAdministrator("/bin/rm -f '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") else { return }
+        guard model.status?.killSwitchFilePresent == true else { return perform(.setEnforcement(enabled: true)) }
+        // The UI's own fallback (or `whoread kill-switch engage`) left the file: remove it.
+        runAsAdministrator("/bin/rm -f '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") { done in
+            if done { self.perform(.setEnforcement(enabled: true)) }
         }
-        perform(.setEnforcement(enabled: true))
     }
 
-    /// Kill switch #3 (file) from the UI: asks for an administrator password via AppleScript.
+    /// Kill switch #3 (file) from the UI: asks for an administrator password (the system's dialog).
     func engageKillSwitchWithAdminRights() {
-        _ = runAsAdministrator("/usr/bin/touch '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'")
+        runAsAdministrator("/usr/bin/touch '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") { _ in
+            self.poll(full: true)
+        }
     }
 
     private static func quoted(_ path: String) -> String { path.replacingOccurrences(of: "'", with: "") }
 
-    /// Returns false (and sets `lastActionError`, unless the user cancelled) on failure.
-    private func runAsAdministrator(_ command: String) -> Bool {
-        var error: NSDictionary?
-        NSAppleScript(source: "do shell script \"\(command)\" with administrator privileges")?.executeAndReturnError(&error)
-        guard let error else { return true }
-        // -128: the user cancelled the password prompt.
-        if (error[NSAppleScript.errorNumber] as? Int) != -128 {
-            lastActionError = L10n.f(.errAdminFormat, (error[NSAppleScript.errorMessage] as? String) ?? "\(error)")
+    /// Runs `command` as an administrator in osascript (`AdminShell`), off the main thread: the
+    /// questions are still read, and the menu still answers, while the password dialog is open.
+    /// `then` gets whether it ran; on a failure other than a cancelled dialog, `lastActionError` says why.
+    private func runAsAdministrator(_ command: String, then: @escaping @MainActor @Sendable (Bool) -> Void) {
+        AdminShell.run(command, prompt: L10n.t(.killSwitchAdminPrompt, model.language)) { [weak self] outcome in
+            if case .failed(let message) = outcome { self?.lastActionError = L10n.f(.errAdminFormat, message) }
+            then(outcome == .done)
         }
-        return false
     }
 
     func openFullDiskAccessSettings() {
