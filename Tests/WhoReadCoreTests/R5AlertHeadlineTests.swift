@@ -90,6 +90,19 @@ final class R5AlertHeadlineTests: XCTestCase {
         XCTAssertEqual(quiet.alert.firstPathAccess, .read)
     }
 
+    /// Raised to a rule's alert on the same file: what the rule matched, not what was seen of it before.
+    func testAnAlertRaisedToARulesAlertNamesWhatTheRuleMatched() throws {
+        let c = AlertCoalescer(window: 600)
+        _ = c.ingest(event(1, 0, key, .read, .critical), kind: .criticalNonOwner)
+        let up = try XCTUnwrap(c.ingest(event(2, 60, key, .write, .critical, decision: .wouldDeny, ruleID: "deny-vault-writes"),
+                                        kind: .wouldBlock))
+        XCTAssertEqual(up.alert.kind, .wouldBlock)
+        XCTAssertEqual(up.alert.ruleID, "deny-vault-writes")
+        XCTAssertEqual(up.alert.firstPathAccess, .write)
+        XCTAssertEqual(formatter(.en).headline(up.alert),
+                       "A rule would block zoom.us from writing \(key) (monitor mode); zoom.us also read files in WhoRead test vault (×2)")
+    }
+
     func testAnotherRulesAccessMovesTheAlertWithItsRule() throws {
         let c = AlertCoalescer(window: 600)
         _ = c.ingest(event(1, 0, key, .read, .critical, decision: .wouldDeny, ruleID: "deny-vault-reads"), kind: .wouldBlock)

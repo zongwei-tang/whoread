@@ -94,8 +94,11 @@ public final class AlertCoalescer: @unchecked Sendable {
                     if !raises { alert.ruleID = event.ruleID ?? alert.ruleID }
                     alert.firstTime = firstTime
                     alert.appleProgram = appleProgram
-                    // The event that made it worse is the one the headline and "allow once" are about.
-                    alert.firstPathAccess = event.path == alert.firstPath ? alert.firstPathAccess.map { $0.union(event.access) } : event.access
+                    // The event that made it worse is the one the headline and "allow once" are about. Accesses
+                    // seen of that file before count too, except for a rule's alert it just became: the
+                    // headline then says what the rule matched.
+                    let sameFile = event.path == alert.firstPath && !(raises && AlertCoalescer.namesARule(kind))
+                    alert.firstPathAccess = sameFile ? alert.firstPathAccess.map { $0.union(event.access) } : event.access
                     alert.firstPath = event.path
                     alert.chain = event.chain
                     alert.chainAgents = event.chainAgents
@@ -160,8 +163,9 @@ public final class AlertCoalescer: @unchecked Sendable {
     }
 
     /// Sets the status of the open alerts the user acted on, each only if it did not escalate since the
-    /// copy acted on (every escalation moves `firstEventID` or `kind`): compare-and-set, so an escalation
-    /// that lands while an action is applied is never marked handled (daemon-3). One result per copy.
+    /// copy acted on: compare-and-set on `firstEventID`, which every escalation moves (a new kind with
+    /// it) and a merged repeat never does, so an escalation that lands while an action is applied is
+    /// never marked handled (daemon-3). One result per copy.
     public func setStatus(of acted: [Alert], to status: AlertStatus, resolution: AlertAction?) -> [StatusChange] {
         lock.lock(); defer { lock.unlock() }
         guard !acted.isEmpty else { return [] }
@@ -169,7 +173,7 @@ public final class AlertCoalescer: @unchecked Sendable {
         for (k, a) in open { keys[a.id] = k }
         return acted.map { seen in
             guard let k = keys[seen.id], var a = open[k] else { return .notOpen }
-            guard a.firstEventID == seen.firstEventID && a.kind == seen.kind else { return .escalated(a) }
+            guard a.firstEventID == seen.firstEventID else { return .escalated(a) }
             a.status = status
             a.resolution = resolution
             open[k] = a

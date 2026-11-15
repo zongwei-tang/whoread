@@ -933,7 +933,7 @@ public final class DaemonCore: @unchecked Sendable {
                     continue
                 case .notOpen:
                     // Nothing merges into it any more.
-                    guard var a = try store.alert(id: seen.id), a.firstEventID == seen.firstEventID, a.kind == seen.kind else { continue }
+                    guard var a = try store.alert(id: seen.id), a.firstEventID == seen.firstEventID else { continue }
                     a.status = status
                     a.resolution = resolution
                     changed.append(a)
