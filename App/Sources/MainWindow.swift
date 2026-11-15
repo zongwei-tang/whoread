@@ -1,4 +1,3 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
 import SwiftUI
 import WhoReadCore
 import WhoReadUIModel
@@ -26,10 +25,13 @@ struct MainWindow: View {
                     Text(L10n.f(.errVersionMismatchFormat, problem)).foregroundStyle(.red)
                 } else if let problem = model.connectionProblemText {
                     Text(problem).foregroundStyle(.red)
+                } else if let unreachable = model.unreachableText {
+                    Text(unreachable).foregroundStyle(.red).textSelection(.enabled)
                 }
-                // Not recognised as the signed app: a limited view, not an error.
-                if let limited = model.limitedViewText {
-                    Text(limited).foregroundStyle(.orange).textSelection(.enabled)
+                // Not recognised by the background service: one notice above every tab, for as long as
+                // it lasts, not an error in each (through the extension: a limited view).
+                if let notice = model.accessNotice {
+                    NoticeText(text: notice)
                 }
             }
             .font(.callout).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12)

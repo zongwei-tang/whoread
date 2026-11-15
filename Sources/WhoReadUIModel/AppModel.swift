@@ -311,6 +311,10 @@ public final class AppModel {
     public var alertsUnreadOnly = false
     public var feedPaused = false
     public var searchText = ""
+    /// The daemon answers on the system extension's Mach service, not as the dev LaunchDaemon (set by
+    /// the app). Decides what the notices about the installation advise: scripts/install.sh sets up
+    /// only the dev LaunchDaemon.
+    public var viaExtension = false
     public var language: Language
     /// What "System" in the language setting means (the language at launch).
     private let systemLanguage: Language
@@ -519,6 +523,10 @@ public final class AppModel {
     public func unavailableNote(_ part: SnapshotPart) -> String? {
         guard let e = failures[part] else { return nil }
         if e.code == .notPermitted {
+            // The notice on top (`notRecognisedText`) says why and how to fix it; this names the command.
+            if part.isRecorded && notRecognisedByDevDaemon {
+                return L10n.f(.notShownNotRecognisedFormat, L10n.partName(part, language), L10n.partCommand(part), language: language)
+            }
             return L10n.f(.notShownFormat, L10n.partName(part, language), L10n.partCommand(part), language: language)
         }
         // The daemon is reachable (the status was read): a read without an answer timed out or lost its
@@ -547,6 +555,61 @@ public final class AppModel {
         default: return L10n.f(.asksCannotReadFormat, L10n.message(for: e, language), language: language)
         }
     }
+
+    // MARK: - The installation
+
+    /// The daemon serves this app what is open to any program of the console user, but refuses it
+    /// what it recorded (the live feed, alerts, history, rules): it does not take this program for the
+    /// WhoRead app. With the dev LaunchDaemon, this app's code identity is no longer the one the
+    /// installer pinned (the app was rebuilt or replaced since). Not while the daemon cannot be read at
+    /// all, nor for a refusal to another user than the one at the console.
+    public var notRecognised: Bool {
+        guard lastError == nil else { return false }
+        return failures.contains { $0.key.isRecorded && $0.value.code == .notPermitted && !L10n.isNotConsoleUser($0.value) }
+    }
+
+    private var notRecognisedByDevDaemon: Bool { notRecognised && !viaExtension }
+
+    /// The notice at the top of the menu bar window and the main window while the dev LaunchDaemon does
+    /// not recognise this app: what cannot be shown, and that scripts/install.sh fixes it. It stays as
+    /// long as the refusals do. Through the system extension, `limitedViewText` says it instead.
+    public var notRecognisedText: String? {
+        guard notRecognisedByDevDaemon else { return nil }
+        let missing = refusedParts.filter(\.isRecorded).map { L10n.partName($0, language) }
+        let text = L10n.f(.notRecognisedFormat, L10n.alternatives(missing, language), language: language)
+        // Questions need a source that can hold an access: they still arrive, and can be denied here.
+        guard liveStatus?.sourceCanEnforce == true else { return text }
+        return text + (language == .zhHans ? "" : " ") + L10n.t(.notRecognisedAsks, language)
+    }
+
+    /// The one notice about what the daemon withholds from this app (`notRecognisedText`, else
+    /// `limitedViewText`): never both.
+    public var accessNotice: String? { notRecognisedText ?? limitedViewText }
+
+    /// Once a poll found the daemon unreachable: why nothing can be read. With the dev LaunchDaemon, also
+    /// that it may be refusing this very app: when the client code requirement the installer pinned
+    /// no longer admits the app (rebuilt or replaced since), XPC drops each of its connections, which
+    /// looks like no answer. nil while the daemon answers, and before the first poll.
+    public var unreachableText: String? {
+        guard !connected, lastError?.code == .unavailable else { return nil }
+        return L10n.t(viaExtension ? .errUnavailable : .errUnavailableDevDaemon, language)
+    }
+
+    /// Monitor-only mode (`OnboardingModel.isMonitorOnly`): the dev LaunchDaemon runs eslogger, which
+    /// cannot block.
+    public var monitorOnly: Bool {
+        OnboardingModel.isMonitorOnly(liveStatus, connected: connected, viaExtension: viaExtension)
+    }
+
+    /// Next to the enforcement switches (menu bar, Settings) in monitor-only mode: why blocking cannot be
+    /// turned on. Replaces `enforcementInactiveText` there, which would say the same about eslogger.
+    public var blockingUnavailableText: String? {
+        monitorOnly ? L10n.t(.blockingUnavailableNote, language) : nil
+    }
+
+    /// Whether the enforcement switches can be used. In monitor-only mode they cannot be turned on
+    /// (nothing could block), but one that is on can always be turned off.
+    public var enforcementSwitchUsable: Bool { !monitorOnly || enforcementSwitchOn }
 
     // MARK: - Enforcement
 

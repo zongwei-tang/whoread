@@ -1,4 +1,4 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
+import AppKit
 import SwiftUI
 import WhoReadCore
 import WhoReadUIModel
@@ -14,11 +14,18 @@ struct SettingsView: View {
             if let base = model.settings {
                 let binding = Binding(get: { draft ?? base }, set: { draft = $0 })
                 form(binding, base: base)
-            } else if model.unavailableNote(.settings) != nil {
-                // Not read (no answer, or a reply this app cannot read): say so, not a spinner for ever.
-                UnavailableNote(part: .settings).padding()
             } else {
-                ProgressView()
+                // The daemon's settings are not read (yet): the app's own still show.
+                Form {
+                    Section(L10n.t(.setGeneral)) { OpenAtLoginRow() }
+                    if model.unavailableNote(.settings) != nil {
+                        // Not read (no answer, or a reply this app cannot read): say so, not a spinner for ever.
+                        UnavailableNote(part: .settings)
+                    } else {
+                        ProgressView()
+                    }
+                }
+                .formStyle(.grouped)
             }
         }
     }
@@ -26,6 +33,8 @@ struct SettingsView: View {
     @ViewBuilder
     func form(_ s: Binding<Settings>, base: Settings) -> some View {
         Form {
+            // The app's own, not the daemon's: not part of the Save button's draft.
+            Section(L10n.t(.setGeneral)) { OpenAtLoginRow() }
             // Catalog edits are saved at once (read-modify-write on the daemon's current catalog);
             // they are not part of the Save button's draft.
             Section(L10n.t(.setMonitoredPaths)) {
@@ -80,11 +89,15 @@ struct SettingsView: View {
                 }
             }
             Section(L10n.t(.setEnforcement)) {
-                // Its own request, not part of the draft. Shows what is in effect.
+                // Its own request, not part of the draft. Shows what is in effect. Monitor-only: cannot be
+                // turned on, and says why (turning it off always works).
                 Toggle(L10n.t(.setEnforcementMaster), isOn: Binding(
                     get: { model.enforcementSwitchOn },
                     set: { connection.setEnforcement($0) }))
-                if let inactive = model.enforcementInactiveText {
+                    .disabled(!model.enforcementSwitchUsable)
+                if let unavailable = model.blockingUnavailableText {
+                    Text(unavailable).font(.caption).foregroundStyle(.secondary)
+                } else if let inactive = model.enforcementInactiveText {
                     Text(inactive).font(.caption).foregroundStyle(.orange)
                 }
                 if let stop = model.uncleanStopText {
@@ -124,6 +137,24 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+/// Settings → General → Open at login (`OpenAtLogin`): what ServiceManagement reports, read again when
+/// the tab appears and when the app becomes active (the user may change it in System Settings).
+struct OpenAtLoginRow: View {
+    var body: some View {
+        let item = AppLoginItem.shared
+        Toggle(L10n.t(.setOpenAtLogin), isOn: Binding(get: { item.isOn }, set: { item.set($0) }))
+            .onAppear { item.refresh() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in item.refresh() }
+        Text(L10n.t(.setOpenAtLoginNote)).font(.caption).foregroundStyle(.secondary)
+        if let note = item.note() {
+            Text(note).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+        }
+        if item.status == .requiresApproval {
+            Button(L10n.t(.openLoginItemsSettings)) { item.openSystemSettings() }
+        }
     }
 }
 

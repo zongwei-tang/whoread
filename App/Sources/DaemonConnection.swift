@@ -1,4 +1,3 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
 import AppKit
 import Foundation
 import Observation
@@ -60,6 +59,7 @@ final class DaemonConnection {
         machServiceName = name
         client = XPCClient(machServiceName: name)
         askClient = XPCClient(machServiceName: name)
+        model.viaExtension = (name == DaemonConnection.extensionServiceName)
     }
 
     /// The system extension's Mach service from Info.plist (nil when the build has none).
@@ -181,6 +181,7 @@ final class DaemonConnection {
         let name = DaemonConnection.resolveServiceName()
         guard name != machServiceName else { return }
         machServiceName = name
+        model.viaExtension = connectedViaExtension
         reconnect(questions: false)
         reconnect(questions: true)
     }

@@ -1,4 +1,3 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
 import SwiftUI
 import WhoReadCore
 import WhoReadIPC

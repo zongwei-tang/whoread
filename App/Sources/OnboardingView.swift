@@ -1,22 +1,26 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
+import AppKit
 import SwiftUI
 import WhoReadUIModel
 
 /// FDA → system extension → monitoring running. Each step re-checks live (the model polls the
-/// daemon every second).
+/// daemon every second). Monitor-only mode (the dev daemon with eslogger): the extension step is not
+/// available, and Full Disk Access goes to the daemon's executable, not to this app.
 struct OnboardingView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var pathCopied = false
 
     var body: some View {
         let o = connection.onboarding
+        let viaExtension = connection.connectedViaExtension
+        let monitorOnly = OnboardingModel.isMonitorOnly(model.status, connected: model.connected, viaExtension: viaExtension)
         // Detected from the connection too, so an extension approved before this launch shows as done.
-        let ext = o.extensionStepState(model.status, connected: model.connected, viaExtension: connection.connectedViaExtension)
+        let ext = o.extensionStepState(model.status, connected: model.connected, viaExtension: viaExtension)
         VStack(alignment: .leading, spacing: 16) {
             Text(L10n.t(.onbTitle)).font(.largeTitle.weight(.semibold))
             Text(L10n.t(.onbIntro)).foregroundStyle(.secondary)
-            step(1, L10n.t(.onbExtTitle), L10n.t(.onbExtBody), state: ext) {
+            step(1, L10n.t(.onbExtTitle), OnboardingModel.extensionBody(monitorOnly: monitorOnly), state: ext) {
                 if ext != .needsRestart {
                     Button(L10n.t(.onbExtButton)) { SystemExtensionManager.shared.activate() }
                 }
@@ -27,10 +31,23 @@ struct OnboardingView: View {
                     }
                 }
             }
-            step(2, L10n.t(.onbFDATitle), L10n.t(.onbFDABody), state: o.fullDiskAccessState(model.status, connected: model.connected)) {
+            step(2, L10n.t(.onbFDATitle), OnboardingModel.fullDiskAccessBody(monitorOnly: monitorOnly),
+                 state: o.fullDiskAccessState(model.status, connected: model.connected)) {
                 Button(L10n.t(.onbFDAButton)) { connection.openFullDiskAccessSettings() }
+                if monitorOnly {
+                    // For the + sheet's ⌘⇧G field.
+                    Button(L10n.t(.onbCopyPath)) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(OnboardingModel.daemonExecutablePath, forType: .string)
+                        pathCopied = true
+                    }
+                    if pathCopied {
+                        Text(L10n.t(.onbCopied)).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
-            step(3, L10n.t(.onbDaemonTitle), L10n.t(.onbDaemonBody), state: o.daemonState(model.status, connected: model.connected)) {
+            step(3, L10n.t(.onbDaemonTitle), OnboardingModel.daemonBody(monitorOnly: monitorOnly),
+                 state: o.daemonState(model.status, connected: model.connected)) {
                 EmptyView()
             }
             HStack {
@@ -50,14 +67,15 @@ struct OnboardingView: View {
             stateIcon(state).font(.title2).frame(width: 28)
             VStack(alignment: .leading, spacing: 6) {
                 Text("\(n). \(title)").font(.headline)
-                Text(body).font(.callout).foregroundStyle(.secondary)
+                Text(body).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                 if case .failed(let reason) = state {
                     Text(L10n.f(.onbFailedFormat, reason)).font(.caption).foregroundStyle(.red)
                 }
                 if state == .needsRestart {
                     Text(L10n.t(.onbRestartRequired)).font(.caption).foregroundStyle(.orange)
                 }
-                if state != .done { HStack { actions() } }
+                // Nothing to do for a step that is done, or one this installation cannot do.
+                if state != .done && state != .notAvailable { HStack { actions() } }
             }
         }
     }
@@ -70,6 +88,7 @@ struct OnboardingView: View {
         case .pending: Image(systemName: "circle").foregroundStyle(.secondary)
         case .needsRestart: Image(systemName: "arrow.clockwise.circle.fill").foregroundStyle(.orange)
         case .failed: Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+        case .notAvailable: Image(systemName: "minus.circle").foregroundStyle(.secondary)
         }
     }
 }

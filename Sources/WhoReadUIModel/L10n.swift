@@ -22,6 +22,10 @@ public enum L: String, CaseIterable, Sendable {
     // What cannot be read (limited view)
     case limitedViewFormat, limitedAskPaths, notShownFormat, cannotReadFormat
     case partAlerts, partLive, partSummaries, partRules, partSettings, partCatalog, partAgents
+    // Not recognised by the dev LaunchDaemon, or not reached at all
+    case notRecognisedFormat, notRecognisedAsks, notShownNotRecognisedFormat, errUnavailableDevDaemon
+    // Monitor-only mode (the dev LaunchDaemon with eslogger)
+    case blockingUnavailableNote
     // Tabs
     case tabLive, tabAlerts, tabApps, tabFiles, tabAgents, tabRules, tabSettings
     // Columns & common
@@ -49,10 +53,14 @@ public enum L: String, CaseIterable, Sendable {
     case setNotifyWouldBlock, setEnforcement, setEnforcementMaster, setEnforcementNote, setLatency, setReaddir
     case slowResponsesFormat, slowMissesFormat, slowP99Format, uncleanStopFormat, authDroppedDeniedFormat, authDroppedAllowedFormat
     case setLanguage, setLanguageSystem, setCoalesce, setSaved, setPermissionNeeded
+    // Settings → General: open at login
+    case setGeneral, setOpenAtLogin, setOpenAtLoginNote, loginItemNeedsApproval, loginItemFailedFormat, openLoginItemsSettings
     // Onboarding
     case onbTitle, onbIntro, onbFDATitle, onbFDABody, onbFDAButton, onbExtTitle, onbExtBody, onbExtButton
     case onbExtApprove, onbDaemonTitle, onbDaemonBody, onbAllSet, onbWaiting, onbDone, onbFailedFormat, onbContinue
     case onbOpenLoginItems, onbRestartRequired, openSetup
+    // Onboarding in monitor-only mode
+    case onbExtNotAvailableBody, onbFDABodyDaemonFormat, onbCopyPath, onbCopied, onbDaemonBodyMonitorOnly
     // Notifications
     case notifTitle, notifBlockedTitle, notifUncleanStopTitle, notifRuleNotBlockingTitle, notifAskTitle, notifAskFailedTitle
     // Enforcement inactive reasons and caveats
@@ -155,6 +163,18 @@ public enum L10n {
         .partSettings: ("the settings", "设置"),
         .partCatalog: ("the monitored paths", "监控路径"),
         .partAgents: ("the list of AI agents", "AI agent 列表"),
+
+        // %@: the parts not shown (`L10n.alternatives`).
+        .notRecognisedFormat: ("WhoRead is not recognised by the background service, so it cannot show %@ here. Run scripts/install.sh again: this happens when the app was rebuilt or replaced after installing.",
+                               "WhoRead 未被后台服务识别，因此这里无法显示%@。请重新运行 scripts/install.sh：在安装之后重新构建或替换了应用时会出现这种情况。"),
+        .notRecognisedAsks: ("Questions still arrive, without their file paths, and you can deny them here; allowing needs sudo in Terminal (for example: sudo whoread asks).",
+                             "问题仍会出现（不含文件路径），你可以在这里拒绝；允许访问需要在终端使用 sudo（例如：sudo whoread asks）。"),
+        .notShownNotRecognisedFormat: ("Not shown here: %@, as the background service does not recognise this app (see the notice above). In Terminal: %@",
+                                       "这里不显示%@，因为后台服务没有识别出这个应用（见上方提示）。在终端中：%@"),
+        .errUnavailableDevDaemon: ("WhoRead cannot reach its background service. If it is installed and running (check with: sudo launchctl print system/com.whoread.daemon), it may be refusing this app: run scripts/install.sh again, which is needed when the app was rebuilt or replaced after installing.",
+                                   "WhoRead 无法连接它的后台服务。如果后台服务已安装并在运行（可用 sudo launchctl print system/com.whoread.daemon 检查），它可能拒绝了这个应用：请重新运行 scripts/install.sh，在安装之后重新构建或替换了应用时需要这样做。"),
+        .blockingUnavailableNote: ("Blocking is not available: WhoRead monitors with Apple's eslogger here, which cannot block. Blocking needs a signed release of WhoRead.",
+                                   "无法拦截：这里 WhoRead 使用 Apple 的 eslogger 监控，eslogger 无法拦截。拦截需要已签名的 WhoRead 正式版。"),
 
         .tabLive: ("Live", "实时"),
         .tabAlerts: ("Alerts", "告警"),
@@ -278,6 +298,14 @@ public enum L10n {
         .setCoalesce: ("Merge repeated alerts within (minutes)", "合并多少分钟内的重复告警"),
         .setSaved: ("Saved", "已保存"),
         .setPermissionNeeded: ("This change needs administrator rights.", "这项修改需要管理员权限。"),
+        .setGeneral: ("General", "通用"),
+        .setOpenAtLogin: ("Open at login", "登录时打开"),
+        .setOpenAtLoginNote: ("Opens the menu bar app when you log in. The background service keeps monitoring either way.",
+                              "登录时打开菜单栏应用。无论是否打开，后台服务都会继续监控。"),
+        .loginItemNeedsApproval: ("WhoRead is not allowed to open at login. Turn it on in System Settings → General → Login Items.",
+                                  "WhoRead 未被允许在登录时打开。请在「系统设置 → 通用 → 登录项」中打开它。"),
+        .loginItemFailedFormat: ("Open at login could not be changed: %@", "无法更改「登录时打开」：%@"),
+        .openLoginItemsSettings: ("Open Login Items Settings", "打开登录项设置"),
         .slowResponsesFormat: ("Slow responses: %@. Enforcement stays as you set it.", "响应变慢：%@。拦截保持你的设置。"),
         .slowMissesFormat: ("%ld missed kernel deadlines", "错过内核期限 %ld 次"),
         .slowP99Format: ("p99 %@ ms (warning above %@ ms)", "p99 %@ 毫秒（超过 %@ 毫秒提醒）"),
@@ -306,6 +334,14 @@ public enum L10n {
         .onbOpenLoginItems: ("Open Login Items & Extensions", "打开「登录项与扩展」"),
         .onbRestartRequired: ("Restart your Mac to finish activating the extension.", "重启 Mac 以完成扩展激活。"),
         .openSetup: ("Open setup…", "打开设置向导…"),
+        .onbExtNotAvailableBody: ("Not available in this build: blocking needs a signed release of WhoRead with Apple's Endpoint Security entitlement. Until then WhoRead monitors without blocking: it records and alerts.",
+                                  "此版本不可用：拦截需要带有 Apple Endpoint Security 授权的已签名 WhoRead 正式版。在此之前，WhoRead 只监控、不拦截：它会记录并提醒。"),
+        .onbFDABodyDaemonFormat: ("macOS requires Full Disk Access for the program that monitors file access. Here that is WhoRead's background service, not this app: in the list, click +, press ⌘⇧G, paste %@ and turn it on.",
+                                  "macOS 要求监控文件访问的程序拥有完全磁盘访问权限。这里需要授权的是 WhoRead 的后台服务，而不是这个应用：在列表中点击 +，按 ⌘⇧G，粘贴 %@ 并打开它。"),
+        .onbCopyPath: ("Copy path", "拷贝路径"),
+        .onbCopied: ("Copied", "已拷贝"),
+        .onbDaemonBodyMonitorOnly: ("WhoRead records which apps touch your sensitive files and alerts you about unusual access. This build does not block.",
+                                    "WhoRead 会记录哪些应用碰了你的敏感文件，并在出现异常访问时提醒你。此版本不会拦截。"),
 
         .notifTitle: ("WhoRead", "WhoRead"),
         .notifBlockedTitle: ("WhoRead blocked an access", "WhoRead 拦截了一次访问"),
@@ -482,6 +518,12 @@ public enum L10n {
         case .catalog: return t(.partCatalog, language)
         case .agents: return t(.partAgents, language)
         }
+    }
+
+    /// "a, b or c" ("a、b、c"): a list of things none of which can be shown.
+    static func alternatives(_ items: [String], _ language: Language) -> String {
+        guard language == .en, let last = items.last, items.count > 1 else { return items.joined(separator: "、") }
+        return items.dropLast().joined(separator: ", ") + " or " + last
     }
 
     /// The command that shows the same data in Terminal.
