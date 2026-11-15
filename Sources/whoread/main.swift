@@ -1521,9 +1521,10 @@ let eventFilterSwitches: Set<String> = ["agents-only", "all", "denied"]
 /// purpose (`learning-days`, `verbose`, `baseline restart-learning`).
 func commandSpec(_ command: String) throws -> CommandSpec {
     let sub = args.positional.dropFirst().first
+    let named = ["rules", "catalog", "settings", "baseline", "fixture"].contains(command)
     func spec(_ usage: String, _ positionals: ClosedRange<Int> = 1...1, switches: Set<String> = [], values: Set<String> = [],
               repeatable: Set<String> = []) -> CommandSpec {
-        CommandSpec(name: command + (positionals.lowerBound > 1 ? " " + (sub ?? "") : ""), usage: usage, positionals: positionals,
+        CommandSpec(name: command + (named && positionals.lowerBound > 1 ? " " + (sub ?? "") : ""), usage: usage, positionals: positionals,
                     switches: switches, values: values, repeatable: repeatable)
     }
     let filters = "[--since …] [--until …] [--category ID]... [--app TEXT] [--agent ID] [--agents-only] [--denied] [--all] [--limit N]"

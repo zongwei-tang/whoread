@@ -234,6 +234,16 @@ final class CLIArgumentsTests: XCTestCase {
         let denied = try whoread(["kill-switch", "engage", "--path", locked + "/disable-enforcement"], socket: false)
         XCTAssertEqual(denied.status, 77, denied.stderr)
         XCTAssertTrue(denied.stderr.contains("sudo"), denied.stderr)
+
+        // Releasing a file in a folder this user may not change.
+        let held = dir.path("held")
+        XCTAssertEqual(mkdir(held, 0o700), 0)
+        defer { chmod(held, 0o700) }
+        XCTAssertEqual(try whoread(["kill-switch", "engage", "--path", held + "/disable-enforcement"], socket: false).status, 0)
+        XCTAssertEqual(chmod(held, 0o500), 0)
+        let release = try whoread(["kill-switch", "release", "--path", held + "/disable-enforcement"], socket: false)
+        XCTAssertEqual(release.status, 77, release.stderr)
+        XCTAssertTrue(release.stderr.contains("sudo"), release.stderr)
     }
 
     // MARK: - cli-5: values that do not parse are usage errors, never the default
