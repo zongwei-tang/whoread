@@ -26,4 +26,17 @@ enum AppLoginItem {
         service: MainAppLoginItem(),
         isHandled: { UserDefaults.standard.bool(forKey: OpenAtLogin.handledKey) },
         markHandled: { UserDefaults.standard.set(true, forKey: OpenAtLogin.handledKey) })
+
+    /// `--unregister-login-item` (scripts/uninstall.sh), before anything of the app starts: exit status 0
+    /// when WhoRead no longer opens at login, 1 (with the reason on stderr) when macOS refused.
+    static func unregisterAndExit() -> Never {
+        let ok = shared.uninstall(forgetHandled: {
+            UserDefaults.standard.removeObject(forKey: OpenAtLogin.handledKey)
+            UserDefaults.standard.synchronize()
+        })
+        if !ok, let note = shared.note(.en) {
+            FileHandle.standardError.write(Data((note + "\n").utf8))
+        }
+        exit(ok ? 0 : 1)
+    }
 }

@@ -106,6 +106,29 @@ public final class OpenAtLogin {
 
     public func openSystemSettings() { service.openSystemSettingsLoginItems() }
 
+    /// The app's argument for scripts/uninstall.sh: `uninstall`, then exit before anything else starts.
+    public static let unregisterArgument = "--unregister-login-item"
+
+    /// WhoRead is being removed: takes its login item back, if there is one, and forgets that the first
+    /// launch happened (`forgetHandled`), so that installing WhoRead again later opens it at login again.
+    /// False when ServiceManagement refused and the login item is still there (`note` says why); the
+    /// flag is kept then.
+    public func uninstall(forgetHandled: () -> Void) -> Bool {
+        refresh()
+        if status == .enabled || status == .requiresApproval {
+            var error: Error?
+            do { try service.unregister() } catch let e { error = e }
+            refresh()
+            if status == .enabled || status == .requiresApproval {
+                failure = OpenAtLogin.describe(error ?? CocoaError(.featureUnsupported))
+                return false
+            }
+        }
+        failure = nil
+        forgetHandled()
+        return true
+    }
+
     /// Under the switch: why the last change failed, or that the user has to allow it in System Settings.
     public func note(_ language: Language = L10n.current) -> String? {
         if let failure { return L10n.f(.loginItemFailedFormat, failure, language: language) }

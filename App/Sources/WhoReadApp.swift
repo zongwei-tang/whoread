@@ -6,13 +6,16 @@ import WhoReadCore
 import WhoReadIPC
 import WhoReadUIModel
 
-/// The entry point. `--self-check` checks the daemon and exits before anything of the app starts: no
-/// window, no menu bar item, no notification permission request. Anything else runs the menu bar app.
+/// The entry point. `--self-check` checks the daemon and `--unregister-login-item` takes back the login
+/// item (scripts/uninstall.sh); both exit before anything of the app starts: no window, no menu bar
+/// item, no notification permission request. Anything else runs the menu bar app.
 @main
 @MainActor
 enum WhoReadMain {
     static func main() {
-        if CommandLine.arguments.dropFirst().contains(SelfCheck.argument) { SelfCheckCommand.run() }
+        let arguments = CommandLine.arguments.dropFirst()
+        if arguments.contains(SelfCheck.argument) { SelfCheckCommand.run() }
+        if arguments.contains(OpenAtLogin.unregisterArgument) { AppLoginItem.unregisterAndExit() }
         WhoReadApp.main()
     }
 }

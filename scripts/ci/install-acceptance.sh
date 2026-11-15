@@ -3,7 +3,8 @@
 # checks that the installed pieces work together through the real launchd and XPC: the daemon runs,
 # the pinned CLI and app reach it, the recorded history needs root or the app, a re-signed copy of
 # the CLI is refused, and, where the runner lets eslogger run, the M2 acceptance
-# (scripts/acceptance-m2.sh on the test vault). Then it uninstalls and checks that nothing is left.
+# (scripts/acceptance-m2.sh on the test vault). Then it uninstalls with scripts/uninstall.sh and checks
+# that nothing is left.
 #
 # Never run it on your own Mac: it replaces, then removes, an installed WhoRead and its history.
 set -uo pipefail
@@ -104,8 +105,20 @@ else
   "$WR" status 2>&1 | grep -E 'source:|hint:' | indent
 fi
 
-echo "== uninstall"
-if sudo "$ROOT/scripts/uninstall-dev-daemon.sh" --purge > "$T/uninstall.log" 2>&1; then ok "uninstall-dev-daemon.sh --purge"; else bad "uninstall failed"; fi
+echo "== uninstall (scripts/uninstall.sh --purge)"
+# What scripts/uninstall.sh runs first: the app takes back its login item and exits at once.
+"$APPBIN" --unregister-login-item > "$T/unregister.log" 2>&1 &
+pid=$!
+for _ in $(seq 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+if kill -0 "$pid" 2>/dev/null; then
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  bad "the app's --unregister-login-item did not exit within 10 s"
+elif wait "$pid"; then
+  ok "the app's --unregister-login-item exits 0"
+else
+  bad "the app's --unregister-login-item failed"; indent < "$T/unregister.log"
+fi
+if "$ROOT/scripts/uninstall.sh" --purge > "$T/uninstall.log" 2>&1; then ok "scripts/uninstall.sh --purge"; else bad "uninstall failed"; fi
 indent < "$T/uninstall.log"
 if sudo launchctl print system/com.whoread.daemon > /dev/null 2>&1; then bad "the launchd job is still loaded"; else ok "launchd job removed"; fi
 for p in "$APP" "$WR" /usr/local/libexec/whoreadd "/Library/Application Support/WhoRead" \

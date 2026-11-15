@@ -431,9 +431,15 @@ final class InstallUIModelTests: XCTestCase {
             status = registered
         }
 
+        /// Unregistering throws `unregisterError` and still takes the login item away.
+        var removedDespiteError = false
+
         func unregister() throws {
             calls.append("unregister")
-            if let unregisterError { throw unregisterError }
+            if let unregisterError {
+                if removedDespiteError { status = .notRegistered }
+                throw unregisterError
+            }
             status = .notRegistered
         }
 
@@ -574,5 +580,53 @@ final class InstallUIModelTests: XCTestCase {
         login.set(true)
         XCTAssertTrue(login.isOn)
         XCTAssertNil(login.note(.en))
+    }
+
+    func testUninstallTakesTheLoginItemBackAndALaterInstallRegistersAgain() {
+        for status in [LoginItemStatus.enabled, .requiresApproval] {
+            let service = FakeLoginItem(status)
+            let flag = Flag()
+            flag.value = true
+            let item = makeItem(service, flag)
+            XCTAssertTrue(item.uninstall(forgetHandled: { flag.value = false }), "\(status)")
+            XCTAssertEqual(service.calls, ["unregister"], "\(status)")
+            XCTAssertEqual(service.status, .notRegistered)
+            XCTAssertFalse(flag.value, "a later install counts as a first launch")
+            // Installed again: its first launch registers it.
+            makeItem(service, flag).appLaunched()
+            XCTAssertEqual(service.calls, ["unregister", "register"], "\(status)")
+        }
+        // Nothing registered: nothing to take back, and still forgotten.
+        for status in [LoginItemStatus.notRegistered, .notFound] {
+            let service = FakeLoginItem(status)
+            let flag = Flag()
+            flag.value = true
+            XCTAssertTrue(makeItem(service, flag).uninstall(forgetHandled: { flag.value = false }))
+            XCTAssertEqual(service.calls, [])
+            XCTAssertFalse(flag.value)
+        }
+    }
+
+    func testAnUninstallThatMacOSRefusesSaysWhyAndKeepsTheFlag() {
+        let service = FakeLoginItem(.enabled)
+        service.unregisterError = Self.failure("Operation not permitted")
+        let flag = Flag()
+        flag.value = true
+        let item = makeItem(service, flag)
+        XCTAssertFalse(item.uninstall(forgetHandled: { flag.value = false }))
+        XCTAssertTrue(flag.value, "still registered: not a first launch next time")
+        XCTAssertEqual(item.note(.en), "Open at login could not be changed: Operation not permitted")
+        // An error that still took it away counts as done.
+        let gone = FakeLoginItem(.enabled)
+        gone.unregisterError = Self.failure("not found")
+        gone.removedDespiteError = true
+        let goneFlag = Flag()
+        goneFlag.value = true
+        let goneItem = makeItem(gone, goneFlag)
+        XCTAssertTrue(goneItem.uninstall(forgetHandled: { goneFlag.value = false }))
+        XCTAssertFalse(goneFlag.value)
+        XCTAssertNil(goneItem.note(.en))
+        XCTAssertEqual(OpenAtLogin.unregisterArgument, "--unregister-login-item",
+                       "scripts/uninstall.sh passes this argument")
     }
 }
