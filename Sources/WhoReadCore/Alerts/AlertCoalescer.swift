@@ -147,6 +147,36 @@ public final class AlertCoalescer: @unchecked Sendable {
     /// of that kind changes what the headline names.
     static func namesARule(_ kind: AlertKind) -> Bool { kind == .wouldBlock || kind == .blocked || kind == .ruleAlert }
 
+    /// What became of a status change on an open alert (`setStatus`).
+    public enum StatusChange: Equatable, Sendable {
+        /// Open and unchanged since the copy acted on (merged repeats aside): the open copy, which now has
+        /// the new status.
+        case changed(Alert)
+        /// It escalated since that copy (a new kind, a new access, a worse file the user has not seen):
+        /// left as it is, unread.
+        case escalated(Alert)
+        /// Not open here (its window closed): nothing changed.
+        case notOpen
+    }
+
+    /// Sets the status of the open alerts the user acted on, each only if it did not escalate since the
+    /// copy acted on (every escalation moves `firstEventID` or `kind`): compare-and-set, so an escalation
+    /// that lands while an action is applied is never marked handled (daemon-3). One result per copy.
+    public func setStatus(of acted: [Alert], to status: AlertStatus, resolution: AlertAction?) -> [StatusChange] {
+        lock.lock(); defer { lock.unlock() }
+        guard !acted.isEmpty else { return [] }
+        var keys: [Int64: Key] = [:]
+        for (k, a) in open { keys[a.id] = k }
+        return acted.map { seen in
+            guard let k = keys[seen.id], var a = open[k] else { return .notOpen }
+            guard a.firstEventID == seen.firstEventID && a.kind == seen.kind else { return .escalated(a) }
+            a.status = status
+            a.resolution = resolution
+            open[k] = a
+            return .changed(a)
+        }
+    }
+
     /// Keeps the in-memory copy in sync when the user acts on an alert.
     public func updateStatus(alertID: Int64, status: AlertStatus, resolution: AlertAction?) {
         lock.lock(); defer { lock.unlock() }

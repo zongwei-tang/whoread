@@ -911,16 +911,41 @@ public final class DaemonCore: @unchecked Sendable {
         writer.flush()
         let open = try store.alerts(AlertQuery(statuses: [.unread, .read], limit: 10_000))
         let settled = open.filter { $0.kind == .ask && $0.id != except && scope.settles(AnswerScope($0), action: action) }
-        guard !settled.isEmpty else { return }
-        let updated = settled.map { a -> Alert in
-            var a = a
-            a.status = .resolved
-            a.resolution = action
-            return a
+        try setAlertStatus(settled, to: .resolved, resolution: action)
+    }
+
+    /// Gives the alerts the user acted on (`acted`, as read from the store) a new status, each only if it
+    /// did not escalate since (daemon-3): one that did (the same app now writing a key, say) stays unread,
+    /// to be seen. The eslogger reader keeps ingesting meanwhile, so the change is made on the coalescer's
+    /// open copy and queued while no event can be merged in between; an alert whose window closed changes
+    /// on its stored copy, read again then. Never a copy read earlier written over a newer one. Returns
+    /// the alerts changed.
+    @discardableResult
+    private func setAlertStatus(_ acted: [Alert], to status: AlertStatus, resolution: AlertAction?) throws -> [Alert] {
+        guard !acted.isEmpty else { return [] }
+        return try pipeline.whileIngestionHeld {
+            var changed: [Alert] = []
+            for (seen, change) in zip(acted, coalescer.setStatus(of: acted, to: status, resolution: resolution)) {
+                switch change {
+                case .changed(let a):
+                    changed.append(a)
+                case .escalated:
+                    continue
+                case .notOpen:
+                    // Nothing merges into it any more.
+                    guard var a = try store.alert(id: seen.id), a.firstEventID == seen.firstEventID, a.kind == seen.kind else { continue }
+                    a.status = status
+                    a.resolution = resolution
+                    changed.append(a)
+                }
+            }
+            guard !changed.isEmpty else { return [] }
+            // Queued too: it replaces an older snapshot the writer may hold (re-queued after a failed flush),
+            // and is retried if the write below fails.
+            writer.enqueue(alerts: changed)
+            try store.upsert(changed)
+            return changed
         }
-        try store.upsert(updated)
-        writer.enqueue(alerts: updated)
-        for a in updated { coalescer.updateStatus(alertID: a.id, status: .resolved, resolution: action) }
     }
 
     /// Releases the held accesses "trust Apple programs" now allows (the setting was just turned on).
@@ -1037,7 +1062,7 @@ public final class DaemonCore: @unchecked Sendable {
     public func apply(action: AlertAction, toAlert id: Int64, peer: IPCPeer, privileged: Bool = true) throws {
         mutation.lock(); defer { mutation.unlock() }
         writer.flush()
-        guard var alert = try store.alert(id: id) else { throw IPCError(.notFound, "no alert #\(id)") }
+        guard let alert = try store.alert(id: id) else { throw IPCError(.notFound, "no alert #\(id)") }
         let now = Date()
         let scope = AnswerScope(alert)
         let r = alert.responsible
@@ -1097,13 +1122,11 @@ public final class DaemonCore: @unchecked Sendable {
             answered = false
         }
         if privileged {
-            alert.status = .resolved
-            alert.resolution = action
             do {
-                try store.upsert([alert])
-                // Replaces a stale snapshot the writer may have re-queued after a failed flush.
-                writer.enqueue(alerts: [alert])
-                coalescer.updateStatus(alertID: id, status: .resolved, resolution: action)
+                // The alert as read above, unless it escalated meanwhile (daemon-3).
+                if try setAlertStatus([alert], to: .resolved, resolution: action).isEmpty {
+                    Log.info("alert #\(id) escalated while \(action.rawValue) was applied: it stays unread")
+                }
                 if answered { try resolveAskAlerts(answering: scope, action: action, except: id) }
             } catch {
                 // "Ignore" (and "keep blocking" on a block) change nothing else: then nothing changed.
@@ -1126,17 +1149,12 @@ public final class DaemonCore: @unchecked Sendable {
     }
 
     public func markRead(_ ids: [Int64]?, peer: IPCPeer = .inProcess) throws {
+        // As every other status change: one at a time, on what was read (an escalation since stays unread).
+        mutation.lock(); defer { mutation.unlock() }
         writer.flush()
         Log.info("alerts \(ids.map { $0.map(String.init).joined(separator: ",") } ?? "all") marked read by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         let targets = try store.alerts(AlertQuery(statuses: [.unread], limit: 10_000)).filter { ids == nil || ids!.contains($0.id) }
-        let updated = targets.map { a -> Alert in
-            var a = a
-            a.status = .read
-            return a
-        }
-        try store.upsert(updated)
-        writer.enqueue(alerts: updated)
-        for a in updated { coalescer.updateStatus(alertID: a.id, status: .read, resolution: nil) }
+        try setAlertStatus(targets, to: .read, resolution: nil)
     }
 
     // MARK: - Rules
