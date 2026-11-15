@@ -21,6 +21,9 @@ public struct DaemonConfiguration: Sendable {
     public var replayRealtime = false
     /// Overrides home discovery (tests, replay of fixtures recorded under /Users/alice).
     public var homeDirectories: [String]?
+    /// A user's home directory: the only one a client without sudo or the app may extend monitoring to
+    /// (`DaemonCore.ensureMonitored`, ipc-2). The user database by default; tests give synthetic homes.
+    public var homeOf: @Sendable (uid_t) -> String? = { DaemonConfiguration.userDatabaseHome($0) }
     public var killSwitchPath: String?
     /// macOS XPC listener.
     public var machServiceName: String?
@@ -48,6 +51,16 @@ public struct DaemonConfiguration: Sendable {
     public var linkFullWalkInterval: TimeInterval = 30
 
     public init() {}
+
+    /// `uid`'s home directory in the user database (getpwuid_r), nil when it has none.
+    public static func userDatabaseHome(_ uid: uid_t) -> String? {
+        var entry = passwd()
+        var found: UnsafeMutablePointer<passwd>?
+        var buffer = [CChar](repeating: 0, count: 16 * 1024)
+        guard getpwuid_r(uid, &entry, &buffer, buffer.count, &found) == 0, found != nil, let dir = entry.pw_dir else { return nil }
+        let home = String(cString: dir)
+        return home.hasPrefix("/") ? home : nil
+    }
 
     public var resolvedKillSwitchPath: String {
         killSwitchPath ?? (dataDirectory as NSString).appendingPathComponent("disable-enforcement")
@@ -1269,10 +1282,15 @@ public final class DaemonCore: @unchecked Sendable {
         // only extend monitoring to its own files: inside a home or on an external volume, never
         // system paths (a deny rule there would block every user's processes once enforcement is on).
         // Checked on the spelling and on what it resolves to on disk, as the classifier follows links:
-        // `~/link -> /usr/lib` and `/Volumes/Macintosh HD/usr/lib` are system paths.
+        // `~/link -> /usr/lib` and `/Volumes/Macintosh HD/usr/lib` are system paths. Its own home is the
+        // peer's, never every home the daemon monitors (ipc-2): another user's folders are not its files
+        // (and `~/…` expands to every monitored home).
         if !privileged {
+            guard let euid = peer.euid, let home = config.homeOf(euid) else {
+                throw IPCError(.notPermitted, "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app")
+            }
             let resolver = RealpathSymlinkResolver()
-            let homeDirs = c.normalizer.homeDirectories
+            let homeDirs = [c.normalizer.normalize(home)]
             let homes = (homeDirs + homeDirs.compactMap(resolver.resolve)).map { h in PathNormalizer.fold(h.hasSuffix("/") ? h : h + "/") }
             func isOwn(_ path: String) -> Bool {
                 let k = PathNormalizer.fold(c.normalizer.normalize(path))
