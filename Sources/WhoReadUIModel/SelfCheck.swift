@@ -86,10 +86,17 @@ public struct SelfCheck: Equatable, Sendable {
             _ = try client.rules()
             return end("app recognised: yes", .recognised)
         } catch let e as IPCError where e.code == .notPermitted && !L10n.isNotConsoleUser(e) {
-            let why = viaExtension
-                ? "the system extension does not take this program for the signed WhoRead app"
-                : "the daemon does not take this program for the WhoRead app it was installed with: if the app was rebuilt "
+            let why: String
+            if viaExtension {
+                why = "the system extension does not take this program for the signed WhoRead app"
+            } else if status.source == .native {
+                // A VM with SIP disabled: scripts/install.sh would install the eslogger source (and needs Xcode).
+                why = "the daemon does not take this program for the WhoRead app it was installed with: it runs the native "
+                    + "monitor, so install it again with this app, sudo scripts/install-dev-daemon.sh native --app WhoRead.app"
+            } else {
+                why = "the daemon does not take this program for the WhoRead app it was installed with: if the app was rebuilt "
                     + "or replaced after installing, run scripts/install.sh again"
+            }
             return end("app recognised: no (\(why))", .notRecognised)
         } catch {
             // No answer, or a reply this app cannot read: the daemon could not be asked, which is not a refusal.

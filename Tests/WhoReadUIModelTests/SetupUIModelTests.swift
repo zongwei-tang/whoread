@@ -204,4 +204,42 @@ final class SetupUIModelTests: XCTestCase {
         XCTAssertEqual(SelfCheck.run(silent, asRoot: false).lines,
                        ["daemon: unreachable (daemon did not answer within 10 s (com.whoread.daemon.xpc))"])
     }
+
+    // MARK: - notice-native-dev-daemon-install-sh
+
+    func testNotRecognisedByTheNativeDevDaemonSaysToInstallItAsItWasInstalled() throws {
+        // scripts/install.sh installs the eslogger source and needs Xcode, which the test VM does not have:
+        // following it would fail there, or replace the native source.
+        let m = AppModel(language: .en)
+        poll(m, native(unrecognised))
+        XCTAssertTrue(m.notRecognised)
+        let notice = try XCTUnwrap(m.notRecognisedText)
+        XCTAssertFalse(notice.contains("scripts/install.sh"), notice)
+        XCTAssertTrue(notice.contains("sudo scripts/install-dev-daemon.sh native --app"), notice)
+        XCTAssertTrue(notice.hasPrefix("WhoRead is not recognised by the background service, so it cannot show alerts"), notice)
+        // The native source holds accesses: questions still arrive.
+        XCTAssertTrue(notice.contains("Questions still arrive"), notice)
+
+        let zh = AppModel(language: .zhHans)
+        poll(zh, native(unrecognised))
+        let zhNotice = try XCTUnwrap(zh.notRecognisedText)
+        XCTAssertFalse(zhNotice.contains("scripts/install.sh"), zhNotice)
+        XCTAssertTrue(zhNotice.contains("sudo scripts/install-dev-daemon.sh native --app"), zhNotice)
+        XCTAssertTrue(zhNotice.hasPrefix("WhoRead 未被后台服务识别"), zhNotice)
+
+        // The self-check says the same.
+        let r = SelfCheck.run(native(unrecognised), asRoot: false)
+        XCTAssertEqual(r.exitStatus, 2)
+        XCTAssertEqual(r.lines.count, 3)
+        XCTAssertFalse(r.lines[2].contains("scripts/install.sh"), r.lines[2])
+        XCTAssertTrue(r.lines[2].hasPrefix("app recognised: no (the daemon does not take this program for the WhoRead app it was "
+                                           + "installed with: "), r.lines[2])
+        XCTAssertTrue(r.lines[2].contains("sudo scripts/install-dev-daemon.sh native --app"), r.lines[2])
+
+        // With eslogger, the advice stays scripts/install.sh.
+        let es = AppModel(language: .en)
+        poll(es, eslogger(unrecognised))
+        XCTAssertTrue(try XCTUnwrap(es.notRecognisedText).contains("Run scripts/install.sh again"))
+        XCTAssertTrue(try XCTUnwrap(SelfCheck.run(eslogger(unrecognised), asRoot: false).lines.last).contains("run scripts/install.sh again"))
+    }
 }

@@ -571,12 +571,15 @@ public final class AppModel {
     private var notRecognisedByDevDaemon: Bool { notRecognised && !viaExtension }
 
     /// The notice at the top of the menu bar window and the main window while the dev LaunchDaemon does
-    /// not recognise this app: what cannot be shown, and that scripts/install.sh fixes it. It stays as
-    /// long as the refusals do. Through the system extension, `limitedViewText` says it instead.
+    /// not recognise this app: what cannot be shown, and that scripts/install.sh fixes it. With the native
+    /// source (a VM with SIP disabled, which scripts/install.sh does not set up): installing that daemon
+    /// again with this app. It stays as long as the refusals do. Through the system extension,
+    /// `limitedViewText` says it instead.
     public var notRecognisedText: String? {
         guard notRecognisedByDevDaemon else { return nil }
         let missing = refusedParts.filter(\.isRecorded).map { L10n.partName($0, language) }
-        let text = L10n.f(.notRecognisedFormat, L10n.alternatives(missing, language), language: language)
+        let format: L = liveStatus?.source == .native ? .notRecognisedNativeFormat : .notRecognisedFormat
+        let text = L10n.f(format, L10n.alternatives(missing, language), language: language)
         // Questions need a source that can hold an access: they still arrive, and can be denied here.
         guard liveStatus?.sourceCanEnforce == true else { return text }
         return text + (language == .zhHans ? "" : " ") + L10n.t(.notRecognisedAsks, language)

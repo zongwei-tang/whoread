@@ -24,6 +24,7 @@ public enum L: String, CaseIterable, Sendable {
     case partAlerts, partLive, partSummaries, partRules, partSettings, partCatalog, partAgents
     // Not recognised by the dev LaunchDaemon, or not reached at all
     case notRecognisedFormat, notRecognisedAsks, notShownNotRecognisedFormat, errUnavailableDevDaemon
+    case notRecognisedNativeFormat
     // Monitor-only mode (the dev LaunchDaemon with eslogger)
     case blockingUnavailableNote
     // Tabs
@@ -173,6 +174,10 @@ public enum L10n {
                                        "这里不显示%@，因为后台服务没有识别出这个应用（见上方提示）。在终端中：%@"),
         .errUnavailableDevDaemon: ("WhoRead cannot reach its background service. If it is installed and running (check with: sudo launchctl print system/com.whoread.daemon), it may be refusing this app: run scripts/install.sh again, which is needed when the app was rebuilt or replaced after installing.",
                                    "WhoRead 无法连接它的后台服务。如果后台服务已安装并在运行（可用 sudo launchctl print system/com.whoread.daemon 检查），它可能拒绝了这个应用：请重新运行 scripts/install.sh，在安装之后重新构建或替换了应用时需要这样做。"),
+        // %@: the parts not shown. The native source runs only in a VM with SIP disabled, which scripts/install.sh
+        // does not set up (it installs the eslogger source, and needs Xcode).
+        .notRecognisedNativeFormat: ("WhoRead is not recognised by the background service, so it cannot show %@ here. That service runs the native monitor: install it again with this app, sudo scripts/install-dev-daemon.sh native --app WhoRead.app (it recognises only the app it was installed with).",
+                                     "WhoRead 未被后台服务识别，因此这里无法显示%@。这个后台服务使用 native 监控方式：请指定这个应用重新安装它，sudo scripts/install-dev-daemon.sh native --app WhoRead.app（它只识别安装时指定的应用）。"),
         .blockingUnavailableNote: ("Blocking is not available: WhoRead monitors with Apple's eslogger here, which cannot block. Blocking needs a signed release of WhoRead.",
                                    "无法拦截：这里 WhoRead 使用 Apple 的 eslogger 监控，eslogger 无法拦截。拦截需要已签名的 WhoRead 正式版。"),
 
