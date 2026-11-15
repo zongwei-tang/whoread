@@ -8,14 +8,17 @@ import Foundation
 /// - process lifecycle (`"exec":`, `"fork":`, `"exit":`) → always parse (the process tree needs them)
 /// - rename/clone/copyfile/link/exchangedata → always parse (split dir+name destinations;
 ///   parents of sensitive dirs may be moved); mount → always parse (on a parent, it hides them)
-/// - create → parse with a `new_path` (split dir+name) destination; an `existing_file` one carries
-///   the full path, so it goes through the prefix test like an open (every file creation on the
-///   system is a create event), or, at exactly a proper ancestor of a prefix (a symlink planted at
-///   `~/.config`), through the ancestor test
+/// - create → its `existing_file` destination carries the full path, so it goes through the prefix
+///   test like an open (every file creation on the system is a create event), or, at exactly a
+///   proper ancestor of a prefix (a symlink planted at `~/.config`), through the ancestor test. A
+///   `new_path` destination is a create another ES client denied (nothing was created): the parser
+///   ignores it, so it gets no rule of its own
 /// - `close` with `"modified":false` → drop
 /// - any JSON string starting with a monitored prefix (or, on a create line, equal to an ancestor),
 ///   plain or under `/System/Volumes/Data` (ASCII case-insensitive, `/` or `\/` escaped, `"`, `\` and control
-///   characters JSON-escaped) → parse
+///   characters JSON-escaped) → parse. A non-ASCII path is spelled with each component in NFC and in
+///   NFD (`spellings`); one with letters that have case (é and É are other bytes, and the scan folds
+///   only ASCII) is matched by its longest ASCII fragment instead
 /// - lines containing `\u` escapes → parse (non-ASCII paths may be escaped)
 ///
 /// False positives only cost a parse; false negatives would lose events, so every rule errs open.
@@ -30,15 +33,15 @@ public final class LinePrefilter: @unchecked Sendable {
         case prefix = 5
         case escape = 6
         case create = 7
-        case newPath = 8
         /// A JSON string equal to an ancestor of a prefix: only matters on a create line.
         case ancestor = 9
     }
 
     private var automaton: AhoCorasick
-    /// Set when some prefix has no usable ASCII fragment: every file event must then be parsed.
+    /// Set when some prefix can be matched neither exactly nor by an ASCII fragment: every file event
+    /// must then be parsed.
     private var parseAllFileEvents = false
-    /// Set when some ancestor is not ASCII (it cannot be matched exactly): every create is parsed.
+    /// Set when some ancestor cannot be matched exactly (`spellings`): every create is parsed.
     private var parseAllCreates = false
 
     /// `ancestors`: proper ancestors of the prefixes (`PathClassifier.ancestors`). Only a create at
@@ -51,9 +54,34 @@ public final class LinePrefilter: @unchecked Sendable {
         (automaton, parseAllFileEvents, parseAllCreates) = LinePrefilter.build(prefixes, ancestors)
     }
 
-    /// Needle for a prefix. Non-ASCII prefixes (e.g. a project root under a Chinese folder name)
-    /// may appear in NFD, NFC or with different case in the raw JSON, so use their longest ASCII
-    /// fragment instead; over-matching just costs a parse.
+    /// At most this many spellings of one path (see `spellings`).
+    static let maxSpellings = 8
+
+    /// Every byte spelling of `path` that exact needles must cover, or nil when they cannot be listed.
+    /// An ASCII path is its only spelling (the scan folds ASCII case). APFS keeps a name in the normal
+    /// form it was created in, and the folders of one path can come from different programs (Finder
+    /// and Terminal differ): so every combination of each component in NFC and in NFD, up to
+    /// `maxSpellings`. None when a non-ASCII character has case variants: APFS ignores case, but é and
+    /// É are other bytes, so the spellings in which a path can be reported cannot be listed.
+    static func spellings(_ path: String) -> [String]? {
+        if path.utf8.allSatisfy({ $0 < 0x80 }) { return [path] }
+        var out = [""]
+        for (i, scalars) in path.unicodeScalars.split(separator: "/", omittingEmptySubsequences: false).enumerated() {
+            let component = String(String.UnicodeScalarView(scalars))
+            var forms: [String] = []
+            for form in [component, component.precomposedStringWithCanonicalMapping, component.decomposedStringWithCanonicalMapping] {
+                if form.unicodeScalars.contains(where: { !$0.isASCII && $0.properties.changesWhenCaseMapped }) { return nil }
+                // By bytes: String equality would take NFC and NFD for one.
+                if !forms.contains(where: { $0.utf8.elementsEqual(form.utf8) }) { forms.append(form) }
+            }
+            guard out.count * forms.count <= maxSpellings else { return nil }
+            out = out.flatMap { head in forms.map { i == 0 ? $0 : head + "/" + $0 } }
+        }
+        return out
+    }
+
+    /// Needle for a prefix whose spellings cannot be listed (`spellings`): its longest ASCII fragment,
+    /// which every spelling contains (given in NFC); over-matching just costs a parse.
     static func needle(for prefix: String) -> String? {
         if prefix.utf8.allSatisfy({ $0 < 0x80 }) { return prefix }
         var best = ""
@@ -111,25 +139,34 @@ public final class LinePrefilter: @unchecked Sendable {
             add(key, .multiPath)
         }
         add("\"create\":", .create)
-        add("\"new_path\":", .newPath)
         add("\"close\":", .close)
         add("\"modified\":false", .notModified)
         add("\"modified\": false", .notModified)
         add("\\u", .escape)
         for prefix in prefixes {
-            guard let p = needle(for: prefix) else {
+            if let listed = LinePrefilter.spellings(prefix) {
+                // A whole path: anchor it to the start of a JSON string so that e.g. /Volumes does not
+                // match every /System/Volumes/… path (process executables included), and ~/项目 not every
+                // path in the home. The firmlinked spelling is added explicitly instead.
+                for s in listed {
+                    for v in [s] + PathNormalizer.defaultFirmlinkRoots.map({ $0 + s }) {
+                        addJSON(v, before: "\"", .prefix)
+                    }
+                }
+                continue
+            }
+            let nfc = prefix.precomposedStringWithCanonicalMapping
+            guard let p = needle(for: nfc) else {
                 parseAll = true
                 continue
             }
-            if p == prefix {
-                // A whole path: anchor it to the start of a JSON string so that e.g. /Volumes does not
-                // match every /System/Volumes/… path (process executables included). The firmlinked
-                // spelling is added explicitly instead.
+            if nfc.utf8.starts(with: p.utf8) {
+                // The start of the prefix: anchored like a whole path.
                 for v in [p] + PathNormalizer.defaultFirmlinkRoots.map({ $0 + p }) {
                     addJSON(v, before: "\"", .prefix)
                 }
             } else {
-                // An ASCII fragment of a non-ASCII prefix can start mid-string: keep it unanchored.
+                // A fragment from the middle of the prefix can start mid-string: keep it unanchored.
                 addJSON(p, .prefix)
             }
         }
@@ -137,12 +174,14 @@ public final class LinePrefilter: @unchecked Sendable {
         // must not let every event in the home through, and opening (listing) the home or its
         // Library folder is frequent and never sensitive.
         for ancestor in ancestors {
-            guard ancestor.utf8.allSatisfy({ $0 < 0x80 }) else {
+            guard let listed = LinePrefilter.spellings(ancestor) else {
                 parseAllCreates = true
                 continue
             }
-            for v in [ancestor] + PathNormalizer.defaultFirmlinkRoots.map({ $0 + ancestor }) {
-                addJSON(v, before: "\"", after: "\"", .ancestor)
+            for s in listed {
+                for v in [s] + PathNormalizer.defaultFirmlinkRoots.map({ $0 + s }) {
+                    addJSON(v, before: "\"", after: "\"", .ancestor)
+                }
             }
         }
         return (AhoCorasick(patterns: patterns), parseAll, parseAllCreates)
@@ -160,7 +199,7 @@ public final class LinePrefilter: @unchecked Sendable {
         }
         func has(_ t: Tag) -> Bool { seen & (1 << t.rawValue) != 0 }
         if has(.lifecycle) || has(.multiPath) { return .parse }
-        if has(.create) && (has(.newPath) || has(.ancestor) || parseAllCreates) { return .parse }
+        if has(.create) && (has(.ancestor) || parseAllCreates) { return .parse }
         if has(.close) && has(.notModified) { return .drop }
         if has(.prefix) || has(.escape) || parseAllFileEvents { return .parse }
         return .drop
