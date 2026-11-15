@@ -13,6 +13,19 @@ public struct BaselineKey: Hashable, Codable, Sendable {
     }
 }
 
+extension ResponsibleEntity {
+    /// What the baseline knows this app, AI agent or program by: `key`, and for an AI agent with a Team ID
+    /// that team too ("agent:claude-code@TEAMID"). An agent is recognised by signals any process can copy
+    /// (argv0, an executable or .app folder name): what was seen of, or approved for, the team-signed
+    /// agent must not count for a process that only looks like it (attribution-2), as its answer rules
+    /// are pinned to the team. An agent without a team (an npm install running on node) cannot be told
+    /// apart from such a process this way (docs/THREAT_MODEL.md).
+    public var baselineKey: String {
+        guard kind == .agent, let team = teamID, !team.isEmpty else { return key }
+        return key + "@" + team
+    }
+}
+
 public struct BaselineEntry: Codable, Hashable, Sendable {
     public enum Source: String, Codable, Sendable {
         /// Seen during a learning period (none by default since ask mode).

@@ -1037,8 +1037,9 @@ public final class DaemonCore: @unchecked Sendable {
             }
             try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
             // What the alert covered, as the answer rule: a read approval does not answer a write (daemon-1).
+            // An AI agent's approval is its team's (ResponsibleEntity.baselineKey, attribution-2).
             for kind in alert.accesses.kinds {
-                baseline.approve(responsibleKey: r.key, categoryID: alert.categoryID, access: kind, at: now)
+                baseline.approve(responsibleKey: r.baselineKey, categoryID: alert.categoryID, access: kind, at: now)
             }
             persistBaseline()
         case .blockFromNowOn, .trustApplePrograms:
