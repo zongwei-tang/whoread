@@ -873,19 +873,26 @@ enum NativeSetupProblems {
 
 /// The auth-armed marker (DaemonConfiguration.authArmedMarkerPath): it exists while the file client is
 /// subscribed to AUTH events, so that a daemon that dies then (the kernel killed it for a missed
-/// deadline, a crash, a power loss) is reported as an unclean stop at the next start (DaemonCore).
-/// Outside the EndpointSecurity guard so it is unit-tested on any host.
+/// deadline, a crash, a power loss) is reported as an unclean stop at the next start (DaemonCore). A
+/// stop removes it first thing and for good: blocks queued on the client thread before the stop's own
+/// block still run before it, and one of them may subscribe and arm (enforcementChanged, a connect
+/// still retrying), which would leave the marker for the next start to report a clean stop as one
+/// that stopped unexpectedly. The stop's flag is checked and the file written under one lock of the
+/// marker's own (file IO: never the source's `lock`, which the handler takes). Outside the
+/// EndpointSecurity guard so it is unit-tested on any host.
 final class NativeAuthArmedMarker: @unchecked Sendable {
     private let lock = NSLock()
     /// nil: no marker (in-memory store).
     private let path: String?
+    /// Set by `stop`: nothing writes the marker any more.
+    private var stopping = false
 
     init(path: String?) { self.path = path }
 
-    /// AUTH events were subscribed.
+    /// AUTH events were subscribed: writes the marker, unless the source is stopping.
     func arm() {
         lock.lock(); defer { lock.unlock() }
-        guard let path else { return }
+        guard let path, !stopping else { return }
         do { try SafeFile.replace(path, with: Data(), mode: 0o600) } catch {
             Log.warning("could not create the auth-armed marker: \(error)")
         }
@@ -897,9 +904,12 @@ final class NativeAuthArmedMarker: @unchecked Sendable {
         if let path { unlink(path) }
     }
 
-    /// The source is stopping: a clean stop is not a death while enforcing.
+    /// The source is stopping (a clean stop is not a death while enforcing): removes the marker, and no
+    /// `arm` after this writes it again. Any thread; NativeESSource.stop calls it before anything else.
     func stop() {
-        disarm()
+        lock.lock(); defer { lock.unlock() }
+        stopping = true
+        if let path { unlink(path) }
     }
 }
 
@@ -1126,7 +1136,9 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     }
 
     public func stop() {
-        // A clean stop is not a death while enforcing (see DaemonCore's start-up check).
+        // A clean stop is not a death while enforcing (see DaemonCore's start-up check). First thing, and
+        // for good: a setAuth(true) queued in front of the stop's block below still runs before it, and
+        // must not write the marker again (NativeAuthArmedMarker).
         authMarker.stop()
         // A stop that takes a while is no stall: the watchdog must not exit under it.
         lock.lock()
