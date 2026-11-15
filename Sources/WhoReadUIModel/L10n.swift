@@ -24,7 +24,7 @@ public enum L: String, CaseIterable, Sendable {
     case partAlerts, partLive, partSummaries, partRules, partSettings, partCatalog, partAgents
     // Not recognised by the dev LaunchDaemon, or not reached at all
     case notRecognisedFormat, notRecognisedAsks, notShownNotRecognisedFormat, errUnavailableDevDaemon
-    case notRecognisedNativeFormat
+    case notRecognisedNativeFormat, errNotPermittedNotRecognised, alertNotRecognisedFormat, askAllowNotRecognisedFormat
     // Monitor-only mode (the dev LaunchDaemon with eslogger)
     case blockingUnavailableNote
     // Tabs
@@ -178,6 +178,13 @@ public enum L10n {
         // does not set up (it installs the eslogger source, and needs Xcode).
         .notRecognisedNativeFormat: ("WhoRead is not recognised by the background service, so it cannot show %@ here. That service runs the native monitor: install it again with this app, sudo scripts/install-dev-daemon.sh native --app WhoRead.app (it recognises only the app it was installed with).",
                                      "WhoRead 未被后台服务识别，因此这里无法显示%@。这个后台服务使用 native 监控方式：请指定这个应用重新安装它，sudo scripts/install-dev-daemon.sh native --app WhoRead.app（它只识别安装时指定的应用）。"),
+        // Refusals while the dev LaunchDaemon does not recognise this app: the notice says why and how to fix it.
+        .errNotPermittedNotRecognised: ("Not permitted: the background service does not recognise this app (see the notice about it), and changes that weaken protection need an app it recognises, or sudo.",
+                                        "没有权限：后台服务没有识别出这个应用（见相关提示），而削弱保护的修改需要被它识别的应用，或 sudo。"),
+        .alertNotRecognisedFormat: ("Not permitted: the background service does not recognise this app (see the notice about it), and this needs an app it recognises, or an administrator. In Terminal: %@",
+                                    "没有权限：后台服务没有识别出这个应用（见相关提示），这项操作需要被它识别的应用或管理员。请在终端运行：%@"),
+        .askAllowNotRecognisedFormat: ("Not allowed: the background service does not recognise this app (see the notice about it), and only an app it recognises or an administrator can allow. The question is still open. In Terminal: %@",
+                                       "没有权限：后台服务没有识别出这个应用（见相关提示），只有被它识别的应用或管理员才能允许。问题仍然保留。请在终端运行：%@"),
         .blockingUnavailableNote: ("Blocking is not available: WhoRead monitors with Apple's eslogger here, which cannot block. Blocking needs a signed release of WhoRead.",
                                    "无法拦截：这里 WhoRead 使用 Apple 的 eslogger 监控，eslogger 无法拦截。拦截需要已签名的 WhoRead 正式版。"),
 
@@ -569,11 +576,15 @@ public enum L10n {
 
     /// What to show when the daemon did not take an answer to a question. An allow refused for lack
     /// of privilege (not recognised as the signed app, not root) says how to give it from Terminal.
-    public static func answerError(_ e: IPCError, askID: Int64, action: AlertAction, _ language: Language = current) -> String {
+    /// `notRecognised`: the dev LaunchDaemon does not recognise this app, and the notice about it says why
+    /// (`AppModel.notRecognisedText`): a dev install has no signed app to point at.
+    public static func answerError(_ e: IPCError, askID: Int64, action: AlertAction, notRecognised: Bool = false,
+                                   _ language: Language = current) -> String {
         if isNotConsoleUser(e) { return t(.errNotConsoleUser, language) }
         switch e.code {
         case .notPermitted where AskAnswers.isAllow(action):
-            return f(.askAllowNotPermittedFormat, "sudo whoread ask \(askID) \(AskAnswers.cliVerb(action))", language: language)
+            return f(notRecognised ? .askAllowNotRecognisedFormat : .askAllowNotPermittedFormat,
+                     "sudo whoread ask \(askID) \(AskAnswers.cliVerb(action))", language: language)
         // Denying is open to the console user: refused for a reason of its own (the stored rules could
         // not be loaded), which the daemon's message gives. Not "this app is not recognised".
         case .notPermitted:
@@ -588,7 +599,7 @@ public enum L10n {
     /// The same for an answer given on an alert (Alerts tab, alert banners; `whoread alert` words).
     /// `kind`: the alert's kind, when known ("deny" on a question's alert is open to the console user).
     public static func alertActionError(_ e: IPCError, alertID: Int64, action: AlertAction, kind: AlertKind? = nil,
-                                        _ language: Language = current) -> String {
+                                        notRecognised: Bool = false, _ language: Language = current) -> String {
         if isNotConsoleUser(e) { return t(.errNotConsoleUser, language) }
         if e.code == .notPermitted {
             // "Block from now on", and "deny" on a question's alert, strengthen protection: open to the
@@ -596,7 +607,8 @@ public enum L10n {
             if action == .blockFromNowOn || (action == .keepBlocking && kind == .ask) {
                 return f(.errDaemonFormat, DisplayText.escaped(e.message, limit: 1000), language: language)
             }
-            return f(.alertNotPermittedFormat, "sudo whoread alert \(alertID) \(alertCLIWord(action))", language: language)
+            return f(notRecognised ? .alertNotRecognisedFormat : .alertNotPermittedFormat,
+                     "sudo whoread alert \(alertID) \(alertCLIWord(action))", language: language)
         }
         return answerOutcome(e, language) ?? message(for: e, language)
     }
@@ -642,10 +654,12 @@ public enum L10n {
     }
 
     /// What to show for a failed request. Daemon messages are English; known codes get a
-    /// translated sentence.
-    public static func message(for e: IPCError, _ language: Language = current) -> String {
+    /// translated sentence. `notRecognised`: as for `answerError`.
+    public static func message(for e: IPCError, notRecognised: Bool = false, _ language: Language = current) -> String {
         switch e.code {
-        case .notPermitted: return t(isNotConsoleUser(e) ? .errNotConsoleUser : .errNotPermitted, language)
+        case .notPermitted:
+            if isNotConsoleUser(e) { return t(.errNotConsoleUser, language) }
+            return t(notRecognised ? .errNotPermittedNotRecognised : .errNotPermitted, language)
         case .unavailable: return t(.errUnavailable, language)
         // The daemon's message can quote names and paths: one escaped line.
         case .versionMismatch: return f(.errVersionMismatchFormat, DisplayText.escaped(e.message, limit: 1000), language: language)

@@ -589,6 +589,28 @@ public final class AppModel {
     /// `limitedViewText`): never both.
     public var accessNotice: String? { notRecognisedText ?? limitedViewText }
 
+    // A refused change (`DaemonConnection.run`), alert action (`act`) or answer to a question (`answer`),
+    // worded for this installation. While the dev LaunchDaemon does not recognise this app, a refusal for
+    // lack of privilege points at the notice that says why and how to fix it (`notRecognisedText`), not at
+    // "the signed WhoRead app", which a dev install does not have. Refusals for another reason (another
+    // user at the screen, the daemon's own reason for a change that strengthens protection) keep their
+    // words, and so does everything through the system extension (`limitedViewText` there).
+
+    /// A refused change (`DaemonConnection.run`).
+    public func actionError(_ e: IPCError) -> String {
+        L10n.message(for: e, notRecognised: notRecognisedByDevDaemon, language)
+    }
+
+    /// A refused alert action (`DaemonConnection.act`).
+    public func alertActionError(_ e: IPCError, alertID: Int64, action: AlertAction, kind: AlertKind?) -> String {
+        L10n.alertActionError(e, alertID: alertID, action: action, kind: kind, notRecognised: notRecognisedByDevDaemon, language)
+    }
+
+    /// A refused answer to a question (`DaemonConnection.answer`).
+    public func answerError(_ e: IPCError, askID: Int64, action: AlertAction) -> String {
+        L10n.answerError(e, askID: askID, action: action, notRecognised: notRecognisedByDevDaemon, language)
+    }
+
     /// Once a poll found the daemon unreachable: why nothing can be read. With the dev LaunchDaemon, also
     /// that it may be refusing this very app: when the client code requirement the installer pinned
     /// no longer admits the app (rebuilt or replaced since), XPC drops each of its connections, which

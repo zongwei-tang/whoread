@@ -242,4 +242,69 @@ final class SetupUIModelTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(es.notRecognisedText).contains("Run scripts/install.sh again"))
         XCTAssertTrue(try XCTUnwrap(SelfCheck.run(eslogger(unrecognised), asRoot: false).lines.last).contains("run scripts/install.sh again"))
     }
+
+    // MARK: - not-recognised-action-errors-signed-app
+
+    func testRefusedChangesPointAtTheNoticeWhileTheDevDaemonDoesNotRecogniseTheApp() throws {
+        let m = AppModel(language: .en)
+        poll(m, eslogger(unrecognised))
+        XCTAssertNotNil(m.notRecognisedText)
+
+        // Pause monitoring (menu bar), Save in Settings: changes that weaken protection, refused.
+        let pause = try XCTUnwrap(refusal(.setPaused(true), unrecognised))
+        XCTAssertEqual(pause.code, .notPermitted)
+        var settings = try XCTUnwrap(m.settings)
+        settings.retentionDays += 1
+        let save = try XCTUnwrap(refusal(.updateSettings(settings), unrecognised))
+        // Always allow on an alert, and allow once on a question.
+        let alert = try XCTUnwrap(try recognised.alerts(AlertQuery(limit: 10)).first)
+        let always = try XCTUnwrap(refusal(.alertAction(alertID: alert.id, action: .alwaysAllow), unrecognised))
+        let id = try openQuestion()
+        let allow = try XCTUnwrap(refusal(.answerAsk(id: id, action: .allowOnce), unrecognised))
+
+        let texts = [m.actionError(pause), m.actionError(save),
+                     m.alertActionError(always, alertID: alert.id, action: .alwaysAllow, kind: alert.kind),
+                     m.answerError(allow, askID: id, action: .allowOnce)]
+        for text in texts {
+            // A dev install has no "signed WhoRead app": the notice on top says what is wrong and what fixes it.
+            XCTAssertFalse(text.contains("signed WhoRead app"), text)
+            XCTAssertTrue(text.contains("the background service does not recognise this app (see the notice about it)"), text)
+        }
+        // The Terminal commands stay.
+        XCTAssertTrue(texts[2].hasSuffix("In Terminal: sudo whoread alert \(alert.id) always-allow"), texts[2])
+        XCTAssertTrue(texts[3].contains("The question is still open."), texts[3])
+        XCTAssertTrue(texts[3].hasSuffix("In Terminal: sudo whoread ask \(id) allow-once"), texts[3])
+
+        let zh = AppModel(language: .zhHans)
+        poll(zh, eslogger(unrecognised))
+        for text in [zh.actionError(pause), zh.alertActionError(always, alertID: alert.id, action: .alwaysAllow, kind: alert.kind),
+                     zh.answerError(allow, askID: id, action: .allowOnce)] {
+            XCTAssertFalse(text.contains("已签名的 WhoRead 应用"), text)
+            XCTAssertTrue(text.contains("后台服务没有识别出这个应用（见相关提示）"), text)
+        }
+
+        // Refusals that are not about this app keep their words: another user at the screen, and the
+        // daemon's own reason for a change that strengthens protection.
+        let other = IPCError(.notPermitted, "only root or the console user may talk to the WhoRead daemon")
+        XCTAssertEqual(m.actionError(other), L10n.t(.errNotConsoleUser, .en))
+        XCTAssertEqual(m.answerError(other, askID: id, action: .allowOnce), L10n.t(.errNotConsoleUser, .en))
+        let rules = IPCError(.notPermitted, "the stored rules could not be loaded; only root or the WhoRead app may replace them")
+        XCTAssertEqual(m.alertActionError(rules, alertID: alert.id, action: .blockFromNowOn, kind: alert.kind),
+                       L10n.f(.errDaemonFormat, rules.message, language: .en))
+        XCTAssertEqual(m.answerError(rules, askID: id, action: .keepBlocking), L10n.f(.errDaemonFormat, rules.message, language: .en))
+
+        // No notice, no change: the app recognised, or the system extension (its limited view speaks of the
+        // signed app, which a release has).
+        let ok = AppModel(language: .en)
+        poll(ok, eslogger(recognised))
+        XCTAssertEqual(ok.actionError(pause), L10n.message(for: pause, .en))
+        let ext = AppModel(language: .en)
+        ext.viaExtension = true
+        poll(ext, unrecognised)
+        XCTAssertNotNil(ext.limitedViewText)
+        XCTAssertEqual(ext.actionError(pause), L10n.message(for: pause, .en))
+        XCTAssertEqual(ext.alertActionError(always, alertID: alert.id, action: .alwaysAllow, kind: alert.kind),
+                       L10n.alertActionError(always, alertID: alert.id, action: .alwaysAllow, kind: alert.kind, .en))
+        XCTAssertEqual(ext.answerError(allow, askID: id, action: .allowOnce), L10n.answerError(allow, askID: id, action: .allowOnce, .en))
+    }
 }
