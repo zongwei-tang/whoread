@@ -905,17 +905,20 @@ final class NativeAuthArmedMarker: @unchecked Sendable {
 
 /// es_clear_cache is rate-limited (ES_CLEAR_CACHE_RESULT_ERR_THROTTLE): clearCacheSoon calls it at most
 /// once per `interval`, and a clear held back here or throttled by the kernel is tried again
-/// `retryDelay` later. Outside the EndpointSecurity guard so it is unit-tested on any host.
+/// `retryDelay` later. Timed on the uptime clock, which never goes back: on the wall clock, setting the
+/// time back by N seconds (by hand, a large time correction, a restored VM snapshot) held up every clear
+/// for up to N seconds, and the kernel kept answering from the allows it had cached before a rule,
+/// catalog or enforcement change. Outside the EndpointSecurity guard so it is unit-tested on any host.
 struct NativeCacheClearThrottle {
     static let interval: TimeInterval = 1
     static let retryDelay: TimeInterval = 1.2
 
-    /// The clock, in seconds.
+    /// Seconds on the uptime clock (it pauses while the Mac sleeps; a wall-clock change does not move it).
     let now: () -> TimeInterval
     /// When es_clear_cache was last called; nil before the first call.
     private var last: TimeInterval?
 
-    init(now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }) {
+    init(now: @escaping () -> TimeInterval = { Double(DispatchTime.now().uptimeNanoseconds) / 1e9 }) {
         self.now = now
     }
 
