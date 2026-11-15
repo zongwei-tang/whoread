@@ -43,9 +43,11 @@ public struct AgentMatchClause: Codable, Hashable, Sendable {
     public var bundleNames: [String]?
     /// basename(argv[0]).
     public var argv0Names: [String]?
-    /// basename of any argv[1...] element (script paths for interpreters; `python -m aider`).
+    /// basename of the script or module an interpreter runs (`node /opt/homebrew/bin/claude`,
+    /// `python -m aider`; see `operands`).
     public var argvBasenames: [String]?
-    /// Substring of any argv[1...] element (e.g. "@anthropic-ai/claude-code").
+    /// Substring of the script or module an interpreter runs (e.g. "@anthropic-ai/claude-code"; see
+    /// `operands`).
     public var argvContains: [String]?
     /// Optional code identity pin, filled from `codesign -dv` on the user's machine.
     public var teamIDs: [String]?
@@ -97,16 +99,37 @@ public struct AgentMatchClause: Codable, Hashable, Sendable {
         }
         if let names = argvBasenames, !names.isEmpty {
             let wanted = Set(names.map(PathNormalizer.fold))
-            guard argv.dropFirst().contains(where: { wanted.contains(PathNormalizer.fold(AgentMatchClause.basename($0))) })
+            guard AgentMatchClause.operands(p).contains(where: { wanted.contains(PathNormalizer.fold(AgentMatchClause.basename($0))) })
             else { return false }
         }
         if let needles = argvContains, !needles.isEmpty {
-            guard argv.dropFirst().contains(where: { arg in needles.contains { arg.contains($0) } }) else { return false }
+            guard AgentMatchClause.operands(p).contains(where: { arg in needles.contains { arg.contains($0) } }) else { return false }
         }
         if let teams = teamIDs, !teams.isEmpty {
             guard let t = p.teamID, teams.contains(t) else { return false }
         }
         return true
+    }
+
+    /// Runtimes whose script may follow a `run` or `x` subcommand (`bun run claude`, `deno x npm:…`).
+    static let subcommandRuntimes: Set<String> = ["bun", "deno"]
+    static let runSubcommands: Set<String> = ["run", "x"]
+
+    /// What `argvBasenames` and `argvContains` are matched against: the script or module the interpreter
+    /// runs (`IdentitySpec.scriptArgument`), not any argument. `npm install -g @anthropic-ai/claude-code`
+    /// runs npm, `npx tsc -p ~/code/codex` npx and `node build.js --out dist/claude` build.js: none of them
+    /// is the agent they name. Where that position cannot be told (an option the parser does not know, a
+    /// subcommand after runtime options, code given on the command line), every argument after argv[0],
+    /// as before: missing an agent is the fail-open direction.
+    static func operands(_ p: ProcessRecord) -> ArraySlice<String> {
+        guard let argv = p.argv, argv.count > 1 else { return [] }
+        var command = argv
+        let runtime = subcommandRuntimes.contains(PathNormalizer.fold(p.name))
+        if runtime && runSubcommands.contains(command[1]) { command.remove(at: 1) }
+        if let script = IdentitySpec.scriptArgument(command), !(runtime && runSubcommands.contains(script)) {
+            return [script]
+        }
+        return argv.dropFirst()
     }
 
     static func basename(_ s: String) -> String {
