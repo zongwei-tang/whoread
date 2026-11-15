@@ -309,18 +309,33 @@ public enum IPCCodec {
     static let encoder = Exporter.encoder(pretty: false)
     static let decoder = Exporter.decoder()
 
+    /// Largest request the daemon decodes: as large as the largest reply a client takes
+    /// (`UnixSocket.maxFrame`). What whoread and the app send is far smaller (a catalog, or a rule with
+    /// 256 exceptions, is about 1 MiB). It does refuse some extreme rule lists the validator would still
+    /// accept; the dev socket refuses them already (`UnixSocket.maxRequestFrame`), and their `.rules`
+    /// reply would be larger than a client takes anyway.
+    public static let maxRequestSize = 64 * 1024 * 1024
+
     public static func encode(_ r: IPCRequest) throws -> Data { try encoder.encode(r) }
     public static func encode(_ r: IPCResponse) throws -> Data { try encoder.encode(r) }
     public static func decodeRequest(_ d: Data) throws -> IPCRequest { try decoder.decode(IPCRequest.self, from: d) }
     public static func decodeResponse(_ d: Data) throws -> IPCResponse { try decoder.decode(IPCResponse.self, from: d) }
 
-    /// Server side: bytes in, bytes out, never throws.
+    /// Server side: bytes in, bytes out, never throws. A request larger than `maxRequestSize` is refused
+    /// unread: it is neither decoded nor handed to the handler, which is where peers are authorized. Over
+    /// XPC any local process may send one when the daemon runs without a client requirement, and the
+    /// whole request would otherwise be decoded (another copy of it) before being refused (ipc-4).
     public static func serve(_ data: Data, handler: IPCHandler, peer: IPCPeer) -> Data {
         let response: IPCResponse
-        do {
-            response = handler.handle(try decodeRequest(data), peer: peer)
-        } catch {
-            response = .error(IPCError(.invalid, "undecodable request: \(error)"))
+        if data.count > maxRequestSize {
+            response = .error(IPCError(.invalid, "request too large: \(data.count) bytes, the daemon accepts at most "
+                                       + "\(maxRequestSize / (1024 * 1024)) MiB"))
+        } else {
+            do {
+                response = handler.handle(try decodeRequest(data), peer: peer)
+            } catch {
+                response = .error(IPCError(.invalid, "undecodable request: \(error)"))
+            }
         }
         return (try? encode(response)) ?? Data(#"{"error":{"_0":{"code":"internalError","message":"encode failed"}}}"#.utf8)
     }

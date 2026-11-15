@@ -255,6 +255,13 @@ public final class UnixSocketClient: IPCClient, @unchecked Sendable {
     }
 
     public func send(_ request: IPCRequest) throws -> IPCResponse {
+        let payload = try IPCCodec.encode(request)
+        // The server closes the connection on a larger frame without reading it (and without a reply),
+        // which would read here as a daemon that did not answer.
+        guard payload.count <= UnixSocket.maxRequestFrame else {
+            throw IPCError(.invalid, "request too large: \(payload.count) bytes, the daemon's dev socket accepts at most "
+                           + "\(UnixSocket.maxRequestFrame / (1024 * 1024)) MiB")
+        }
         let fd = socket(AF_UNIX, UnixSocket.streamType, 0)
         guard fd >= 0 else { throw IPCError(.unavailable, "socket(): \(String(cString: strerror(errno)))") }
         defer { close(fd) }
@@ -264,7 +271,7 @@ public final class UnixSocketClient: IPCClient, @unchecked Sendable {
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
         guard rc == 0 else { throw IPCError(.unavailable, "connect(\(path)): \(String(cString: strerror(errno)))") }
-        guard UnixSocket.sendFrame(fd, try IPCCodec.encode(request)) else { throw IPCError(.unavailable, "send failed") }
+        guard UnixSocket.sendFrame(fd, payload) else { throw IPCError(.unavailable, "send failed") }
         guard let reply = UnixSocket.receiveFrame(fd) else {
             throw IPCError(.unavailable, "no reply from \(path) (timed out after \(replyTimeout) s, reply too large, or connection closed)")
         }

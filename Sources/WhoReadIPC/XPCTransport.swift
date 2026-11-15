@@ -27,6 +27,7 @@ private final class ExportedService: NSObject, WhoReadXPCProtocol {
         self.peer = peer
     }
 
+    /// `serve` refuses a request over `IPCCodec.maxRequestSize` before decoding or authorizing it.
     func handle(_ request: Data, withReply reply: @escaping (Data) -> Void) {
         reply(IPCCodec.serve(request, handler: handler, peer: peer))
     }
@@ -41,15 +42,26 @@ public final class XPCServer: NSObject, NSXPCListenerDelegate, @unchecked Sendab
     /// enforces on every message (XPCPeerPolicy); it never makes a peer the app by itself.
     private let appCandidate: @Sendable (Int32) -> Bool
 
-    public init(machServiceName: String, handler: IPCHandler, policy: XPCPeerPolicy,
-                appCandidate: @escaping @Sendable (Int32) -> Bool = { _ in false }) {
-        self.listener = NSXPCListener(machServiceName: machServiceName)
+    public convenience init(machServiceName: String, handler: IPCHandler, policy: XPCPeerPolicy,
+                            appCandidate: @escaping @Sendable (Int32) -> Bool = { _ in false }) {
+        self.init(listener: NSXPCListener(machServiceName: machServiceName), handler: handler, policy: policy,
+                  appCandidate: appCandidate)
+    }
+
+    /// Tests: an anonymous listener in this process (`NSXPCListener.anonymous()`), reached through
+    /// `endpoint`; no Mach service is registered or looked up.
+    init(listener: NSXPCListener, handler: IPCHandler, policy: XPCPeerPolicy,
+         appCandidate: @escaping @Sendable (Int32) -> Bool = { _ in false }) {
+        self.listener = listener
         self.handler = handler
         self.policy = policy
         self.appCandidate = appCandidate
         super.init()
         listener.delegate = self
     }
+
+    /// The anonymous listener's endpoint (tests).
+    var endpoint: NSXPCListenerEndpoint { listener.endpoint }
 
     public func start() { listener.resume() }
     public func stop() { listener.invalidate() }
@@ -74,18 +86,28 @@ public final class XPCServer: NSObject, NSXPCListenerDelegate, @unchecked Sendab
 public final class XPCClient: IPCClient, @unchecked Sendable {
     public let machServiceName: String
     private let timeout: TimeInterval
+    private let makeConnection: () -> NSXPCConnection
     private let lock = NSLock()
     private var connection: NSXPCConnection?
 
     public init(machServiceName: String, timeout: TimeInterval = 15) {
         self.machServiceName = machServiceName
         self.timeout = timeout
+        makeConnection = { NSXPCConnection(machServiceName: machServiceName, options: .privileged) }
+    }
+
+    /// Tests: a listener in this process (`XPCServer(listener: .anonymous(), …)`). `name` stands in
+    /// for the service name in messages.
+    init(endpoint: NSXPCListenerEndpoint, name: String = "an anonymous test listener", timeout: TimeInterval = 15) {
+        machServiceName = name
+        self.timeout = timeout
+        makeConnection = { NSXPCConnection(listenerEndpoint: endpoint) }
     }
 
     private func currentConnection() -> NSXPCConnection {
         lock.lock(); defer { lock.unlock() }
         if let c = connection { return c }
-        let c = NSXPCConnection(machServiceName: machServiceName, options: .privileged)
+        let c = makeConnection()
         c.remoteObjectInterface = NSXPCInterface(with: WhoReadXPCProtocol.self)
         c.invalidationHandler = { [weak self] in
             self?.lock.lock()
