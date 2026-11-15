@@ -348,8 +348,10 @@ public enum L10n {
         .openSetup: ("Open setup…", "打开设置向导…"),
         .onbExtNotAvailableBody: ("Not available in this build: blocking needs a signed release of WhoRead with Apple's Endpoint Security entitlement. Until then WhoRead monitors without blocking: it records and alerts.",
                                   "此版本不可用：拦截需要带有 Apple Endpoint Security 授权的已签名 WhoRead 正式版。在此之前，WhoRead 只监控、不拦截：它会记录并提醒。"),
-        .onbFDABodyDaemonFormat: ("macOS requires Full Disk Access for the program that monitors file access. Here that is WhoRead's background service, not this app: in the list, click +, press ⌘⇧G, paste %@ and turn it on.",
-                                  "macOS 要求监控文件访问的程序拥有完全磁盘访问权限。这里需要授权的是 WhoRead 的后台服务，而不是这个应用：在列表中点击 +，按 ⌘⇧G，粘贴 %@ 并打开它。"),
+        // The steps of scripts/install.sh: a rebuilt whoreadd is another program to macOS, so an earlier
+        // install's entry goes first; /usr/bin/eslogger is its fallback when whoreadd alone is not enough.
+        .onbFDABodyDaemonFormat: ("macOS requires Full Disk Access for the program that monitors file access. Here that is WhoRead's background service, not this app. If whoreadd is in the list already (from an earlier install), select it and click − first. Then click + under the list (enter your password if asked), press ⌘⇧G, paste %@, press Return, click Open, and make sure the switch next to whoreadd is on. If it is on and monitoring still does not start, add /usr/bin/eslogger the same way and switch it on too.",
+                                  "macOS 要求监控文件访问的程序拥有完全磁盘访问权限。这里需要授权的是 WhoRead 的后台服务，而不是这个应用。如果列表里已经有 whoreadd（以前装过），先选中它，点 − 删掉。然后点列表下面的 +（如果要求，输入密码），按 ⌘⇧G，粘贴 %@，按回车，再点「打开」，并确认 whoreadd 旁边的开关是打开的。如果开关已经打开，监控仍然没有开始，请用同样的方法再添加 /usr/bin/eslogger，并打开它的开关。"),
         .onbCopyPath: ("Copy path", "拷贝路径"),
         .onbCopied: ("Copied", "已拷贝"),
         .onbDaemonBodyMonitorOnly: ("WhoRead records which apps touch your sensitive files and alerts you about unusual access. This build does not block.",

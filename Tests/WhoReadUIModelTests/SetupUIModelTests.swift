@@ -307,4 +307,26 @@ final class SetupUIModelTests: XCTestCase {
                        L10n.alertActionError(always, alertID: alert.id, action: .alwaysAllow, kind: alert.kind, .en))
         XCTAssertEqual(ext.answerError(allow, askID: id, action: .allowOnce), L10n.answerError(allow, askID: id, action: .allowOnce, .en))
     }
+
+    // MARK: - fda-step-stale-entry
+
+    func testTheMonitorOnlyFullDiskAccessStepHasTheInstallersSteps() throws {
+        // scripts/install.sh: remove the entry an earlier install left (a rebuilt whoreadd is another program
+        // to macOS), add whoreadd, and when that is not enough, /usr/bin/eslogger too.
+        let script = try String(contentsOf: repoRoot.appendingPathComponent("scripts/install.sh"), encoding: .utf8)
+        XCTAssertTrue(script.contains("If whoreadd is in the list already (from an earlier install), select it and click - first."))
+        XCTAssertTrue(script.contains("add /usr/bin/eslogger the same way and switch it on too"))
+        XCTAssertTrue(script.contains("如果列表里已经有 whoreadd（以前装过），先选中它，点 - 删掉。"))
+
+        for language in [Language.en, .zhHans] {
+            let body = OnboardingModel.fullDiskAccessBody(monitorOnly: true, language)
+            let remove = try XCTUnwrap(body.range(of: "−"), "\(language): no step to remove the old entry: \(body)")
+            let add = try XCTUnwrap(body.range(of: "+"), body)
+            XCTAssertLessThan(remove.lowerBound, add.lowerBound, "\(language): the old entry goes first: \(body)")
+            XCTAssertTrue(body.contains(OnboardingModel.daemonExecutablePath), body)
+            XCTAssertTrue(body.contains("/usr/bin/eslogger"), "\(language): \(body)")
+        }
+        XCTAssertTrue(OnboardingModel.fullDiskAccessBody(monitorOnly: true, .en).contains("If whoreadd is in the list already"))
+        XCTAssertTrue(OnboardingModel.fullDiskAccessBody(monitorOnly: true, .zhHans).contains("如果列表里已经有 whoreadd"))
+    }
 }
