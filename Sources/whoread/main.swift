@@ -8,55 +8,71 @@ whoread — who read my sensitive files?
 
 Usage: whoread <command> [options]
 
-Daemon queries (talk to whoreadd over XPC; --socket PATH for the dev socket):
-  status                         daemon state, source, enforcement, open questions, counters
-  events [filters]               recorded accesses (newest first)
+Daemon queries (talk to whoreadd over XPC; --socket PATH for the dev socket). [sudo] marks what
+needs sudo (or the WhoRead app): reading what the daemon recorded (it names files and keeps command
+lines), and changes that can weaken protection (settings set, rule edits other than adding a deny
+or alert rule, catalog changes, allowing a question).
+  status                         state, source, deadline mode, enforcement, questions, counters
+  events [filters]               [sudo] recorded accesses (newest first)
       --since 1h|2d|2026-10-04|"2026-10-04 09:30"   --until …   (no offset = local time)
       --category ID (repeatable)   --app TEXT   --agent ID   --agents-only   --denied
       --all (include folded system noise)   --limit N
-  tail [--all]                   follow new events live
-  asks [--json]                  questions waiting for your answer (ask mode, see below)
+  tail [--all]                   [sudo] follow new events live
+  asks [--json]                  questions waiting for your answer (ask mode, see below); file paths
+                                 and command lines are shown only with sudo
   ask <id> deny|block            deny now | deny now and from now on (saves a deny rule)
-  ask <id> allow-once|allow      allow for 10 minutes | always (saves an allow rule); needs sudo
-  ask <id> trust-apple           allow all Apple programs without asking (never under an AI agent);
-                                 needs sudo
-  alerts [--unread] [--since …] [--limit N]
-  alert <id> block               deny this app from now on (alert stays open without sudo)
-  alert <id> allow-once|always-allow|keep-blocking|ignore|trust-apple   needs sudo (or the WhoRead app)
-  read-all                       mark every alert read; needs sudo (or the WhoRead app)
-  apps | files | agents          who touched what (Apps / Files / Agents tabs)
-  daily [--since …] [filters]    per-day totals for days past the detail window (detail-days)
-  export --format json|jsonl|csv [--output FILE] [filters]      all matching events, oldest first
-  export --aggregates --format json|jsonl|csv [--output FILE] [--since …]   per-day totals
-  enforcement on|off|status      off needs sudo (or the WhoRead app)
-  pause | resume                 pause needs sudo (or the WhoRead app)
-  rules [list|templates|add --json-file F|enable ID|disable ID|enforce ID|dry-run ID|delete ID]
-  rules replace --json-file F --confirm   replace every rule (recovery after stored rules failed to
-                                          load; the old rows are kept in the rules_backup table)
+  ask <id> allow-once|allow      [sudo] allow for 10 minutes | always (saves an allow rule)
+  ask <id> trust-apple           [sudo] allow all Apple programs without asking (never under an
+                                 AI agent)
+  alerts [--unread] [--since …] [--limit N]   [sudo]
+  alert <id> block               deny this app from now on (the alert stays open without sudo)
+  alert <id> allow-once|always-allow|keep-blocking|ignore|trust-apple
+                                 [sudo] (keep-blocking on a question's alert only denies: no sudo)
+  read-all                       [sudo] mark every alert read
+  apps | files | agents          [sudo] who touched what (Apps / Files / Agents tabs)
+  daily [--since …] [filters]    [sudo] per-day totals for days past the detail window (detail-days)
+  export --format json|jsonl|csv [--output FILE] [filters]      [sudo] all matching events, oldest first
+  export --aggregates --format json|jsonl|csv [--output FILE] [--since …]   [sudo] per-day totals
+                                 FILE is owner-only (0600); under sudo, in a folder you own, it is
+                                 yours. CSV: a cell that starts like a formula (= + - @) gets a
+                                 leading apostrophe; on a terminal, hidden characters are escaped
+  enforcement on|off|status      off: [sudo]
+  pause | resume                 pause: [sudo]
+  rules [list]                   [sudo] every rule, with the scope of each saved answer
+  rules templates                the rule templates (JSON)
+  rules add --json-file F        [sudo], except for a new, enabled deny or alert rule without
+                                 exceptions
+  rules enable|disable|enforce|dry-run|delete ID   [sudo]
+  rules replace --json-file F --confirm   [sudo] replace every rule (recovery after stored rules
+                                          failed to load; the old rows are kept in rules_backup)
   catalog [show [ID]|export [--output FILE]|resolve-owners]
                                    resolve-owners: show the owner team/signing IDs codesign reports
                                    for installed apps (the daemon applies them in memory at start)
-  catalog add-path|remove-path CATEGORY PATH        PATH starts with / or ~/
-  catalog add-category ID NAME_EN NAME_ZH medium|high|critical [--path PATH]...
-  catalog remove-category ID | set-severity ID SEVERITY | enable ID | disable ID
-  catalog import FILE | reset
-  settings [show | set KEY VALUE]   keys: retention-days detail-days coalesce-minutes
+  catalog add-path|remove-path CATEGORY PATH        [sudo] PATH starts with / or ~/
+  catalog add-category ID NAME_EN NAME_ZH medium|high|critical [--path PATH]...   [sudo]
+  catalog remove-category ID | set-severity ID SEVERITY | enable ID | disable ID   [sudo]
+  catalog import FILE | reset    [sudo]
+  settings [show | set KEY VALUE]   set: [sudo], except turning trust-apple off
+                                    keys: retention-days detail-days coalesce-minutes
                                        readdir on|off  project-root-add PATH  project-root-remove PATH
                                        notifications on|off  min-severity medium|high|critical
                                        latency-p99-ms N (status warning)  language en|zh-Hans|system
                                        trust-apple on|off (allow Apple programs without asking)
-  baseline                       (app, category, access) combinations seen so far
-  Changes that can weaken protection (settings set, rule edits other than adding a deny or alert
-  rule, catalog changes, allowing a question) need sudo (or the WhoRead app).
+  baseline                       [sudo] (app, category, access) combinations seen so far (the
+                                 10,000 seen most recently)
 
-Ask mode: with enforcement on, an access that nothing decides yet (no rule, not an owner, not a
-system service) is held and you are asked: `whoread asks`, or the WhoRead app. Your answer is saved
-as a rule, so each app × category × access is asked once. Unanswered in time, the access is denied
-and the question stays open. Enforcement is never switched off automatically: only
-`sudo whoread enforcement off`, the app's switch or `sudo whoread kill-switch engage` turn it off.
+Ask mode: with enforcement on, an access that nothing decides yet (no rule, not an owner with no AI
+agent in its chain, not a system service) is held and you are asked: `whoread asks`, or the WhoRead
+app. Your answer is saved as a rule for that app × category × access and the AI agents in the
+chain, so each is asked once (a program whose starter is unknown is asked about separately).
+Unanswered in time, the access is denied and the question stays open. On macOS 27 the kernel also
+denies an access the daemon does not answer in time.
+Enforcement is never switched off automatically: only `sudo whoread enforcement off`, the app's
+switch or `sudo whoread kill-switch engage` turn it off.
 
 Local (no daemon):
-  kill-switch engage|release|status [--path P]   creates/removes the disable-enforcement file (root)
+  kill-switch engage|release|status [--path P]   engage|release: [sudo] creates/removes the
+                                                 disable-enforcement file
   replay FILE [--home DIR] [--defaults DIR] [--all] [--json]
                                  run an eslogger JSONL capture through the full pipeline
   fixture sanitize --input RAW|/dev/stdin --output OUT [--home DIR] [--vault DIR] [--capture-pid PID] [--sample N]
