@@ -3,8 +3,9 @@ import SwiftUI
 import WhoReadUIModel
 
 /// FDA → system extension → monitoring running. Each step re-checks live (the model polls the
-/// daemon every second). Monitor-only mode (the dev daemon with eslogger): the extension step is not
-/// available, and Full Disk Access goes to the daemon's executable, not to this app.
+/// daemon every second). Monitor-only mode (the dev daemon with eslogger, and any build that cannot
+/// install the extension): the extension step is not available, and Full Disk Access goes to the
+/// daemon's executable, not to this app.
 struct OnboardingView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(AppModel.self) private var model
@@ -14,9 +15,14 @@ struct OnboardingView: View {
     var body: some View {
         let o = connection.onboarding
         let viaExtension = connection.connectedViaExtension
-        let monitorOnly = OnboardingModel.isMonitorOnly(model.status, connected: model.connected, viaExtension: viaExtension)
+        // Decided by this build first: one without the extension's service (scripts/install.sh's ad hoc
+        // build) can never install it, so its steps do not change while the daemon restarts or refuses it.
+        let canInstall = DaemonConnection.extensionServiceName != nil
+        let monitorOnly = OnboardingModel.showsMonitorOnly(model.status, connected: model.connected, viaExtension: viaExtension,
+                                                           canInstallExtension: canInstall)
         // Detected from the connection too, so an extension approved before this launch shows as done.
-        let ext = o.extensionStepState(model.status, connected: model.connected, viaExtension: viaExtension)
+        let ext = o.extensionStepState(model.status, connected: model.connected, viaExtension: viaExtension,
+                                       canInstallExtension: canInstall)
         VStack(alignment: .leading, spacing: 16) {
             Text(L10n.t(.onbTitle)).font(.largeTitle.weight(.semibold))
             Text(L10n.t(.onbIntro)).foregroundStyle(.secondary)

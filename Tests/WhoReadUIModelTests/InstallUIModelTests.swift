@@ -220,8 +220,9 @@ final class InstallUIModelTests: XCTestCase {
         XCTAssertFalse(OnboardingModel.isMonitorOnly(nil, connected: true, viaExtension: false))
 
         // Not offered: it cannot work in this build, whatever this session tried.
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .notAvailable)
-        XCTAssertEqual(OnboardingModel(extensionState: .failed("x")).extensionStepState(status, connected: true, viaExtension: false),
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false, canInstallExtension: true), .notAvailable)
+        XCTAssertEqual(OnboardingModel(extensionState: .failed("x")).extensionStepState(status, connected: true, viaExtension: false,
+                                                                                        canInstallExtension: true),
                        .notAvailable)
         // Onboarding completes without it.
         XCTAssertEqual(o.fullDiskAccessState(status, connected: true), .done)
@@ -240,7 +241,7 @@ final class InstallUIModelTests: XCTestCase {
         XCTAssertEqual(OnboardingModel.fullDiskAccessBody(monitorOnly: false, .en), L10n.t(.onbFDABody, .en))
         XCTAssertEqual(OnboardingModel.extensionBody(monitorOnly: false, .zhHans), L10n.t(.onbExtBody, .zhHans))
         status.source = .replay
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .pending)
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false, canInstallExtension: true), .pending)
 
         // The app's model agrees, from the connection it reports.
         let m = AppModel(language: .en)
