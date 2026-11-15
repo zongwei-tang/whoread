@@ -266,8 +266,15 @@ public final class ProcessTree: @unchecked Sendable {
     /// recorded (agents, responsible app, topmost process), in chain order, and does not end at launchd.
     public func chain(for process: ProcessRecord, at time: Date) -> [ProcessNode] {
         lock.lock(); defer { lock.unlock() }
-        let id = observeLocked(normalized(process), at: time, depth: 0)
-        return chainLocked(from: id)
+        let p = normalized(process)
+        let id = observeLocked(p, at: time, depth: 0)
+        var chain = chainLocked(from: id)
+        if let leaf = chain.first, leaf.id == id, ProcessTree.isStale(p, in: leaf) {
+            // An event from an image the process had before its current one (see `update`): its leaf is
+            // the process as it was then, whatever it runs now.
+            chain[0] = ProcessTree.leaf(leaf, asItRan: p)
+        }
+        return chain
     }
 
     public func chain(nodeID: UInt64) -> [ProcessNode] {
@@ -510,6 +517,15 @@ public final class ProcessTree: @unchecked Sendable {
 
     private func update(_ id: UInt64, with p: ProcessRecord, at time: Date, fromSnapshot: Bool) {
         guard var node = nodes[id] else { return }
+        if ProcessTree.isStale(p, in: node) {
+            // An image this process had before its current one: the native source analyzes a file event
+            // after its process client has seen the process exec (two ES clients, no order between them).
+            // Not an exec we missed: adopting it would roll the process back to the image it left (and
+            // its parent with it, for everything it starts), so it is neither adopted nor noted.
+            if time > node.lastSeen { node.lastSeen = time }
+            nodes[id] = node
+            return
+        }
         let wasAgent = node.agentID != nil
         let sameImage = node.image.executablePath == p.executablePath
             && (node.image.pidVersion == nil || p.pidVersion == nil || node.image.pidVersion == p.pidVersion)
@@ -605,6 +621,28 @@ public final class ProcessTree: @unchecked Sendable {
     static func parentExecution(of p: ProcessRecord) -> ProcessToken? {
         guard let token = p.parentToken, let parent = forkParentPID(of: p), token.pid == parent, parent > 1 else { return nil }
         return token
+    }
+
+    /// `p` is an image `node` had before its current one: its pidversion was seen, but not last.
+    /// Membership, not order: pidversions are identifiers, not a clock. (An eslogger record with a
+    /// pidversion the node has not seen is an exec that was missed, and is adopted.)
+    static func isStale(_ p: ProcessRecord, in node: ProcessNode) -> Bool {
+        guard let version = p.pidVersion, let last = node.pidVersions.last, last != version else { return false }
+        return node.pidVersions.contains(version)
+    }
+
+    /// The process as it was when it ran the earlier image `image` (`isStale`), for an event from then.
+    /// Fork-scoped facts are the node's. An AI agent identity held from an earlier image (`adopt`) was
+    /// already there; one the current image gave it came after `image`.
+    static func leaf(_ node: ProcessNode, asItRan image: ProcessRecord) -> ProcessNode {
+        var leaf = node
+        var image = image
+        if image.startTime == nil { image.startTime = node.image.startTime }
+        if image.originalPPID == nil { image.originalPPID = node.image.originalPPID }
+        leaf.image = image
+        leaf.fromSnapshot = false
+        if !leaf.agentHeld { leaf.agentID = nil }
+        return leaf
     }
 
     /// Keeps the pidversions a process instance was seen with (bounded: a process execs a few times).
