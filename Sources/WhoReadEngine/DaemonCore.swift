@@ -655,9 +655,10 @@ public final class DaemonCore: @unchecked Sendable {
 
     static let maxListedAsks = 200
 
-    /// A settings update whose only change is turning "trust Apple programs" off (strengthening).
+    /// A settings update whose only change is turning "trust Apple programs" off (strengthening). Also
+    /// when it is off already: then it changes nothing (an idempotent `settings set trust-apple off`, ipc-3).
     static func onlyTurnsOffAppleTrust(_ new: Settings, current: Settings) -> Bool {
-        guard current.trustApplePrograms, !new.trustApplePrograms else { return false }
+        guard !new.trustApplePrograms else { return false }
         var c = current
         c.trustApplePrograms = false
         // Enforcement and pause are taken from the current settings by updateSettings anyway.
