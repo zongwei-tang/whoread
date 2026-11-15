@@ -8,7 +8,7 @@ import WhoReadIPC
 ///   (`Rule.coversUnknownAncestry`), where an AI agent would not be seen.
 /// - app-10: an alert's answer is scoped to the AI agents of the whole chain (`Alert.scopeAgents`),
 ///   not those of the 64 links it stores.
-final class R5CoverageLineTests: XCTestCase {
+final class R5DaemonCoverageLineTests: XCTestCase {
     private static let terminal = ResponsibleEntity(kind: .app, key: "app:/system/applications/utilities/terminal.app",
                                                     displayName: "Terminal", path: "/System/Applications/Utilities/Terminal.app")
     private static let foo = ResponsibleEntity(kind: .app, key: "app:/applications/foo.app", displayName: "Foo", path: "/Applications/Foo.app")

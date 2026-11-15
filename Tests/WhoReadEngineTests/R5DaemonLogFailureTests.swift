@@ -8,7 +8,7 @@ import WhoReadCore
 /// Objective-C exception on a failed write, which aborts the process, so these run the built
 /// `whoreadd` with a standard error every write to fails (a read-only descriptor: EBADF). Neither run
 /// gets as far as an event source: an unknown source, and a data directory the daemon refuses.
-final class R5LogFailureTests: XCTestCase {
+final class R5DaemonLogFailureTests: XCTestCase {
     /// The `whoreadd` executable next to the test bundle.
     private static let binary: String? = {
         var dirs: [URL] = []
@@ -29,7 +29,7 @@ final class R5LogFailureTests: XCTestCase {
 
     /// `stderr` nil: a pipe, read back. Otherwise the descriptor given.
     private func whoreadd(_ args: [String], stderr: FileHandle? = nil) throws -> Run {
-        guard let bin = R5LogFailureTests.binary else { throw XCTSkip("the whoreadd executable is not built") }
+        guard let bin = R5DaemonLogFailureTests.binary else { throw XCTSkip("the whoreadd executable is not built") }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: bin)
         p.arguments = args

@@ -6,7 +6,7 @@ import WhoReadIPC
 
 /// ipc-3: turning "trust Apple programs" off is open to the console user, also when it is off already
 /// (an idempotent hardening script runs `whoread settings set trust-apple off` every time).
-final class R5TrustOffTests: XCTestCase {
+final class R5DaemonTrustOffTests: XCTestCase {
     private let user = IPCPeer(pid: 4242, euid: 501, isTrustedCode: false)
 
     private func handler(_ core: DaemonCore) -> ServiceHandler {
@@ -17,7 +17,7 @@ final class R5TrustOffTests: XCTestCase {
 
     func testTrustOffWhenItIsAlreadyOffIsNotAWeakening() throws {
         let dir = TempDir()
-        let core = try r5Core(dir)
+        let core = try r5dCore(dir)
         let h = handler(core)
         var s = core.currentSettings
         XCTAssertFalse(s.trustApplePrograms, "the default")
@@ -34,7 +34,7 @@ final class R5TrustOffTests: XCTestCase {
 
     func testOnlyTurningTrustOffIsOpenToTheConsoleUser() throws {
         let dir = TempDir()
-        let core = try r5Core(dir)
+        let core = try r5dCore(dir)
         let h = handler(core)
         var on = core.currentSettings
         on.trustApplePrograms = true

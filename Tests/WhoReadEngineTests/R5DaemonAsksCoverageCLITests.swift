@@ -8,7 +8,7 @@ import WhoReadIPC
 /// that includes chains whose starter is unknown, as the saved rule does (`coversUnknownAncestry`).
 /// Runs the built `whoread` against a stub daemon on a dev socket (skipped where binding a Unix
 /// socket is not permitted, as in some sandboxes; it runs on CI).
-final class R5AsksCoverageCLITests: XCTestCase {
+final class R5DaemonAsksCoverageCLITests: XCTestCase {
     override func setUpWithError() throws { try skipIfSocketBindDenied() }
 
     private static let binary: String? = {
@@ -43,7 +43,7 @@ final class R5AsksCoverageCLITests: XCTestCase {
     }
 
     private func whoread(_ args: [String], socket: String, lang: String) throws -> (status: Int32, stdout: String, stderr: String) {
-        guard let bin = R5AsksCoverageCLITests.binary else { throw XCTSkip("the whoread executable is not built") }
+        guard let bin = R5DaemonAsksCoverageCLITests.binary else { throw XCTSkip("the whoread executable is not built") }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: bin)
         p.arguments = ["--socket", socket, "--lang", lang] + args

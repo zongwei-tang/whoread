@@ -2,7 +2,7 @@ import XCTest
 @testable import WhoReadCore
 
 /// daemon-7: without a learning period nothing is learned, whatever the event's time stamp.
-final class R5LearningTests: XCTestCase {
+final class R5DaemonLearningTests: XCTestCase {
     func testNoLearningPeriodMeansNoLearningEvenBeforeItsStart() {
         let b = Baseline(learningStartedAt: t0, learningDuration: 0)
         XCTAssertFalse(b.isLearning(at: at(-1)), "an event stamped before restart-learning (a pipe backlog)")

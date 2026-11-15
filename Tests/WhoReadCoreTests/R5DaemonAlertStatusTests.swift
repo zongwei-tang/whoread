@@ -3,7 +3,7 @@ import XCTest
 
 /// daemon-3 (core): a status change applies to the copy the user acted on, compare-and-set against the
 /// coalescer's open copy. Every escalation, also one that keeps what the headline names, blocks it.
-final class R5AlertStatusTests: XCTestCase {
+final class R5DaemonAlertStatusTests: XCTestCase {
     private let key = "/Users/alice/WhoReadTestVault/ssh/id_ed25519"
     private let knownHosts = "/Users/alice/WhoReadTestVault/ssh/known_hosts"
     private let note = "/Users/alice/WhoReadTestVault/notes/todo.txt"

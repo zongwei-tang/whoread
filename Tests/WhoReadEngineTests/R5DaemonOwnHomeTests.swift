@@ -6,7 +6,7 @@ import WhoReadIPC
 
 /// ipc-2: without sudo or the app, a path rule may extend monitoring only to the peer's own files: its
 /// own home and the external volumes folder, not another user's home on the same Mac.
-final class R5OwnHomeTests: XCTestCase {
+final class R5DaemonOwnHomeTests: XCTestCase {
     private let alice = IPCPeer(pid: 4242, euid: 501, isTrustedCode: true)
     private let root = IPCPeer(pid: 1, euid: 0, isTrustedCode: false)
 
@@ -21,7 +21,7 @@ final class R5OwnHomeTests: XCTestCase {
 
     func testAConsoleUserCannotExtendMonitoringIntoAnotherUsersHome() throws {
         let dir = TempDir()
-        let core = try r5Core(dir) { $0.homeDirectories = ["/Users/alice", "/Users/bob"] }
+        let core = try r5dCore(dir) { $0.homeDirectories = ["/Users/alice", "/Users/bob"] }
         let rule = denyRule("deny-bob-documents", "/Users/bob/Documents")
         XCTAssertThrowsError(try core.upsert(rule: rule, peer: alice, mustBeNew: true, privileged: false)) { e in
             XCTAssertEqual((e as? IPCError)?.code, .notPermitted, "\(e)")
@@ -38,7 +38,7 @@ final class R5OwnHomeTests: XCTestCase {
 
     /// Two users; the console user is alice (uid 501), whose home the user database gives.
     private func twoUsers(_ dir: TempDir) throws -> DaemonCore {
-        try r5Core(dir) { c in
+        try r5dCore(dir) { c in
             c.homeDirectories = ["/Users/alice", "/Users/bob"]
             c.homeOf = { $0 == 501 ? "/Users/alice" : ($0 == 502 ? "/Users/bob" : nil) }
         }
@@ -67,7 +67,7 @@ final class R5OwnHomeTests: XCTestCase {
             XCTAssertEqual((e as? IPCError)?.code, .notPermitted, "\(e)")
         }
         let single = TempDir()
-        let mine = try r5Core(single) { c in
+        let mine = try r5dCore(single) { c in
             c.homeDirectories = ["/Users/alice"]
             c.homeOf = { $0 == 501 ? "/Users/alice" : nil }
         }

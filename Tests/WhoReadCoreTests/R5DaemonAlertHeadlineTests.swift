@@ -4,7 +4,7 @@ import XCTest
 /// daemon-8: an alert's headline says what was done to the file it names. When an escalation moves
 /// it to another file, the window's other accesses are said apart; the answer still covers all of
 /// them (the "always allow" title names them). A rule's alert keeps naming an access its rule matched.
-final class R5AlertHeadlineTests: XCTestCase {
+final class R5DaemonAlertHeadlineTests: XCTestCase {
     private let key = "/Users/alice/WhoReadTestVault/ssh/id_ed25519"
     private let knownHosts = "/Users/alice/WhoReadTestVault/ssh/known_hosts"
     private let note = "/Users/alice/WhoReadTestVault/notes/todo.txt"

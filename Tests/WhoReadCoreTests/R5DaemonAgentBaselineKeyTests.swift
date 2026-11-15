@@ -3,7 +3,7 @@ import XCTest
 
 /// attribution-2 (core): what the baseline knows an AI agent by, and what keeps its critical accesses
 /// quiet.
-final class R5AgentBaselineKeyTests: XCTestCase {
+final class R5DaemonAgentBaselineKeyTests: XCTestCase {
     private let key = "/Users/alice/WhoReadTestVault/ssh/id_ed25519"
 
     func testAnAgentsBaselineKeyCarriesItsTeam() {

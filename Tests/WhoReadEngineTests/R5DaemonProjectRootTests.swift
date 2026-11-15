@@ -9,13 +9,13 @@ import WhoReadIPC
 /// refused, for the CLI and the app alike, instead of being stored and silently monitoring nothing.
 /// Roots stored before are never what blocks a change (enforcement and pause go through the same
 /// settings update), and can still be removed.
-final class R5ProjectRootTests: XCTestCase {
+final class R5DaemonProjectRootTests: XCTestCase {
     private let refused = [".", "code", "~code", "./code", "/", "~", "~/", "~/..", "/Users", "/Users/", "~/code/../other",
                            "~/./code", "/Users/alice/src/./app", "/Users/alice/src/..", "~/co\u{0}de"]
 
     func testRootsThatWouldMonitorNothingOrEverythingAreRefused() throws {
         let dir = TempDir()
-        let core = try r5Core(dir)
+        let core = try r5dCore(dir)
         for root in refused {
             XCTAssertThrowsError(try core.mutateSettings(peer: .inProcess) { $0.projectRoots.append(root) }, root.debugDescription) { e in
                 XCTAssertEqual((e as? IPCError)?.code, .invalid, "\(root.debugDescription): \(e)")
@@ -31,7 +31,7 @@ final class R5ProjectRootTests: XCTestCase {
 
     func testTheRequestFromAClientIsRefusedAsInvalid() throws {
         let dir = TempDir()
-        let core = try r5Core(dir)
+        let core = try r5dCore(dir)
         let handler = ServiceHandler(daemon: core, policy: .strict)
         var s = core.currentSettings
         s.projectRoots = ["."]
@@ -44,10 +44,10 @@ final class R5ProjectRootTests: XCTestCase {
     func testAStoredRootThatIsRefusedNowBlocksNothingAndCanBeRemoved() throws {
         let dir = TempDir()
         do {
-            let core = try r5Core(dir)
+            let core = try r5dCore(dir)
             try core.store.saveSettings(Settings(projectRoots: [".", "~/code"]))
         }
-        let core = try r5Core(dir)
+        let core = try r5dCore(dir)
         XCTAssertEqual(core.currentSettings.projectRoots, [".", "~/code"])
         try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
         try core.mutateSettings(peer: .inProcess) { $0.enforcementEnabled = false }

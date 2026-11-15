@@ -4,7 +4,7 @@ import XCTest
 /// daemon-5: stored settings are read field by field, so one value this build cannot read keeps the
 /// others. A client's settings (IPC) are still decoded strictly: a value the daemon does not know is
 /// refused, never replaced by a default and saved.
-final class R5SettingsDecodeTests: XCTestCase {
+final class R5DaemonSettingsDecodeTests: XCTestCase {
     private func blob(_ change: (inout [String: Any]) -> Void) throws -> Data {
         var s = Settings(enforcementEnabled: true, retentionDays: 90, detailDays: 14, projectRoots: ["/Users/alice/src"],
                          notifications: NotificationSettings(enabled: false, minimumSeverity: .high))
