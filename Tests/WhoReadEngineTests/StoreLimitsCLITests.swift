@@ -159,7 +159,7 @@ final class StoreLimitsCLITests: XCTestCase {
     }
 
     /// ipc-1: `export --aggregates` pages with the cursor like the event export, so the cap does not
-    /// cut it; `--limit N` still exports the newest N, oldest day first.
+    /// cut it; `--limit N` exports the oldest N, as the event export does (cli-5), oldest day first.
     func testExportAggregatesPagesPastTheReplyCap() throws {
         let dir = TempDir()
         let core = try core(dir)
@@ -179,7 +179,8 @@ final class StoreLimitsCLITests: XCTestCase {
         XCTAssertEqual(rows.map(\.day), rows.map(\.day).sorted(), "oldest day first")
 
         let limited = try whoread(["export", "--aggregates", "--format", "jsonl", "--limit", "3"], socket: socket)
+        XCTAssertEqual(limited.status, 0, limited.stderr)
         let three = try limited.stdout.split(separator: "\n").map { try Exporter.decoder().decode(DailyAggregate.self, from: Data($0.utf8)) }
-        XCTAssertEqual(three.map(\.key), Array(rows.suffix(3)).map(\.key), "the newest three, oldest first")
+        XCTAssertEqual(three.map(\.key), Array(rows.prefix(3)).map(\.key), "the oldest three, oldest first")
     }
 }
