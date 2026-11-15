@@ -30,6 +30,7 @@ or alert rule, catalog changes, allowing a question).
                                  [sudo] (keep-blocking on a question's alert only denies: no sudo)
   read-all                       [sudo] mark every alert read
   apps | files | agents          [sudo] who touched what (Apps / Files / Agents tabs)
+      apps --since 1h|2d|…       FIRST and COUNT of that window only (days past detail-days count whole)
   daily [--since …] [filters]    [sudo] per-day totals for days past the detail window (detail-days)
   export --format json|jsonl|csv [--output FILE] [filters]      [sudo] all matching events, oldest first
   export --aggregates --format json|jsonl|csv [--output FILE] [--since …]   [sudo] per-day totals
@@ -500,9 +501,31 @@ func groupSummaries(_ sums: [UsageSummary], by key: (UsageSummary) -> String) ->
     return order.map { ($0, groups[$0]!) }
 }
 
+/// The daemon sends the most recently active summary rows only (`UsageSummary.replyLimit`): say so
+/// when a view may be missing older ones, as `whoread baseline` does.
+func noteSummaryCap(_ rows: Int) {
+    guard rows >= UsageSummary.replyLimit else { return }
+    note(language == .zhHans ? "注意：守护进程只发送最近活动的 \(UsageSummary.replyLimit) 行，更早的没有列出，也不在计数里。"
+                             : "note: the daemon sends the \(UsageSummary.replyLimit) most recently active rows; older ones are not shown or counted")
+}
+
+/// `apps --since` past the detail window: accesses there survive only as per-day totals, which the
+/// daemon counts whole.
+func noteWholeDays(_ c: IPCClient, since: Date) {
+    guard let s = try? c.settings(), since < Date().addingTimeInterval(-Double(s.detailDays) * 86400) else { return }
+    note(language == .zhHans
+         ? "注意：超过 \(s.detailDays) 天的访问只保留按天汇总，所以那些天按整天计入首次时间和次数。"
+         : "note: accesses older than \(s.detailDays) day\(s.detailDays == 1 ? "" : "s") are kept only as per-day totals, "
+           + "so FIRST and COUNT take those days whole")
+}
+
 func cmdApps(_ c: IPCClient) throws {
     let since = try args.value("since").map { try Format.parseSince($0) }
-    let sums = try c.summaries(since: since).filter { args.has("all") || !$0.benign }
+    // With --since the daemon counts that window only: FIRST and COUNT are not all-time totals (cli-6).
+    let all = try c.summaries(since: since)
+    noteSummaryCap(all.count)
+    if let since { noteWholeDays(c, since: since) }
+    let sums = all.filter { args.has("all") || !$0.benign }
     if args.json { return outJSON(try Format.json(sums)) }
     let ctx = context(c)
     var rows: [[String]] = []
@@ -517,7 +540,9 @@ func cmdApps(_ c: IPCClient) throws {
 }
 
 func cmdFiles(_ c: IPCClient) throws {
-    let sums = try c.summaries(since: nil).filter { args.has("all") || !$0.benign }
+    let all = try c.summaries(since: nil)
+    noteSummaryCap(all.count)
+    let sums = all.filter { args.has("all") || !$0.benign }
     if args.json { return outJSON(try Format.json(sums)) }
     let ctx = context(c)
     var rows: [[String]] = []
@@ -529,7 +554,9 @@ func cmdFiles(_ c: IPCClient) throws {
 }
 
 func cmdAgents(_ c: IPCClient) throws {
-    let sums = try c.summaries(since: nil).filter { $0.agentID != nil }
+    let all = try c.summaries(since: nil)
+    noteSummaryCap(all.count)
+    let sums = all.filter { $0.agentID != nil }
     if args.json { return outJSON(try Format.json(sums)) }
     let ctx = context(c)
     let agents = (try? c.agents()) ?? AgentCatalog(agents: [])
@@ -542,10 +569,9 @@ func cmdAgents(_ c: IPCClient) throws {
     out(Format.table(rows, header: language == .zhHans ? ["AI agent", "碰过的类别", "被拦截", "最近", "次数"] : ["AI AGENT", "CATEGORIES", "BLOCKED", "LAST", "COUNT"]))
 }
 
-/// Daily aggregates matching the event filters (the daemon applies `--since`).
-func dailyRows(_ c: IPCClient) throws -> [DailyAggregate] {
-    let q = try eventQuery()
-    let rows = try c.dailyAggregates(since: q.since).filter { a in
+/// The event filters as they apply to daily aggregates (the daemon applies `--since`).
+func dailyFilter(_ q: EventQuery) -> (DailyAggregate) -> Bool {
+    { a in
         let s = a.summary
         if let until = q.until, s.firstSeen > until { return false }
         if let cats = q.categoryIDs, !cats.contains(s.categoryID) { return false }
@@ -556,7 +582,40 @@ func dailyRows(_ c: IPCClient) throws -> [DailyAggregate] {
         if let t = q.text?.lowercased(), !t.isEmpty, !s.responsible.displayName.lowercased().contains(t) { return false }
         return true
     }
+}
+
+/// Daily aggregates matching the event filters, from one reply: the newest `DailyAggregate.replyLimit`.
+func dailyRows(_ c: IPCClient) throws -> [DailyAggregate] {
+    let q = try eventQuery()
+    let all = try c.dailyAggregates(since: q.since)
+    if all.count >= DailyAggregate.replyLimit {
+        note(language == .zhHans ? "注意：守护进程只发送最新的 \(DailyAggregate.replyLimit) 行按天汇总；全部见 `whoread export --aggregates`。"
+                                 : "note: the daemon sends the newest \(DailyAggregate.replyLimit) per-day rows; "
+                                   + "`whoread export --aggregates` has them all")
+    }
+    let rows = all.filter(dailyFilter(q))
     return args.value("limit") == nil ? rows : Array(rows.prefix(max(0, q.limit)))
+}
+
+/// Every daily aggregate matching the event filters, newest day first, page by page (a reply holds
+/// at most `DailyAggregate.replyLimit`). `--limit N`: the newest N.
+func allDailyRows(_ c: IPCClient) throws -> [DailyAggregate] {
+    let q = try eventQuery()
+    let keep = dailyFilter(q)
+    let total = args.value("limit") == nil ? Int.max : max(0, q.limit)
+    var rows: [DailyAggregate] = []
+    var seen = Set<DailyAggregate.Key>()
+    var after: DailyAggregate.Key?
+    while rows.count < total {
+        let page = try c.dailyAggregates(since: q.since, limit: exportPageSize, after: after)
+        // A daemon that ignores the cursor (an older build) sends the same rows again: keep each row
+        // once, and stop.
+        let fresh = page.filter { seen.insert($0.key).inserted }
+        rows += fresh.lazy.filter(keep).prefix(total - rows.count)
+        guard page.count == exportPageSize, fresh.count == page.count, let last = page.last else { break }
+        after = last.key
+    }
+    return rows
 }
 
 func cmdDaily(_ c: IPCClient) throws {
@@ -714,7 +773,7 @@ func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter)
 
 /// Per-day totals (details older than detail-days live only here), oldest day first.
 func exportAggregates(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter) throws -> Int {
-    let rows = Array(try dailyRows(c).reversed())
+    let rows = Array(try allDailyRows(c).reversed())
     switch f {
     case .json:
         try w.write(Format.terminalSafeJSON(String(decoding: try Exporter.encoder(pretty: true).encode(rows), as: UTF8.self)))
