@@ -6,7 +6,7 @@ Everything that needs `sudo`, System Settings, SIP, a VM or an Apple account is 
 
 | Host | What runs there |
 |---|---|
-| Any Mac, and CI (GitHub's macOS 14, 15 and latest runners) | `swift build`, `swift test` (Core, Store, IPC, Engine, UI models), the daemon with the replay source, the CLI over the dev socket, `scripts/dev/e2e-dev-socket.sh`, Xcode builds of every target |
+| Any Mac, and CI (GitHub's macOS 15, 26 and 27 runners: `macos-15`, `macos-latest`, `xcode-27`) | `swift build`, `swift test` (Core, Store, IPC, Engine, UI models), the daemon with the replay source, the CLI over the dev socket, `scripts/dev/e2e-dev-socket.sh`, Xcode builds of every target |
 | Your Mac | the app, the **eslogger** backend (monitor only) |
 | macOS VM, SIP disabled | the **native** Endpoint Security client, AUTH/enforcement (M4/M5), driven from the host by `scripts/vm/` ([README](../scripts/vm/README.md)). **Never** on your main Mac. |
 
@@ -27,9 +27,13 @@ default data only from directories only root can change, so it refuses the repos
 
 `scripts/ci/run-ci.sh` is what CI runs: `swift build` and `swift test`, the dev-socket e2e,
 XcodeGen and `xcodebuild` of every target (ad hoc), `shellcheck -S warning` and `bash -n` over
-`scripts/`, the ES stub check, the VM harness self-test, the app bundle test and
-`eslogger --list-events`. The workflow runs on GitHub's hosted macOS runners for pushes to `main`
-and `dev`, only while the repository is public.
+`scripts/`, the ES stub check, the VM harness self-test, the app bundle test,
+`eslogger --list-events` and, on CI only (passwordless sudo), `scripts/ci/install-acceptance.sh`: a
+real install with `scripts/install.sh`, the CLI and the app against the installed daemon, the M2
+acceptance where the runner lets eslogger run, then `scripts/uninstall.sh --purge` and a check that
+nothing is left. The workflow runs on GitHub's hosted macOS runners for pushes to `main` and `dev`,
+only while the repository is public; GitHub retired its macOS 14 image on 2026-11-02, so macOS 14
+is no longer tested there.
 
 Inside a file-system sandbox that allows writes only to `$TMPDIR` and the repository (some editor
 and agent sandboxes do), SwiftPM and `xcodebuild` fail; build with plain `swiftc` instead:

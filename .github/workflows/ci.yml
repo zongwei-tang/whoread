@@ -26,7 +26,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15, macos-latest]
+        # macos-latest is macOS 26; xcode-27 is GitHub's macOS 27 image (arm64). GitHub retired the
+        # macOS 14 image on 2026-11-02: its jobs are cancelled before a runner is assigned, so macOS 14
+        # is no longer tested here.
+        os: [macos-15, macos-latest, xcode-27]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -65,6 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Lists the run's jobs, so that a runner that left no report is named in the index.
+      actions: read
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -91,6 +96,12 @@ jobs:
             echo "commit: ${GITHUB_SHA}"
             echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             for f in ../reports/*.txt; do echo "$(basename "$f" .txt): $(grep -E '^OVERALL:' "$f" || echo 'OVERALL: NO REPORT')"; done
+            # Runners that uploaded nothing (cancelled before a runner was assigned, a retired image).
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" --paginate \
+                --jq '.jobs[] | select(.name | startswith("test (")) | [(.name | ltrimstr("test (") | rtrimstr(")")), (.conclusion // .status)] | @tsv' \
+              | while IFS="$(printf '\t')" read -r os state; do
+                  [ -f "../reports/$os.txt" ] || echo "$os: OVERALL: NO REPORT (job $state)"
+                done || echo "(could not list the run's jobs)"
           } > "results/${GITHUB_SHA}/index.txt"
           cp "results/${GITHUB_SHA}/index.txt" latest.txt
           git add -A
