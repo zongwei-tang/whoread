@@ -50,29 +50,28 @@ starts.
 ## Requirements
 
 - macOS 14 Sonoma or later.
-- Administrator rights to install the background service.
+- Xcode, to build it (free in the App Store; open it once after installing).
+- Your administrator password, to install the background service.
 - Blocking uses an Endpoint Security system extension, which only runs from a signed release.
   Signed releases are not published yet; until then WhoRead runs in **monitor-only mode**, which
   records and alerts but does not block.
 
 ## Getting started
 
-Build and install the background service (monitor-only mode, using Apple's built-in `eslogger`):
-
 ```bash
 git clone https://github.com/zongwei-tang/whoread.git
 cd whoread
-swift build -c release
-sudo scripts/install-dev-daemon.sh eslogger
+scripts/install.sh
 ```
 
-Then give the service Full Disk Access: **System Settings → Privacy & Security → Full Disk
-Access → + → ⌘⇧G →** `/usr/local/libexec/whoreadd`, and restart it:
+The script builds WhoRead, asks for your password once, and installs the background service, the
+`whoread` command and the menu bar app. It then opens System Settings so you can switch on **Full
+Disk Access** for the background service, `/usr/local/libexec/whoreadd` (it shows each step and
+copies the path for you), checks that the pieces talk to each other, and starts the menu bar app.
+Allow notifications when the app asks.
 
-```bash
-sudo launchctl kickstart -k system/com.whoread.daemon
-whoread status
-```
+To update: `git pull`, then run `scripts/install.sh` again. A rebuilt WhoRead is a different program
+to macOS, so Full Disk Access may have to be switched on again; the script tells you when.
 
 ## Usage
 
@@ -114,8 +113,8 @@ To stop blocking at once: `sudo whoread enforcement off`, or `sudo whoread kill-
 ## Uninstall
 
 ```bash
-sudo scripts/uninstall-dev-daemon.sh          # keeps the history
-sudo scripts/uninstall-dev-daemon.sh --purge  # also deletes it
+scripts/uninstall.sh          # keeps the history
+scripts/uninstall.sh --purge  # also deletes it
 ```
 
 ## Documentation

@@ -19,9 +19,16 @@ if [ "$(id -u)" -eq 0 ]; then
   exit 64
 fi
 APPBIN=/Applications/WhoRead.app/Contents/MacOS/WhoRead
-# The app registered itself to open at login; take that back while it is still there.
-if [ -x "$APPBIN" ]; then "$APPBIN" --unregister-login-item >/dev/null 2>&1 || true; fi
 pkill -x WhoRead 2>/dev/null || true
+# The app registered itself to open at login; take that back while it is still there. It exits
+# right away; it is stopped after 10 s in any case.
+if [ -x "$APPBIN" ]; then
+  "$APPBIN" --unregister-login-item >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+fi
 sudo "$ROOT/scripts/uninstall-dev-daemon.sh" "$@"
 say "WhoRead is removed. You can also remove whoreadd from System Settings > Privacy & Security > Full Disk Access (select it, click -)." \
   "WhoRead 已经卸载。你还可以在「系统设置 > 隐私与安全性 > 完全磁盘访问权限」里选中 whoreadd，点 - 把它移除。"

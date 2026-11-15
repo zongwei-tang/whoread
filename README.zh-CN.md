@@ -30,26 +30,21 @@ macOS 会在 app 打开桌面、文稿、下载文件夹之前询问你，但读
 ## 系统要求
 
 - macOS 14 Sonoma 或更新版本。
-- 安装后台服务需要管理员权限。
+- 用来编译的 Xcode（App Store 免费下载，装好后打开一次）。
+- 管理员密码，用来安装后台服务。
 - 拦截功能依靠 Endpoint Security 系统扩展，只能在签名发布版里运行。签名发布版暂未推出，在那之前 WhoRead 以**只监控模式**运行：记录和提醒，但不拦截。
 
 ## 开始使用
 
-编译并安装后台服务（只监控模式，使用 macOS 自带的 `eslogger`）：
-
 ```bash
 git clone https://github.com/zongwei-tang/whoread.git
 cd whoread
-swift build -c release
-sudo scripts/install-dev-daemon.sh eslogger
+scripts/install.sh
 ```
 
-然后给后台服务完全磁盘访问权限：**系统设置 → 隐私与安全性 → 完全磁盘访问权限 → + → ⌘⇧G →** `/usr/local/libexec/whoreadd`，再重启它：
+安装脚本会编译 WhoRead，问一次你的密码，然后安装后台服务、`whoread` 命令和菜单栏 app。接着它会打开「系统设置」，请你给后台服务 `/usr/local/libexec/whoreadd` 打开**完全磁盘访问权限**（每一步都会在屏幕上提示，路径已经帮你复制好）。最后它检查各部分能否正常通信，并启动菜单栏 app。app 第一次打开时，请允许它发送通知。
 
-```bash
-sudo launchctl kickstart -k system/com.whoread.daemon
-whoread status
-```
+更新到新版本：`git pull`，再运行一次 `scripts/install.sh`。新编译的 WhoRead 在 macOS 看来是另一个程序，所以可能需要重新打开一次完全磁盘访问权限，脚本会告诉你怎么做。
 
 ## 常用命令
 
@@ -89,8 +84,8 @@ sudo whoread catalog add-path ssh ~/keys/   # 再保护一个文件夹
 ## 卸载
 
 ```bash
-sudo scripts/uninstall-dev-daemon.sh          # 保留历史记录
-sudo scripts/uninstall-dev-daemon.sh --purge  # 连历史记录一起删除
+scripts/uninstall.sh          # 保留历史记录
+scripts/uninstall.sh --purge  # 连历史记录一起删除
 ```
 
 ## 文档

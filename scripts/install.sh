@@ -75,6 +75,8 @@ if ! running && [ "$WAIT" = 1 ]; then
     "最后一步：允许 WhoRead 的后台服务看到文件访问（完全磁盘访问权限）。"
   say "System Settings is open at Privacy & Security > Full Disk Access:" \
     "「系统设置」已经打开到「隐私与安全性 > 完全磁盘访问权限」："
+  say "  0. If whoreadd is in the list already (from an earlier install), select it and click - first." \
+    "  0. 如果列表里已经有 whoreadd（以前装过），先选中它，点 - 删掉。"
   say "  1. Click + under the list (enter your password if asked)." \
     "  1. 点列表下面的 +（如果要求，输入密码）。"
   say "  2. Press Command-Shift-G, paste with Command-V (the path /usr/local/libexec/whoreadd is copied), press Return, click Open." \
