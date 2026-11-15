@@ -512,7 +512,7 @@ public struct RuleDraft: Equatable, Sendable {
         case .agentChain: subject = .agentAncestor(agentIDs: agentIDs.isEmpty ? nil : agentIDs, exceptOwners: exceptOwners)
         }
         // Editing keeps creation time; a template only lends its provenance. An allow keeps its chain
-        // scope (not shown in the editor): an answer that allowed an app without an AI agent must not
+        // scope (shown in the editor, not editable there): an answer that allowed an app without an AI agent must not
         // become an allow for that app driven by any agent once edited. So is whether it also covers
         // chains whose starter is unknown. A block or an alert made from an allow covers every chain
         // (a scope would leave out exactly the chains with an AI agent), and is no longer an answer:
