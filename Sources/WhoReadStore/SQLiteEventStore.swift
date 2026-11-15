@@ -28,6 +28,11 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     /// writer, rule saves or status. Set only before the store is used (tests).
     var readBatch = 1_000
     var scanBatch = 5_000
+    /// Tests: runs after each page of an activity read, outside the lock (where a write may come in).
+    var activityPageHook: (() -> Void)?
+    /// Retention runs so far (guarded by `lock`): a read in several holds of the lock that saw one start
+    /// meanwhile reads again (`activity`).
+    private var retentionRuns: UInt64 = 0
 
     /// Opens or creates the database at `path`. Its directory (the daemon's data directory, created
     /// and checked before the store opens) must already exist as a real directory owned by
@@ -105,7 +110,8 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             CREATE INDEX IF NOT EXISTS daily_last ON daily(last_ts);
             CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY, updated REAL NOT NULL, status TEXT NOT NULL, body BLOB NOT NULL);
             CREATE INDEX IF NOT EXISTS alerts_updated ON alerts(updated);
-            CREATE INDEX IF NOT EXISTS alerts_status ON alerts(status);
+            CREATE INDEX IF NOT EXISTS alerts_status_updated ON alerts(status, updated);
+            DROP INDEX IF EXISTS alerts_status;
             CREATE INDEX IF NOT EXISTS summary_last ON summary(last_ts);
             CREATE TABLE IF NOT EXISTS baseline(
                 responsible_key TEXT NOT NULL, category TEXT NOT NULL, access TEXT NOT NULL, body BLOB NOT NULL,
@@ -244,20 +250,26 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         }
     }
 
+    /// The newest alerts (by update), `since` and of `statuses` statuses when given (0: any).
+    static func alertsSQL(since: Bool, statuses: Int) -> String {
+        let clauses = (since ? ["updated >= ?"] : [])
+            + (statuses > 0 ? ["status IN (" + Array(repeating: "?", count: statuses).joined(separator: ",") + ")"] : [])
+        return "SELECT body FROM alerts" + (clauses.isEmpty ? "" : " WHERE " + clauses.joined(separator: " AND "))
+            + " ORDER BY updated DESC, id DESC LIMIT ?"
+    }
+
     public func alerts(_ query: AlertQuery) throws -> [Alert] {
-        var clauses: [String] = []
         var args: [Statement.Value] = []
-        if let since = query.since { clauses.append("updated >= ?"); args.append(.double(since.timeIntervalSince1970)) }
+        if let since = query.since { args.append(.double(since.timeIntervalSince1970)) }
         if let statuses = query.statuses {
             if statuses.isEmpty { return [] }
-            clauses.append("status IN (" + Array(repeating: "?", count: statuses.count).joined(separator: ",") + ")")
             args += statuses.map { .text($0.rawValue) }
         }
-        let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
         args.append(.int(Int64(max(0, min(query.limit, 10_000)))))
+        let sql = SQLiteEventStore.alertsSQL(since: query.since != nil, statuses: query.statuses?.count ?? 0)
         return try locked {
             var out: [Alert] = []
-            try db.prepare("SELECT body FROM alerts \(whereSQL) ORDER BY updated DESC, id DESC LIMIT ?").query(args) { row in
+            try db.prepare(sql).query(args) { row in
                 if let a = try? decoder.decode(Alert.self, from: row.blob(0)) { out.append(a) }
             }
             return out
@@ -359,7 +371,10 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     /// is skipped without making the reply shorter while readable rows remain.
     private func newestSummaries(since: Date?, limit: Int) throws -> [UsageSummary] {
         let decoder = Exporter.decoder()
-        let batch = max(1, readBatch)
+        // A reply's worth in one hold of the lock (a walk of the summary_last index): one snapshot. Between
+        // batches a write could move a row the read has not reached ahead of its cursor, and leave it out.
+        // The rest of a longer read, or rows to make up for ones that cannot be decoded, in batches.
+        var batch = max(1, min(limit, UsageSummary.replyLimit))
         var out: [UsageSummary] = []
         var after: (last: Double, rowid: Int64)?
         while out.count < limit {
@@ -379,6 +394,7 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             }
             guard rows.count == batch, let last = rows.last else { break }
             after = (last.last, last.rowid)
+            batch = max(1, readBatch)
         }
         return out
     }
@@ -440,44 +456,53 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             totals[key] = t
         }
 
-        // Details: pages of `scanBatch` events, each counted by SQLite in one hold of the lock.
-        let page = Int64(max(1, scanBatch))
-        var lo = (ts: since.timeIntervalSince1970, id: Int64.min)
-        while true {
-            let hi = try locked { () -> (ts: Double, id: Int64)? in
-                var hi: (ts: Double, id: Int64)?
-                try db.prepare(SQLiteEventStore.activityPageEndSQL).query([.double(lo.ts), .int(lo.id), .int(page - 1)]) {
-                    hi = ($0.double(0), $0.int(1))
-                }
-                let args: [Statement.Value] = [.double(lo.ts), .int(lo.id)] + (hi.map { [.double($0.ts), .int($0.id)] } ?? [])
-                try db.prepare(SQLiteEventStore.activityPageSQL(bounded: hi != nil)).query(args) { r in
-                    add(Key(responsible: r.text(0) ?? "", category: r.text(1) ?? "", agent: r.text(2) ?? "", benign: r.int(3) != 0),
-                        first: r.double(4), last: r.double(5), [r.int(6), r.int(7), r.int(8), r.int(9)], event: r.int(10))
-                }
-                return hi
-            }
-            guard let hi else { break }
-            lo = hi
-        }
-
-        // Days rolled up past the detail window: only per-day totals are left, so such a day counts
-        // whole (one row per day for benign and other accesses: benign only if every access was).
+        // Read again when a retention run rolled counted events into days meanwhile (they would count twice),
+        // at most three times.
         let batch = max(1, readBatch)
-        var dayCursor = (last: since.timeIntervalSince1970, rowid: Int64.min)
-        while true {
-            let read = try locked { () -> (n: Int, last: (last: Double, rowid: Int64)?) in
-                var n = 0
-                var last: (last: Double, rowid: Int64)?
-                try db.prepare(SQLiteEventStore.activityDaysSQL).query([.double(dayCursor.last), .int(dayCursor.rowid), .int(Int64(batch))]) { r in
-                    n += 1
-                    last = (r.double(6), r.int(0))
-                    add(Key(responsible: r.text(1) ?? "", category: r.text(2) ?? "", agent: r.text(3) ?? "", benign: r.int(4) != 0),
-                        first: r.double(5), last: r.double(6), [r.int(7), r.int(8), r.int(9), r.int(10)], day: (r.double(6), r.blob(11)))
+        for attempt in 1...3 {
+            totals = [:]
+            let runs = try locked { retentionRuns }
+            // Details: pages of `scanBatch` events, each counted by SQLite in one hold of the lock.
+            let page = Int64(max(1, scanBatch))
+            var lo = (ts: since.timeIntervalSince1970, id: Int64.min)
+            while true {
+                let hi = try locked { () -> (ts: Double, id: Int64)? in
+                    var hi: (ts: Double, id: Int64)?
+                    try db.prepare(SQLiteEventStore.activityPageEndSQL).query([.double(lo.ts), .int(lo.id), .int(page - 1)]) {
+                        hi = ($0.double(0), $0.int(1))
+                    }
+                    let args: [Statement.Value] = [.double(lo.ts), .int(lo.id)] + (hi.map { [.double($0.ts), .int($0.id)] } ?? [])
+                    try db.prepare(SQLiteEventStore.activityPageSQL(bounded: hi != nil)).query(args) { r in
+                        add(Key(responsible: r.text(0) ?? "", category: r.text(1) ?? "", agent: r.text(2) ?? "", benign: r.int(3) != 0),
+                            first: r.double(4), last: r.double(5), [r.int(6), r.int(7), r.int(8), r.int(9)], event: r.int(10))
+                    }
+                    return hi
                 }
-                return (n, last)
+                guard let hi else { break }
+                lo = hi
+                activityPageHook?()
             }
-            guard read.n == batch, let last = read.last else { break }
-            dayCursor = last
+
+            // Days rolled up past the detail window: only per-day totals are left, so such a day counts
+            // whole (one row per day for benign and other accesses: benign only if every access was).
+            var dayCursor = (last: since.timeIntervalSince1970, rowid: Int64.min)
+            while true {
+                let read = try locked { () -> (n: Int, last: (last: Double, rowid: Int64)?) in
+                    var n = 0
+                    var last: (last: Double, rowid: Int64)?
+                    try db.prepare(SQLiteEventStore.activityDaysSQL).query([.double(dayCursor.last), .int(dayCursor.rowid), .int(Int64(batch))]) { r in
+                        n += 1
+                        last = (r.double(6), r.int(0))
+                        add(Key(responsible: r.text(1) ?? "", category: r.text(2) ?? "", agent: r.text(3) ?? "", benign: r.int(4) != 0),
+                            first: r.double(5), last: r.double(6), [r.int(7), r.int(8), r.int(9), r.int(10)], day: (r.double(6), r.blob(11)))
+                    }
+                    return (n, last)
+                }
+                guard read.n == batch, let last = read.last else { break }
+                dayCursor = last
+            }
+            let after = try locked { retentionRuns }
+            if attempt == 3 || after == runs { break }
         }
 
         // The newest rows, each with its app as last seen (its summary row), else as of its newest
@@ -621,6 +646,7 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     public func applyRetention(detailCutoff: Date, retentionCutoff: Date) throws -> Int {
         try locked {
             cachedCounts = nil
+            retentionRuns &+= 1
             return try db.transaction {
                 // Remember the high-water marks so new ids never collide with rolled-up or purged ones.
                 var maxID: Int64 = 0
@@ -694,8 +720,10 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             .run([.int(rows - Int64(StoreLimits.lowWaterMark(limit)))])
     }
 
-    /// Unread alerts, counted on the alerts_status index (daemon-6: without it every status walked
-    /// every alert, bodies included).
+    /// Unread alerts, counted on the alerts_status_updated index (daemon-6: without it every status walked
+    /// every alert, bodies included). The index is on (status, updated), not status alone: a query of the
+    /// newest alerts of a status then reads them in order and stops at its limit, instead of taking every
+    /// alert of that status and sorting them under the store lock.
     static let unreadAlertsSQL = "SELECT count(*) FROM alerts WHERE status = 'unread'"
 
     public func counts() throws -> StoreCounts {

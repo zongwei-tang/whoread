@@ -250,8 +250,9 @@ final class WriterQueueTests: XCTestCase {
         XCTAssertEqual(writer.droppedCount, 0, "nothing is lost while retrying")
 
         store.failing = false
-        writer.flush()
-        XCTAssertEqual(try store.events(EventQuery(includeBenign: true)).map(\.id), [1], "flush() does not wait for the back-off")
+        // A read's flush waits for the back-off as the timer does (R5VWriterBackOffTests); an action's does not.
+        try writer.flushOrThrow()
+        XCTAssertEqual(try store.events(EventQuery(includeBenign: true)).map(\.id), [1], "flushOrThrow() does not wait for the back-off")
         writer.stop()
     }
 
@@ -268,5 +269,51 @@ final class WriterQueueTests: XCTestCase {
         XCTAssertNotNil(waitFor(0.5) { (try? store.events(EventQuery(includeBenign: true)).count) == 2 },
                         "the next event goes out within a few ticks, not after the back-off")
         writer.stop()
+    }
+}
+
+/// daemon-4, the rest: while the writer backs off after failed writes, a read's flush (the app's alerts
+/// poll every second, events, summaries) does not retry the whole backlog either; a user's action
+/// (`flushOrThrow`) and a stop still try at once. The back-off runs on the uptime clock: a wall clock
+/// set back does not stop the writer for as long.
+final class R5VWriterBackOffTests: XCTestCase {
+    final class Clock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var t: TimeInterval = 1000
+        var now: TimeInterval { lock.lock(); defer { lock.unlock() }; return t }
+        func advance(_ s: TimeInterval) { lock.lock(); t += s; lock.unlock() }
+    }
+
+    func testAReadsFlushWhileBackingOffLeavesTheBacklogAlone() throws {
+        let store = CountingStore()
+        let clock = Clock()
+        let writer = EventWriter(store: store, errorReportInterval: 3600, uptime: { clock.now })
+        writer.enqueue(events: [minted(1, app: 1, at: limitsT)])
+        writer.flush()
+        XCTAssertEqual(store.attempts, 1)
+        for _ in 0..<20 { writer.flush() }
+        XCTAssertEqual(store.attempts, 1, "backing off")
+        // Throws only for alerts it could not write; the events stay queued either way.
+        try? writer.flushOrThrow()
+        XCTAssertEqual(store.attempts, 2, "an action tries at once")
+        store.failing = false
+        writer.stop()
+        XCTAssertEqual(try store.events(EventQuery(includeBenign: true)).map(\.id), [1], "a stop writes what is left")
+    }
+
+    func testTheBackOffFollowsTheUptimeClock() throws {
+        let store = CountingStore()
+        let clock = Clock()
+        let writer = EventWriter(store: store, errorReportInterval: 3600, maxRetryDelay: 5, uptime: { clock.now })
+        writer.enqueue(events: [minted(1, app: 1, at: limitsT)])
+        writer.flush()
+        clock.advance(0.1)
+        writer.flush()
+        XCTAssertEqual(store.attempts, 1)
+        store.failing = false
+        clock.advance(5)
+        writer.flush()
+        XCTAssertEqual(store.attempts, 2)
+        XCTAssertEqual(try store.events(EventQuery(includeBenign: true)).map(\.id), [1])
     }
 }

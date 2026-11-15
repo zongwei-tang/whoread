@@ -928,7 +928,7 @@ public final class DaemonCore: @unchecked Sendable {
 
     /// Marks the open `ask` alerts an answer settles as resolved (privileged answers only).
     private func resolveAskAlerts(answering scope: AnswerScope, action: AlertAction, except: Int64? = nil) throws {
-        writer.flush()
+        writer.flushNow()
         let open = try store.alerts(AlertQuery(statuses: [.unread, .read], limit: 10_000))
         let settled = open.filter { $0.kind == .ask && $0.id != except && scope.settles(AnswerScope($0), action: action) }
         try setAlertStatus(settled, to: .resolved, resolution: action)
@@ -1086,7 +1086,7 @@ public final class DaemonCore: @unchecked Sendable {
     /// question.
     public func apply(action: AlertAction, toAlert id: Int64, peer: IPCPeer, privileged: Bool = true) throws {
         mutation.lock(); defer { mutation.unlock() }
-        writer.flush()
+        writer.flushNow()
         guard let alert = try store.alert(id: id) else { throw IPCError(.notFound, "no alert #\(id)") }
         let now = Date()
         let scope = AnswerScope(alert)
@@ -1176,7 +1176,7 @@ public final class DaemonCore: @unchecked Sendable {
     public func markRead(_ ids: [Int64]?, peer: IPCPeer = .inProcess) throws {
         // As every other status change: one at a time, on what was read (an escalation since stays unread).
         mutation.lock(); defer { mutation.unlock() }
-        writer.flush()
+        writer.flushNow()
         Log.info("alerts \(ids.map { $0.map(String.init).joined(separator: ",") } ?? "all") marked read by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         let targets = try store.alerts(AlertQuery(statuses: [.unread], limit: 10_000)).filter { ids == nil || ids!.contains($0.id) }
         try setAlertStatus(targets, to: .read, resolution: nil)

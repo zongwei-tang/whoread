@@ -67,19 +67,25 @@ public final class EventWriter: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private(set) var dropped: UInt64 = 0
     private(set) var lastError: String?
-    private var lastErrorReport = Date.distantPast
+    private var lastErrorReport: TimeInterval?
     private let errorReportInterval: TimeInterval
     /// Store errors, at most once per `errorReportInterval` (a full disk fails every flush).
     public var onError: ((Error) -> Void)?
-    /// Timer back-off after failed flushes (writer queue only): a store that keeps failing is retried
-    /// at twice the interval after each failure, at most every `maxRetryDelay`, not with the whole
-    /// backlog on every tick. `flush()` still writes at once.
+    /// Back-off after failed flushes (writer queue only): a store that keeps failing is retried at twice
+    /// the interval after each failure, at most every `maxRetryDelay`, not with the whole backlog on every
+    /// tick, nor on every read's `flush()` (the app polls alerts every second). An action's
+    /// `flushOrThrow()` and `stop()` still try at once. On the uptime clock (`uptime`): a wall clock set
+    /// back after a failure must not stop the writer for as long.
     private var interval: TimeInterval = 0.25
     private let maxRetryDelay: TimeInterval
     private var failedFlushes = 0
-    private var retryAt = Date.distantPast
+    private var retryAt: TimeInterval = 0
 
-    public init(store: EventStore, maxPending: Int = 100_000, errorReportInterval: TimeInterval = 10, maxRetryDelay: TimeInterval = 5) {
+    private let uptime: @Sendable () -> TimeInterval
+
+    public init(store: EventStore, maxPending: Int = 100_000, errorReportInterval: TimeInterval = 10, maxRetryDelay: TimeInterval = 5,
+                uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.uptime = uptime
         self.store = store
         self.maxPending = maxPending
         self.errorReportInterval = errorReportInterval
@@ -98,12 +104,12 @@ public final class EventWriter: @unchecked Sendable {
     public func stop() {
         timer?.cancel()
         timer = nil
-        flush()
+        queue.sync { _ = flushLocked() }
     }
 
     /// A timer tick: a flush, unless backing off after failures.
     private func tick() {
-        guard Date() >= retryAt else { return }
+        guard uptime() >= retryAt else { return }
         _ = flushLocked()
     }
 
@@ -131,12 +137,21 @@ public final class EventWriter: @unchecked Sendable {
         for a in alerts { pendingAlerts[a.id] = a }
     }
 
-    /// Synchronous flush (queries call this so they see everything processed so far).
+    /// Synchronous flush (queries call this so they see everything processed so far), unless backing off
+    /// after failures: then what is queued waits for the next try, as on a timer tick.
     public func flush() {
+        queue.sync {
+            guard uptime() >= retryAt else { return }
+            _ = flushLocked()
+        }
+    }
+
+    /// A flush for a user's action: at once, also while backing off after failures (`flush()` waits then).
+    public func flushNow() {
         queue.sync { _ = flushLocked() }
     }
 
-    /// `flush()`, throwing when the queued alerts could not be written (they stay queued for the next one).
+    /// `flushNow()`, throwing when the queued alerts could not be written (they stay queued for the next one).
     public func flushOrThrow() throws {
         var failure: Error?
         queue.sync { failure = flushLocked() }
@@ -174,12 +189,12 @@ public final class EventWriter: @unchecked Sendable {
         }
         guard let failure else {
             failedFlushes = 0
-            retryAt = .distantPast
+            retryAt = 0
             return nil
         }
-        let now = Date()
+        let now = uptime()
         failedFlushes += 1
-        retryAt = now.addingTimeInterval(min(maxRetryDelay, interval * pow(2, Double(min(failedFlushes, 30)))))
+        retryAt = now + min(maxRetryDelay, interval * pow(2, Double(min(failedFlushes, 30))))
         lock.lock()
         lastError = "\(failure)"
         // In front of what arrived meanwhile, within the cap: the oldest go first, as in trimLocked.
@@ -190,7 +205,7 @@ public final class EventWriter: @unchecked Sendable {
         pendingStart = 0
         // A newer snapshot of the same alert queued meanwhile wins.
         for a in failedAlerts where pendingAlerts[a.id] == nil { pendingAlerts[a.id] = a }
-        let report = now.timeIntervalSince(lastErrorReport) >= errorReportInterval
+        let report = lastErrorReport.map { now - $0 >= errorReportInterval } ?? true
         if report { lastErrorReport = now }
         lock.unlock()
         if report { onError?(failure) }
