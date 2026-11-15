@@ -31,6 +31,8 @@ public struct ProcessRecord: Codable, Hashable, Sendable {
     public var signingCategory: SigningCategory?
     /// es_process_t.codesigning_flags (cs_blobs.h), as the kernel had them when the event was made.
     public var codeSigningFlags: UInt32?
+    /// Command line. The process tree keeps what `ProcessTree.boundedArgv` keeps of it: an element cut
+    /// short ends in "…", and elements dropped from the end are replaced by one "…(+N)".
     public var argv: [String]?
     /// Fork time. Stays the same across exec, so (pid, startTime) identifies a process instance.
     public var startTime: Date?

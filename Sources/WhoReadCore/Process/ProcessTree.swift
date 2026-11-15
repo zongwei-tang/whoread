@@ -402,10 +402,76 @@ public final class ProcessTree: @unchecked Sendable {
         }
     }
 
+    /// Every record enters the tree here (seed, fork, exec, exit, observe, chain queries, the parent
+    /// resolver), so this is where its argv is bounded (`boundedArgv`).
     private func normalized(_ r: ProcessRecord) -> ProcessRecord {
         var r = r
         r.executablePath = normalizePath(r.executablePath)
+        if let argv = r.argv { r.argv = ProcessTree.boundedArgv(argv) }
         return r
+    }
+
+    // MARK: - argv kept per node
+
+    /// Elements always kept, however long the command line: as many as anything shows
+    /// (`ArgvRedactor.redact` shows 8).
+    public static let minArgvElements = 8
+    /// Bytes of argv a node keeps beyond its first `minArgvElements` elements.
+    public static let maxArgvBytes = 16 * 1024
+    /// Bytes one element keeps at most: 1024 characters of up to 4 bytes (`ArgvRedactor.maxElementLength`),
+    /// fewer only where characters are made of several scalars.
+    static let maxArgvElementBytes = 4 * 1024
+    /// A last element this short is kept rather than replaced by a marker as long (so bounding twice
+    /// changes nothing).
+    static let maxMarkerBytes = 32
+
+    /// What a node keeps of an argv: argv can be ARG_MAX (1 MiB) long, every process of the user can have
+    /// one, and nodes stay (as tombstones too) for minutes in a daemon that runs as root. Display and
+    /// detection read little of it: the redactor the first 8 elements and the first 1024 characters of
+    /// each (`ArgvRedactor.bounded`), agent detection argv[0] and the script position, owners the script
+    /// position. So each element keeps its first 1024 characters, and an element cut here ends in "…",
+    /// so the redactor still sees there was more and shows it as before; the first 8 elements are always
+    /// kept, later ones while the total stays within `maxArgvBytes`; the elements past that are dropped
+    /// and replaced by one marker, "…(+N)", N being how many were dropped. A command line within these
+    /// bounds is kept as it is.
+    public static func boundedArgv(_ argv: [String]) -> [String] {
+        var out: [String] = []
+        var bytes = 0
+        for (i, element) in argv.enumerated() {
+            let kept = boundedArgvElement(element)
+            let size = kept.utf8.count
+            if i >= minArgvElements && bytes + size > maxArgvBytes
+                && !(i == argv.count - 1 && size <= maxMarkerBytes) {
+                out.append("…(+\(argv.count - i))")
+                return out
+            }
+            out.append(kept)
+            bytes += size
+        }
+        return out
+    }
+
+    /// One element: whole when it is at most 1024 characters (and `maxArgvElementBytes` bytes), else its
+    /// first 1024 characters, or as many whole scalars as fit `maxArgvElementBytes`, and "…".
+    static func boundedArgvElement(_ s: String) -> String {
+        let characters = ArgvRedactor.maxElementLength
+        guard s.utf8.count > characters else { return s }
+        var end = s.index(s.startIndex, offsetBy: characters, limitedBy: s.endIndex) ?? s.endIndex
+        if s.utf8.distance(from: s.startIndex, to: end) > maxArgvElementBytes {
+            let scalars = s.unicodeScalars
+            var bytes = 0
+            end = scalars.startIndex
+            while end < scalars.endIndex {
+                let width = UTF8.width(scalars[end])
+                if bytes + width > maxArgvElementBytes { break }
+                bytes += width
+                scalars.formIndex(after: &end)
+            }
+            guard end < scalars.endIndex else { return s }
+            return String(scalars[..<end]) + "…"
+        }
+        guard end < s.endIndex else { return s }
+        return String(s[..<end]) + "…"
     }
 
     private func chainLocked(from id: UInt64) -> [ProcessNode] {

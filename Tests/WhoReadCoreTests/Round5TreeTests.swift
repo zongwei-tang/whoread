@@ -195,3 +195,128 @@ final class StaleImageTests: XCTestCase {
         XCTAssertEqual(h.tree.node(pid: 500)?.image.executablePath, "/bin/cat")
     }
 }
+
+// MARK: - attribution-4
+
+final class BoundedArgvTests: XCTestCase {
+    var tree: ProcessTree!
+    var detector: AgentDetector!
+
+    override func setUpWithError() throws {
+        detector = AgentDetector(catalog: try defaultData().agents)
+        tree = ProcessTree(detector: detector)
+    }
+
+    static func bytes(_ argv: [String]?) -> Int { (argv ?? []).reduce(0) { $0 + $1.utf8.count } }
+
+    /// What the tree may keep of one argv: the budget, plus one marker element.
+    static let bound = ProcessTree.maxArgvBytes + 32
+
+    /// A process running as the user can give every child up to ARG_MAX (1 MiB) of argv; each node kept
+    /// all of it, tombstones too, for the whole TTL, in a daemon that runs as root.
+    func testANodeKeepsABoundedArgv() {
+        let huge = String(repeating: "x", count: 300 * 1024)
+        tree.observe(proc(600, "/bin/sh", platform: true, argv: ["sh", "-c", huge, huge, huge]), at: at(0))
+        let few = tree.node(pid: 600)?.image.argv ?? []
+        XCTAssertEqual(few.count, 5)
+        XCTAssertLessThanOrEqual(Self.bytes(few), 5 * 1100)
+        XCTAssertEqual(few[2], String(repeating: "x", count: 1024) + "…", "cut, and says so")
+
+        let paths = (0..<20_000).map { "/Users/alice/code/project/Sources/File\($0).swift" }
+        tree.observe(proc(601, "/usr/bin/grep", platform: true, argv: ["grep", "-l", "x"] + paths), at: at(0))
+        let many = tree.node(pid: 601)?.image.argv ?? []
+        XCTAssertLessThanOrEqual(Self.bytes(many), Self.bound)
+        XCTAssertGreaterThan(many.count, 8)
+        XCTAssertEqual(Array(many.dropLast()), Array((["grep", "-l", "x"] + paths).prefix(many.count - 1)))
+        XCTAssertEqual(many.last, "…(+\(20_003 - (many.count - 1)))", "how many elements were not kept")
+    }
+
+    /// Seed, exec, the parent resolver and observe all go through one entry point, and a tombstone
+    /// keeps what its node kept.
+    func testEveryWayIntoTheTreeIsBounded() {
+        let huge = Array(repeating: String(repeating: "y", count: 64 * 1024), count: 16)
+        tree.seed([ProcessRecord(pid: 700, ppid: 1, executablePath: "/bin/sh", isPlatformBinary: true, argv: ["sh"] + huge,
+                                 startTime: at(-5))], at: at(0))
+        let zsh = proc(701, "/bin/zsh", ppid: 1, start: 0, platform: true)
+        tree.observe(zsh, at: at(0))
+        var sh = proc(701, "/bin/sh", ppid: 1, start: 0, platform: true, argv: ["sh"] + huge)
+        sh.pidVersion = 7011
+        tree.exec(old: zsh, new: sh, at: at(1))
+        tree.parentResolver = { pid in
+            pid == 702 ? ProcessRecord(pid: 702, ppid: 1, executablePath: "/bin/bash", isPlatformBinary: true,
+                                       argv: ["bash"] + huge, startTime: at(-10)) : nil
+        }
+        // (libproc has no fork-time parent: bash stays unlinked.)
+        XCTAssertEqual(tree.chain(for: proc(703, "/bin/cat", ppid: 702, start: 2, platform: true), at: at(2)).map(\.image.name),
+                       ["cat", "bash"])
+        tree.exit(sh, at: at(3))
+        for pid: Int32 in [700, 701, 702] {
+            let argv = tree.node(pid: pid)?.image.argv
+            XCTAssertLessThanOrEqual(Self.bytes(argv), Self.bound, "pid \(pid)")
+            XCTAssertEqual(argv?.last, "…(+1)", "pid \(pid)")
+        }
+        XCTAssertNotNil(tree.node(pid: 701)?.exitedAt)
+    }
+
+    /// Display (ArgvRedactor, ChainLink) and agent and owner detection see what they saw before: the
+    /// redactor reads the first 8 elements and the first 1024 characters of each, the detectors argv[0]
+    /// and the script position. An element cut here ends in "…", so the redactor still sees it is cut.
+    func testDisplayAndDetectionAreUnchangedForOrdinaryCommandLines() throws {
+        let heredoc = "cat > Sources/App/Main.swift <<'EOF'\n"
+            + String(repeating: "let value = compute(42) // token=abc123\n", count: 600) + "EOF"
+        let lines: [[String]] = [
+            ["/bin/zsh", "-c", heredoc],
+            ["/bin/zsh", "-c", "curl -s -H 'Authorization: Bearer " + String(repeating: "Q", count: 3000) + "' https://example.com/api"],
+            ["node", "/opt/homebrew/bin/claude", "--print", String(repeating: "文", count: 2000)],
+            ["git", "commit", "-m", String(repeating: "word ", count: 500)],
+            ["clang"] + (0..<40).map { "-I/Users/alice/code/include/\($0)" },
+            ["node", "--require=" + String(repeating: "r", count: 5000), "/opt/homebrew/bin/claude"],
+            ["cat", "/Users/alice/WhoReadTestVault/aws/credentials"],
+            ["/usr/bin/python3", "-m", "aider", "--message", String(repeating: "fix it ", count: 400)],
+        ]
+        for argv in lines {
+            let kept = ProcessTree.boundedArgv(argv)
+            let label = "\(argv.prefix(2))"
+            XCTAssertEqual(kept.prefix(8).map(ArgvRedactor.bounded), argv.prefix(8).map(ArgvRedactor.bounded), label)
+            XCTAssertEqual(kept.count, argv.count, label)
+            XCTAssertEqual(ArgvRedactor.redact(kept), ArgvRedactor.redact(argv), label)
+            XCTAssertEqual(ArgvRedactor.redact(kept, maxArgs: 6, maxLength: 200), ArgvRedactor.redact(argv, maxArgs: 6, maxLength: 200), label)
+            let path = argv[0].contains("python") ? "/usr/bin/python3" : node
+            XCTAssertEqual(detector.detect(proc(600, path, argv: kept)), detector.detect(proc(600, path, argv: argv)), label)
+            XCTAssertEqual(IdentitySpec.scriptArgument(kept), IdentitySpec.scriptArgument(argv), label)
+        }
+        // A node: its chain link and the event's process as before.
+        let claude = ["node", "/opt/homebrew/bin/claude", "--append-system-prompt", String(repeating: "be brief ", count: 1000)]
+        tree.observe(proc(610, node, argv: claude), at: at(0))
+        let n = try XCTUnwrap(tree.node(pid: 610))
+        XCTAssertEqual(n.agentID, "claude-code")
+        var full = n
+        full.image.argv = claude
+        XCTAssertEqual(ChainLink(node: n), ChainLink(node: full))
+        XCTAssertEqual(ArgvRedactor.redact(n.image), ArgvRedactor.redact(full.image))
+        let h = try Harness()
+        XCTAssertTrue(h.classifier.isOwner(n.image, of: "claude-sessions"))
+    }
+
+    /// Past the budget, elements are dropped from the end, never from the first 8, and bounding again
+    /// changes nothing (libproc records are bounded where they are read, then again by the tree).
+    func testOnlyTheTailOfALongCommandLineIsDropped() {
+        let objects = ["ld", "-o", "app"] + (0..<5000).map { "/Users/alice/build/obj/file\($0).o" }
+        let kept = ProcessTree.boundedArgv(objects)
+        XCTAssertEqual(Array(kept.prefix(8)), Array(objects.prefix(8)))
+        XCTAssertLessThanOrEqual(Self.bytes(kept), Self.bound)
+        XCTAssertEqual(kept.last, "…(+\(objects.count - kept.count + 1))")
+        XCTAssertEqual(ProcessTree.boundedArgv(kept), kept)
+        let cut = ProcessTree.boundedArgv(["sh", "-c", String(repeating: "z", count: 100_000)])
+        XCTAssertEqual(ProcessTree.boundedArgv(cut), cut)
+        // Characters of many scalars each: bytes decide, at a scalar boundary.
+        let zalgo = "e" + String(repeating: "\u{301}", count: 50_000)
+        let odd = ProcessTree.boundedArgv(["echo", zalgo])
+        XCTAssertLessThanOrEqual(odd[1].utf8.count, 4 * 1024 + 3)
+        XCTAssertTrue(odd[1].hasSuffix("…"))
+        XCTAssertEqual(ProcessTree.boundedArgv(odd), odd)
+        // Short command lines are kept as they are.
+        XCTAssertEqual(ProcessTree.boundedArgv(["cat", "a", "b"]), ["cat", "a", "b"])
+        XCTAssertEqual(ProcessTree.boundedArgv([]), [])
+    }
+}

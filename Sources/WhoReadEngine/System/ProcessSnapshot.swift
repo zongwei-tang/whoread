@@ -71,10 +71,11 @@ enum MacProcessSnapshot {
         let n = proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count))
         let path = n > 0 ? String(cString: pathBuf) : withUnsafeBytes(of: info.pbi_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
         let start = Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec) + TimeInterval(info.pbi_start_tvusec) / 1_000_000)
+        // argv bounded as the process tree keeps it, here already: seeding reads every running process.
         return ProcessRecord(
             pid: pid, ppid: Int32(info.pbi_ppid), executablePath: path,
-            isPlatformBinary: ProcessSnapshot.looksLikePlatformBinary(path), argv: argv(pid: pid), startTime: start,
-            euid: info.pbi_uid)
+            isPlatformBinary: ProcessSnapshot.looksLikePlatformBinary(path), argv: argv(pid: pid).map(ProcessTree.boundedArgv),
+            startTime: start, euid: info.pbi_uid)
     }
 
     /// KERN_PROCARGS2: [argc: Int32][exec path\0][\0 padding][argv[0]\0]…[argv[argc-1]\0][env…]
@@ -115,7 +116,7 @@ enum LinuxProcessSnapshot {
         let exe = (try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/\(pid)/exe")) ?? "?"
         var argv: [String]?
         if let data = FileManager.default.contents(atPath: "/proc/\(pid)/cmdline"), !data.isEmpty {
-            argv = data.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+            argv = ProcessTree.boundedArgv(data.split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
         }
         // starttime is in clock ticks since boot; enough as a stable instance identifier here.
         let ticks = Double(fields[19]) ?? 0
