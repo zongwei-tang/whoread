@@ -49,6 +49,7 @@ struct MainWindow: View {
 }
 
 struct LiveView: View {
+    @Environment(DaemonConnection.self) private var connection
     @Environment(AppModel.self) private var model
     @State private var selection: AnalyzedEvent.ID?
 
@@ -62,6 +63,11 @@ struct LiveView: View {
                 Button(model.feedPaused ? L10n.t(.resumeFeed) : L10n.t(.pauseFeed)) { model.feedPaused.toggle() }
             }
             UnavailableNote(part: .live)
+            // More accesses came at once than one read returns: say so, and where to see them all.
+            if let gap = model.liveGapText {
+                Text(gap).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if model.liveRows.isEmpty {
                 // Refused or not read: the note says so, not "no access yet".
                 if model.unavailableNote(.live) == nil {
@@ -85,6 +91,8 @@ struct LiveView: View {
                 }
             }
         }
+        // Shown with the folded system activity: read it now (from before the switch too), not at the next tick.
+        .onChange(of: model.showSystemNoise) { connection.poll(full: false) }
         // Process identity of the selected access (brief §1: pid, path, signing ID, team ID, platform flag).
         .inspector(isPresented: Binding(get: { selection != nil }, set: { if !$0 { selection = nil } })) {
             if let e = model.live.events.first(where: { $0.id == selection }) {

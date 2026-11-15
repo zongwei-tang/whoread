@@ -101,6 +101,40 @@ final class R5AppaDaemonTests: XCTestCase {
         renamed.name = "Terminal may read the test vault"
         XCTAssertEqual(renamed.build().keepingDaemonState(of: answer).chainAgents, [])
     }
+
+    // MARK: - app-4: the live feed after "Show folded system activity"
+
+    /// A live poll as DaemonConnection makes it: from the model's cursor, with its switch.
+    private func pollLive(_ m: AppModel) {
+        m.apply(SnapshotFetcher.fetch(signed, liveAfter: m.liveCursor, includeBenign: m.showSystemNoise, full: false))
+    }
+
+    func testApp4ShowingFoldedSystemActivityShowsWhatCameBeforeTheSwitch() throws {
+        let m = AppModel(language: .en)
+        pollLive(m)
+        XCTAssertEqual(m.liveRows.count, 14, "the folded Spotlight read is hidden")
+        // The Apps and Files tabs show the folded activity at once; the live feed must too.
+        m.showSystemNoise = true
+        pollLive(m)
+        XCTAssertEqual(m.liveRows.count, 15, "the Spotlight read from before the switch")
+        XCTAssertTrue(m.liveRows.contains { $0.isBenign })
+        // Off again: hidden; on again: back at once.
+        m.showSystemNoise = false
+        pollLive(m)
+        XCTAssertEqual(m.liveRows.count, 14)
+        m.showSystemNoise = true
+        XCTAssertEqual(m.liveRows.count, 15)
+    }
+
+    func testApp4APollReadBeforeTheSwitchDoesNotHideWhatCameBefore() throws {
+        let m = AppModel(language: .en)
+        // Read without the folded activity, and applied after the switch was turned on.
+        let inFlight = SnapshotFetcher.fetch(signed, liveAfter: m.liveCursor, includeBenign: m.showSystemNoise, full: false)
+        m.showSystemNoise = true
+        m.apply(inFlight)
+        pollLive(m)
+        XCTAssertEqual(m.liveRows.count, 15)
+    }
 }
 
 /// Editing rules, without the daemon.
@@ -273,6 +307,52 @@ final class R5AppaListTests: XCTestCase {
         XCTAssertEqual(m.visibleAlerts.last?.count, 2, "the merged copy")
         m.alertsUnreadOnly = true
         XCTAssertEqual(m.visibleAlerts.map(\.id), [3, 2, 1])
+    }
+
+    // MARK: - app-4: a burst bigger than one live read
+
+    static func event(_ id: Int64) -> AnalyzedEvent {
+        AnalyzedEvent(id: id, time: base.addingTimeInterval(Double(id)), operation: .open, access: .read,
+                      path: "/Users/alice/WhoReadTestVault/ssh/id_ed25519", secondaryPath: nil, categoryID: "test-vault",
+                      severity: .critical, process: ProcessRecord(pid: 7, ppid: 1, executablePath: "/bin/cat"), chain: [],
+                      responsible: ResponsibleEntity(kind: .binary, key: "bin:/bin/cat", displayName: "cat"), agentID: nil,
+                      isOwner: false, benignServiceID: nil, decision: .observed, ruleID: nil)
+    }
+
+    func testApp4ABurstBiggerThanOneReadSaysAccessesAreMissing() throws {
+        let buffer = LiveBuffer(capacity: 5000)
+        let status = Self.status()
+        let client = FixedClient { request in
+            switch request {
+            case .status: return .status(status)
+            case .live(let after, let limit, let benign): return .events(buffer.after(after, limit: limit, includeBenign: benign))
+            default: throw IPCError(.notPermitted, "not part of this test")
+            }
+        }
+        let m = AppModel(language: .en)
+        func poll() { m.apply(SnapshotFetcher.fetch(client, liveAfter: m.liveCursor, includeBenign: m.showSystemNoise, full: false)) }
+        buffer.append((1...10).map { Self.event($0) })
+        poll()
+        XCTAssertEqual(m.live.events.count, 10)
+        XCTAssertNil(m.liveGapText)
+        // A program walks a whole folder between two polls: 2000 accesses, more than one read returns.
+        buffer.append((11...2010).map { Self.event($0) })
+        poll()
+        XCTAssertEqual(m.live.events.first?.id, 2010)
+        XCTAssertFalse(m.live.events.contains { $0.id == 1000 }, "one read returns the newest \(SnapshotFetcher.liveLimit)")
+        let note = try XCTUnwrap(m.liveGapText, "the feed says it is missing accesses")
+        XCTAssertTrue(note.contains("sudo whoread events"), note)
+        XCTAssertTrue(L10n.t(.liveSkippedNote, .zhHans).contains("sudo whoread events"))
+        XCTAssertNotEqual(L10n.t(.liveSkippedNote, .en), L10n.t(.liveSkippedNote, .zhHans))
+        // A first read (no cursor yet) only starts the feed with the newest: nothing is missing from it.
+        let fresh = AppModel(language: .en)
+        fresh.apply(SnapshotFetcher.fetch(client, liveAfter: nil, includeBenign: false, full: false))
+        XCTAssertEqual(fresh.live.events.count, SnapshotFetcher.liveLimit)
+        XCTAssertNil(fresh.liveGapText)
+        // Later polls that are not full keep saying so, until the feed starts over.
+        buffer.append([Self.event(2011)])
+        poll()
+        XCTAssertNotNil(m.liveGapText)
     }
 
     // MARK: - app-8: the alerts notified are not remembered for good

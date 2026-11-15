@@ -40,6 +40,8 @@ public struct Snapshot: Sendable {
     /// Live events after `liveAfter` (the cursor this poll was fetched with); nil when not read.
     public var newLive: [AnalyzedEvent]?
     public var liveAfter: Int64?
+    /// `newLive` was read with the folded system activity.
+    public var liveIncludesBenign = false
     public var summaries: [UsageSummary]?
     public var rules: [Rule]?
     public var settings: Settings?
@@ -80,6 +82,9 @@ public enum AskPoll: Equatable, Sendable {
 }
 
 public enum SnapshotFetcher {
+    /// The most live events one poll reads: the newest after the cursor.
+    public static let liveLimit = 500
+
     /// Fast poll (every second): status, alerts, live tail. Full poll (every ~10 s, or after a change)
     /// adds settings, the catalog, agents, summaries and rules. `hello` starts with the version
     /// handshake, so a mismatched daemon is reported as such rather than as decoding errors.
@@ -93,6 +98,7 @@ public enum SnapshotFetcher {
     public static func fetch(_ client: IPCClient, liveAfter: Int64?, includeBenign: Bool, full: Bool, hello: Bool = false) -> Snapshot {
         var s = Snapshot()
         s.liveAfter = liveAfter
+        s.liveIncludesBenign = includeBenign
         do {
             if hello {
                 do {
@@ -127,7 +133,7 @@ public enum SnapshotFetcher {
         }
         s.alerts = read(.alerts) { try client.alerts(AlertQuery(limit: 300)) }
         s.newLive = read(.live) { () throws -> [AnalyzedEvent] in
-            guard case .events(let e) = try client.call(.live(afterID: liveAfter, limit: 500, includeBenign: includeBenign)) else {
+            guard case .events(let e) = try client.call(.live(afterID: liveAfter, limit: liveLimit, includeBenign: includeBenign)) else {
                 throw IPCError(.internalError, "unexpected response")
             }
             return e
@@ -182,15 +188,39 @@ public struct LiveFeed: Sendable {
     public private(set) var events: [AnalyzedEvent] = []
     public private(set) var lastID: Int64?
     public var capacity = 2000
+    /// A batch read without the folded system activity moved the cursor past some of it: to show that
+    /// activity, the newest events are read again with it (`merge`).
+    public private(set) var missingBenign = false
+    /// A batch read after the cursor came full: the accesses between the cursor and its oldest event
+    /// were never read (one read returns the newest `SnapshotFetcher.liveLimit`).
+    public private(set) var skippedAccesses = false
 
     public init() {}
 
-    public mutating func append(_ new: [AnalyzedEvent]) {
+    /// `includesBenign`: the batch was read with the folded system activity. `full`: it was read after
+    /// the cursor and holds as many events as one read returns, so older ones after the cursor were left out.
+    public mutating func append(_ new: [AnalyzedEvent], includesBenign: Bool = true, full: Bool = false) {
         let fresh = new.filter { e in lastID.map { e.id > $0 } ?? true }.sorted { $0.id > $1.id }
         guard !fresh.isEmpty else { return }
         events.insert(contentsOf: fresh, at: 0)
         if events.count > capacity { events.removeLast(events.count - capacity) }
         lastID = max(lastID ?? 0, fresh.first!.id)
+        if !includesBenign { missingBenign = true }
+        if full { skippedAccesses = true }
+    }
+
+    /// Adds a batch read from the newest end with the folded system activity (it is shown now, and the
+    /// feed was read without it): the rows already listed stay, the folded activity among the newest
+    /// events is added in its place. `full`: the batch holds as many events as one read returns.
+    public mutating func merge(_ new: [AnalyzedEvent], full: Bool) {
+        missingBenign = false
+        guard let oldest = new.map(\.id).min(), let newest = new.map(\.id).max() else { return }
+        // Nothing read between the cursor and this batch.
+        if full, let last = lastID, oldest > last { skippedAccesses = true }
+        let listed = Set(events.map(\.id))
+        events = (events + new.filter { !listed.contains($0.id) }).sorted { $0.id > $1.id }
+        if events.count > capacity { events.removeLast(events.count - capacity) }
+        lastID = max(lastID ?? 0, newest)
     }
 
     public func visible(showSystemNoise: Bool) -> [AnalyzedEvent] {
@@ -345,8 +375,7 @@ public final class AppModel {
         failures.merge(s.failures) { $1 }
         // A refused or failed read keeps what was last read (shown with `unavailableNote`).
         if let v = s.alerts { alerts = v }
-        // A batch fetched with an older cursor (the feed was reset meanwhile) is dropped.
-        if !feedPaused, s.liveAfter == live.lastID, let v = s.newLive { live.append(v) }
+        if !feedPaused, let v = s.newLive { applyLive(v, after: s.liveAfter, includesBenign: s.liveIncludesBenign) }
         if let v = s.summaries { summaries = v }
         if let v = s.rules { rules = v }
         if let v = s.settings { setSettings(v) }
@@ -381,6 +410,19 @@ public final class AppModel {
         }
     }
 
+    private func applyLive(_ batch: [AnalyzedEvent], after cursor: Int64?, includesBenign: Bool) {
+        let full = batch.count >= SnapshotFetcher.liveLimit
+        if showSystemNoise && live.missingBenign {
+            // Shown now, and the feed was read without it: only the read from the newest end with it
+            // (`liveCursor` is nil until then) adds what came before the switch.
+            if cursor == nil && includesBenign { live.merge(batch, full: full) }
+        } else if cursor == live.lastID && (includesBenign || !showSystemNoise) {
+            // A batch fetched with an older cursor (the feed was reset meanwhile) is dropped, and so is
+            // one read without the folded activity once it is shown.
+            live.append(batch, includesBenign: includesBenign, full: cursor != nil && full)
+        }
+    }
+
     private func setStatus(_ new: DaemonStatus) {
         if let old = status, old.pid != new.pid || abs(old.startedAt.timeIntervalSince(new.startedAt)) > 1 {
             // A new daemon instance may reuse event ids this feed has already shown (events it
@@ -412,8 +454,9 @@ public final class AppModel {
         return d
     }
 
-    /// Where the next live poll should start.
-    public var liveCursor: Int64? { live.lastID }
+    /// Where the next live poll should start: from the newest end once the folded system activity is
+    /// shown and the feed was read without it ("Show folded system activity" shows what came before).
+    public var liveCursor: Int64? { showSystemNoise && live.missingBenign ? nil : live.lastID }
 
     /// `status` while it describes the running daemon: nil once that daemon answers in a protocol
     /// this app cannot read (another version replaced it), or no longer serves this app (it runs as
@@ -748,6 +791,11 @@ public final class AppModel {
     }
 
     // MARK: - Tabs
+
+    /// Above the live feed while it is missing accesses: more came between two reads (or while the feed
+    /// was paused) than one read returns. They are recorded; the note names the command that lists them.
+    /// Shown until the feed starts over (a new daemon instance).
+    public var liveGapText: String? { live.skippedAccesses ? L10n.t(.liveSkippedNote, language) : nil }
 
     public var liveRows: [AnalyzedEvent] {
         let rows = live.visible(showSystemNoise: showSystemNoise)

@@ -37,6 +37,7 @@ public enum L: String, CaseIterable, Sendable {
     case detected, notDetected, search, refresh, save, revert, add, remove, delete, cancel, done, close
     // Live
     case showSystemNoise, pauseFeed, resumeFeed, liveEmpty
+    case liveSkippedNote
     // Alerts
     case markAllRead, unreadOnly, statusUnread, statusRead, statusResolved, alertsEmpty, pathsSeen
     // Agents / apps / files
@@ -229,6 +230,8 @@ public enum L10n {
         .pauseFeed: ("Pause feed", "暂停滚动"),
         .resumeFeed: ("Resume feed", "继续滚动"),
         .liveEmpty: ("No sensitive file access yet.", "还没有敏感文件访问。"),
+        .liveSkippedNote: ("More accesses came at once than the live feed reads: some are not listed here. Every one is recorded; in Terminal: sudo whoread events",
+                           "一次到来的访问超过了实时列表能读取的数量，有些没有列在这里。每一次访问都已记录；在终端里运行：sudo whoread events"),
 
         .markAllRead: ("Mark all read", "全部标为已读"),
         .unreadOnly: ("Unread only", "只看未读"),
