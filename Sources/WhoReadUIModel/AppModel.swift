@@ -569,6 +569,10 @@ public final class AppModel {
     /// notifications are withdrawn) within a quarter second while any is open.
     public var pollInterval: TimeInterval { PollSchedule.interval(openAsks: asks.count) }
 
+    /// The polls must not be slowed down (App Nap): questions can be asked (enforcement is active, and the
+    /// daemon holds an access only while the questions were read in the last 5 seconds), or are open.
+    public var needsTimelyPolls: Bool { !asks.isEmpty || liveStatus?.enforcementActive == true }
+
     /// The daemon lists at most this many questions (`DaemonCore.maxListedAsks`).
     public static let maxListedAsks = 200
 

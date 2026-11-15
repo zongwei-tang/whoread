@@ -12,6 +12,7 @@ public enum L: String, CaseIterable, Sendable {
     case appName, modeMonitoring, modeEnforcing, modePaused, modeError, unreadAlertsFormat, openWindow
     case pauseMonitoring, resumeMonitoring, enforcement, enforcementOn, enforcementOff, enforcementInactiveFormat
     case killSwitchAdmin, quit, daemonUnreachable, recentAlerts, noAlerts
+    case killSwitchAdminPrompt
     // Ask mode: open questions (menu bar, Alerts tab, notifications)
     case asksTitle, asksWaitingFormat, asksMoreFormat, askDeniedIn, askNotHeld
     case askAllowOnce, askAlwaysAllow, askDeny, askAlwaysDeny, askTrustApple
@@ -115,6 +116,8 @@ public enum L10n {
         .enforcementOff: ("Off", "关"),
         .enforcementInactiveFormat: ("Not active: %@", "未生效：%@"),
         .killSwitchAdmin: ("Turn enforcement off now (administrator)…", "立即关闭拦截（需要管理员密码）…"),
+        .killSwitchAdminPrompt: ("WhoRead needs an administrator's password to change its kill-switch file (enforcement stays off while the file exists).",
+                                 "WhoRead 需要管理员密码来修改紧急关闭文件（该文件存在时拦截保持关闭）。"),
         .quit: ("Quit WhoRead", "退出 WhoRead"),
         .daemonUnreachable: ("Cannot reach the WhoRead daemon", "无法连接 WhoRead 守护进程"),
         .recentAlerts: ("Recent alerts", "最近告警"),

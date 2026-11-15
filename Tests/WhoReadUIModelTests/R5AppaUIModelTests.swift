@@ -551,4 +551,72 @@ final class R5AppaListTests: XCTestCase {
         escalated.updatedAt = Self.base.addingTimeInterval(550)
         XCTAssertEqual(planner.plan([escalated] + flood.reversed().prefix(299), settings: NotificationSettings(), formatter: f).map(\.alertID), [1])
     }
+
+    // MARK: - app-3: polls on time while questions can be asked
+
+    func testApp3PollsStayOnTimeWhileQuestionsCanBeAsked() {
+        // Enforcement active: the daemon holds an access only while the questions were read in the last 5 s.
+        XCTAssertTrue(Self.model(Self.status(enforcementActive: true)).needsTimelyPolls)
+        // Monitor-only, or enforcement off: nothing waits for an answer; App Nap may slow the polls.
+        let off = Self.model(Self.status(enforcementActive: false))
+        XCTAssertFalse(off.needsTimelyPolls)
+        // Questions still open (answers for next time): read on time.
+        off.apply(asks: .asks([Self.ask(1)]))
+        XCTAssertTrue(off.needsTimelyPolls)
+        XCTAssertFalse(AppModel(language: .en).needsTimelyPolls, "nothing read yet")
+    }
+}
+
+/// app-3: the polls keep their pace while the main thread is in a menu, or waits for a password.
+final class R5AppaPollPaceTests: XCTestCase {
+    private final class Box<T>: @unchecked Sendable { var value: T? }
+
+    func testApp3PollTimersFireWhileTheRunLoopTracksAMenu() {
+        // AppKit runs the main run loop in its event-tracking mode while a menu (a picker, the Templates
+        // menu) is open or a window is resized, and registers that mode as a common mode. A mode of our
+        // own, registered the same way, stands in for it here (no AppKit in this process).
+        let tracking = RunLoop.Mode("WhoReadTestEventTracking")
+        CFRunLoopAddCommonMode(CFRunLoopGetMain(), CFRunLoopMode(tracking.rawValue as CFString))
+        let fired = Box<Int>()
+        fired.value = 0
+        let timer = PollTimer.repeating(every: 0.05) { fired.value! += 1 }
+        defer { timer.invalidate() }
+        let end = Date().addingTimeInterval(0.6)
+        while Date() < end { _ = RunLoop.main.run(mode: tracking, before: end) }
+        XCTAssertGreaterThanOrEqual(fired.value ?? 0, 3, "the questions are read while a menu is open")
+    }
+
+    func testApp3TheAdministratorDialogDoesNotHoldUpTheMainThread() throws {
+        // Stands in for osascript: the password takes a while, then the user cancels.
+        let dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("whoread-r5appa-admin-\(UUID().uuidString.prefix(6))")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fake = dir.appendingPathComponent("osascript")
+        let seen = dir.appendingPathComponent("script.txt")
+        try "#!/bin/sh\nprintf '%s' \"$2\" > '\(seen.path)'\nsleep 0.5\necho 'execution error: User canceled. (-128)' >&2\nexit 1\n"
+            .write(to: fake, atomically: false, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+
+        let answered = expectation(description: "outcome")
+        let outcome = Box<AdminShell.Outcome>()
+        let onMain = Box<Bool>()
+        let started = Date()
+        AdminShell.run("/usr/bin/touch '/Users/alice/whoread-kill-switch'", prompt: "WhoRead needs \"a password\"", osascript: fake.path) { result in
+            onMain.value = Thread.isMainThread
+            outcome.value = result
+            answered.fulfill()
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.3, "the main thread (polls, menu, answers) is not held up by the dialog")
+        wait(for: [answered], timeout: 10)
+        XCTAssertEqual(outcome.value, .cancelled)
+        XCTAssertEqual(onMain.value, true)
+        // The command and the prompt reach AppleScript as string literals.
+        XCTAssertEqual(try String(contentsOf: seen, encoding: .utf8),
+                       "do shell script \"/usr/bin/touch '/Users/alice/whoread-kill-switch'\" with prompt \"WhoRead needs \\\"a password\\\"\" with administrator privileges")
+        XCTAssertEqual(AdminShell.outcome(status: 0, stderr: ""), .done)
+        XCTAssertEqual(AdminShell.outcome(status: 1, stderr: "execution error: The administrator user name or password was incorrect. (-60007)\n"),
+                       .failed("execution error: The administrator user name or password was incorrect. (-60007)"))
+        XCTAssertNotEqual(L10n.t(.killSwitchAdminPrompt, .en), L10n.t(.killSwitchAdminPrompt, .zhHans))
+    }
 }

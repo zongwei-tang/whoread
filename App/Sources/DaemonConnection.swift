@@ -27,6 +27,8 @@ final class DaemonConnection {
     @ObservationIgnored private var askClient: XPCClient
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var askTimer: Timer?
+    /// Held while the polls must stay on time (`keepPollsTimely`).
+    @ObservationIgnored private var timelyActivity: NSObjectProtocol?
     @ObservationIgnored private var askTimerInterval: TimeInterval = 0
     @ObservationIgnored private var schedule = PollSchedule()
     /// The views on screen: full polls read the summaries only while one shows them.
@@ -93,19 +95,35 @@ final class DaemonConnection {
     }
 
     /// Status and history every second; the questions every second, every 250 ms while any is open
-    /// (that timer is re-armed when it changes).
+    /// (that timer is re-armed when it changes). Both fire on the main run loop in its common modes
+    /// (`PollTimer`), so also while a menu is open or a window is resized: the daemon holds an access
+    /// for a question only while the app has read the questions in the last 5 seconds.
     private func armTimers() {
+        keepPollsTimely(model.needsTimelyPolls)
         if timer == nil {
-            timer = Timer.scheduledTimer(withTimeInterval: PollSchedule.idleInterval, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.timerFired() }
+            timer = PollTimer.repeating(every: PollSchedule.idleInterval) { [weak self] in
+                MainActor.assumeIsolated { self?.timerFired() }
             }
         }
         let interval = model.pollInterval
         guard askTimer == nil || interval != askTimerInterval else { return }
         askTimer?.invalidate()
         askTimerInterval = interval
-        askTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pollAsks() }
+        askTimer = PollTimer.repeating(every: interval) { [weak self] in
+            MainActor.assumeIsolated { self?.pollAsks() }
+        }
+    }
+
+    /// While questions can be asked (enforcement active) or are open, App Nap must not stretch the polls
+    /// past the daemon's 5 seconds: a menu bar app with no window open is a candidate. Monitor-only
+    /// installations do not hold it (nothing waits for an answer, and it costs battery).
+    private func keepPollsTimely(_ timely: Bool) {
+        if timely, timelyActivity == nil {
+            timelyActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                   reason: "Reading WhoRead's questions in time")
+        } else if !timely, let activity = timelyActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            timelyActivity = nil
         }
     }
 
@@ -457,30 +475,30 @@ final class DaemonConnection {
     }
 
     private func enableEnforcement() {
-        if model.status?.killSwitchFilePresent == true {
-            // The UI's own fallback (or `whoread kill-switch engage`) left the file: remove it.
-            guard runAsAdministrator("/bin/rm -f '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") else { return }
+        guard model.status?.killSwitchFilePresent == true else { return perform(.setEnforcement(enabled: true)) }
+        // The UI's own fallback (or `whoread kill-switch engage`) left the file: remove it.
+        runAsAdministrator("/bin/rm -f '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") { done in
+            if done { self.perform(.setEnforcement(enabled: true)) }
         }
-        perform(.setEnforcement(enabled: true))
     }
 
-    /// Kill switch #3 (file) from the UI: asks for an administrator password via AppleScript.
+    /// Kill switch #3 (file) from the UI: asks for an administrator password (the system's dialog).
     func engageKillSwitchWithAdminRights() {
-        _ = runAsAdministrator("/usr/bin/touch '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'")
+        runAsAdministrator("/usr/bin/touch '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") { _ in
+            self.poll(full: true)
+        }
     }
 
     private static func quoted(_ path: String) -> String { path.replacingOccurrences(of: "'", with: "") }
 
-    /// Returns false (and sets `lastActionError`, unless the user cancelled) on failure.
-    private func runAsAdministrator(_ command: String) -> Bool {
-        var error: NSDictionary?
-        NSAppleScript(source: "do shell script \"\(command)\" with administrator privileges")?.executeAndReturnError(&error)
-        guard let error else { return true }
-        // -128: the user cancelled the password prompt.
-        if (error[NSAppleScript.errorNumber] as? Int) != -128 {
-            lastActionError = L10n.f(.errAdminFormat, (error[NSAppleScript.errorMessage] as? String) ?? "\(error)")
+    /// Runs `command` as an administrator in osascript (`AdminShell`), off the main thread: the
+    /// questions are still read, and the menu still answers, while the password dialog is open.
+    /// `then` gets whether it ran; on a failure other than a cancelled dialog, `lastActionError` says why.
+    private func runAsAdministrator(_ command: String, then: @escaping @MainActor @Sendable (Bool) -> Void) {
+        AdminShell.run(command, prompt: L10n.t(.killSwitchAdminPrompt, model.language)) { [weak self] outcome in
+            if case .failed(let message) = outcome { self?.lastActionError = L10n.f(.errAdminFormat, message) }
+            then(outcome == .done)
         }
-        return false
     }
 
     func openFullDiskAccessSettings() {

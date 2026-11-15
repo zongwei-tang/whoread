@@ -143,6 +143,80 @@ public struct PollSchedule: Equatable, Sendable {
     }
 }
 
+/// The app's repeating poll timers.
+public enum PollTimer {
+    /// A timer on the main run loop calling `block` (on the main thread) every `interval`, in the run
+    /// loop's common modes: `Timer.scheduledTimer` fires only in the default mode, so not while a menu
+    /// is open or a window is resized (AppKit's event-tracking mode). The questions must be read then
+    /// too: after 5 seconds without a read the daemon takes the app for absent, and denies new accesses
+    /// at once instead of asking.
+    public static func repeating(every interval: TimeInterval, _ block: @escaping @Sendable () -> Void) -> Timer {
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in block() }
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
+    }
+}
+
+/// A shell command run with administrator rights, after the system's password dialog
+/// (`do shell script … with administrator privileges`), in osascript: a process of its own, waited for
+/// off the main thread. The app ran it with NSAppleScript on the main thread, which then did nothing
+/// else until the password was typed: no question was read (the daemon, seeing no app, denied new
+/// accesses at once), and answers clicked meanwhile were not sent. NSAppleScript itself must stay on
+/// the main thread.
+public enum AdminShell {
+    public enum Outcome: Equatable, Sendable {
+        case done
+        /// The user cancelled the password dialog.
+        case cancelled
+        case failed(String)
+    }
+
+    /// `text` as an AppleScript string literal.
+    static func quoted(_ text: String) -> String {
+        "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    /// The AppleScript that runs `command`; `prompt` is shown in the password dialog.
+    public static func script(_ command: String, prompt: String) -> String {
+        "do shell script \(quoted(command)) with prompt \(quoted(prompt)) with administrator privileges"
+    }
+
+    /// osascript's exit status and error output: "execution error: User canceled. (-128)" when the
+    /// dialog was cancelled.
+    public static func outcome(status: Int32, stderr: String) -> Outcome {
+        if status == 0 { return .done }
+        if stderr.contains("(-128)") { return .cancelled }
+        let message = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        return .failed(message.isEmpty ? "osascript exited with status \(status)" : message)
+    }
+
+    /// Runs `command` with osascript and returns at once; `completion` gets the outcome on the main thread.
+    public static func run(_ command: String, prompt: String, osascript: String = "/usr/bin/osascript",
+                           completion: @escaping @MainActor @Sendable (Outcome) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = execute(command, prompt: prompt, osascript: osascript)
+            DispatchQueue.main.async { MainActor.assumeIsolated { completion(result) } }
+        }
+    }
+
+    static func execute(_ command: String, prompt: String, osascript: String) -> Outcome {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: osascript)
+        p.arguments = ["-e", script(command, prompt: prompt)]
+        let errors = Pipe()
+        p.standardError = errors
+        p.standardOutput = FileHandle.nullDevice
+        do {
+            try p.run()
+        } catch {
+            return .failed("\(error)")
+        }
+        let data = errors.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return outcome(status: p.terminationStatus, stderr: String(decoding: data, as: UTF8.self))
+    }
+}
+
 /// The views on screen that need more than the status, the alerts and the live tail. Reading the
 /// summaries makes the daemon read every summary row (bounded only by retention), so full polls read
 /// them only while a view shows them; what was read last stays shown meanwhile.
