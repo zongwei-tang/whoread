@@ -340,6 +340,15 @@ public final class DaemonCore: @unchecked Sendable {
     private var _homes: [String]
     private let normalizerBox: LockedBox<PathNormalizer>
     private var lastRetention = Date.distantPast
+    /// Guarded by `lock`: the stored settings this build could not read in full (daemon-5). The values it
+    /// could not read (dotted paths, "*" for the whole blob) use their defaults, `storedSettings` is the
+    /// blob they are kept from when the settings are saved, and `settingsBase` what this build used for
+    /// them (a user change of one of them is saved as such).
+    private var unreadableSettings: Set<String> = []
+    private var storedSettings: Data?
+    private var settingsBase = Settings()
+    /// Settings a period of retention depends on: while one is unreadable, retention waits.
+    static let retentionSettings: Set<String> = ["*", "retentionDays", "detailDays"]
     private var lastRediscovery = Date()
     /// Guarded by `lock`: the tree's agent generation last saved (`persistAgentAncestry`).
     private var savedAgentGeneration: UInt64?
@@ -371,6 +380,8 @@ public final class DaemonCore: @unchecked Sendable {
     /// no trips any more (ask mode); a leftover value is removed at start.
     static let legacyTripKey = "enforcement_trip_reason"
     static let uncleanStopKey = "unclean_stop"
+    /// The stored settings blob as it was when this build could not read all of it (daemon-5).
+    static let settingsBackupKey = "settings_backup"
     /// Marks rules made by "block from now on" (the app localizes their names).
     public static let blockFromNowOnTemplate = "block-from-now-on"
     /// Marks allow rules made from answers to ask-mode questions ("allow once", "always allow").
@@ -436,7 +447,28 @@ public final class DaemonCore: @unchecked Sendable {
         }
         _data = data
 
-        let settings = (try? store.settings()) ?? Settings()
+        // A stored value this build cannot read (a newer build's, after going back to an older checkout)
+        // takes its default and keeps every other setting; the blob is backed up and saved settings keep
+        // that value (daemon-5). Rules get the same care (rules_backup).
+        let loaded: SettingsLoad
+        do {
+            loaded = try store.loadSettings()
+        } catch {
+            Log.error("settings could not be read (\(error)); the defaults apply until settings are saved")
+            loaded = SettingsLoad(settings: Settings(), unreadable: ["*"])
+        }
+        let settings = loaded.settings
+        if !loaded.unreadable.isEmpty, let raw = loaded.raw {
+            try? store.setValue(raw, forKey: DaemonCore.settingsBackupKey)
+            let what = loaded.unreadable == ["*"] ? "the stored settings" : "stored settings " + loaded.unreadable.joined(separator: ", ")
+            let retention = !DaemonCore.retentionSettings.isDisjoint(with: loaded.unreadable)
+                ? "; retention waits until the retention settings are set again" : ""
+            Log.error("\(what) could not be read by this version: defaults apply (a copy of the stored settings is kept as "
+                      + "\(DaemonCore.settingsBackupKey), and saving keeps the values it could not read)\(retention)")
+        }
+        unreadableSettings = Set(loaded.unreadable)
+        storedSettings = loaded.raw
+        settingsBase = settings
         _homes = config.homeDirectories ?? HomeDirectories.discover()
         normalizerBox = LockedBox(PathNormalizer(homeDirectories: _homes))
         detector = AgentDetector(catalog: data.agents)
@@ -1402,10 +1434,67 @@ public final class DaemonCore: @unchecked Sendable {
             Log.info("settings changed (\(changed.joined(separator: ", "))) by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         }
         do {
-            try store.saveSettings(s)
+            try saveSettings(s)
         } catch {
             Log.error("settings applied but not saved: \(error)")
             throw IPCError(.internalError, "settings applied but not saved: \(error)")
+        }
+    }
+
+    /// Stores `s`. While the stored blob holds values this build could not read (daemon-5), each of them
+    /// is saved again as it was stored unless the user changed that setting: the build that wrote it
+    /// reads it back, and this one keeps using the default. Called under the mutation lock.
+    private func saveSettings(_ s: Settings) throws {
+        lock.lock()
+        let unreadable = unreadableSettings
+        let stored = storedSettings
+        let base = settingsBase
+        lock.unlock()
+        var blob = try JSONEncoder().encode(s)
+        var keep: Set<String> = []
+        if !unreadable.isEmpty, let stored, let old = try? JSONSerialization.jsonObject(with: stored) as? [String: Any],
+           var fresh = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],
+           let was = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(base)) as? [String: Any] {
+            for path in unreadable where path != "*" {
+                let keys = path.split(separator: ".").map(String.init)
+                // Changed by the user: their value is saved.
+                guard DaemonCore.sameJSON(DaemonCore.jsonValue(keys, in: fresh), DaemonCore.jsonValue(keys, in: was)),
+                      let value = DaemonCore.jsonValue(keys, in: old) else { continue }
+                DaemonCore.setJSONValue(value, keys, in: &fresh)
+                keep.insert(path)
+            }
+            if !keep.isEmpty { blob = try JSONSerialization.data(withJSONObject: fresh, options: [.sortedKeys]) }
+        }
+        try store.setValue(blob, forKey: "settings")
+        lock.lock()
+        unreadableSettings = keep
+        storedSettings = keep.isEmpty ? nil : blob
+        settingsBase = s
+        lock.unlock()
+    }
+
+    static func jsonValue(_ keys: [String], in object: [String: Any]) -> Any? {
+        guard let first = keys.first else { return nil }
+        guard keys.count > 1 else { return object[first] }
+        return (object[first] as? [String: Any]).flatMap { jsonValue(Array(keys.dropFirst()), in: $0) }
+    }
+
+    static func setJSONValue(_ value: Any, _ keys: [String], in object: inout [String: Any]) {
+        guard let first = keys.first else { return }
+        guard keys.count > 1 else {
+            object[first] = value
+            return
+        }
+        var inner = object[first] as? [String: Any] ?? [:]
+        setJSONValue(value, Array(keys.dropFirst()), in: &inner)
+        object[first] = inner
+    }
+
+    static func sameJSON(_ a: Any?, _ b: Any?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?): return (x as? NSObject)?.isEqual(y) ?? false
+        default: return false
         }
     }
 
@@ -1868,7 +1957,15 @@ public final class DaemonCore: @unchecked Sendable {
         let forgotten = baseline.prune()
         if forgotten > 0 { Log.info("baseline: forgot \(forgotten) least recently seen unapproved entries (over the limit of \(baseline.maxUnapproved))") }
         persistBaseline()
-        if now.timeIntervalSince(lastRetention) > 3600 {
+        lock.lock()
+        let periodUnknown = !DaemonCore.retentionSettings.isDisjoint(with: unreadableSettings)
+        lock.unlock()
+        if now.timeIntervalSince(lastRetention) > 3600 && periodUnknown {
+            // Never on a default period in place of one this build could not read: what it deletes is gone
+            // for good (daemon-5). Once an hour.
+            lastRetention = now
+            Log.warning("retention waits: the stored retention settings could not be read; set them again to resume it")
+        } else if now.timeIntervalSince(lastRetention) > 3600 {
             lastRetention = now
             let s = currentSettings
             writer.flush()

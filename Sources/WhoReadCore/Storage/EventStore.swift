@@ -53,25 +53,32 @@ public struct Settings: Codable, Hashable, Sendable {
         case readdirEnabled, projectRoots, notifications, latencyP99ThresholdMs, language, trustApplePrograms
     }
 
-    /// Missing keys fall back to defaults so old settings blobs keep decoding.
+    /// Missing keys fall back to defaults so old settings blobs keep decoding. Read back from the store
+    /// (`EventStore.loadSettings`), a value this build cannot read (a newer build's language, a field
+    /// whose type changed) takes its default too and is reported, so it does not reset every other
+    /// setting (daemon-5); a client's settings (IPC) are still decoded strictly.
     public init(from decoder: Decoder) throws {
         let d = Settings()
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        monitoringPaused = try c.decodeIfPresent(Bool.self, forKey: .monitoringPaused) ?? d.monitoringPaused
-        enforcementEnabled = try c.decodeIfPresent(Bool.self, forKey: .enforcementEnabled) ?? d.enforcementEnabled
-        learningDays = try c.decodeIfPresent(Double.self, forKey: .learningDays) ?? d.learningDays
+        let failures = decoder.userInfo[SettingsDecodeFailures.key] as? SettingsDecodeFailures
+        func field<T: Decodable>(_ key: CodingKeys, _ fallback: T) throws -> T {
+            try SettingsDecodeFailures.field(key, in: c, failures: failures, path: decoder.codingPath) ?? fallback
+        }
+        monitoringPaused = try field(.monitoringPaused, d.monitoringPaused)
+        enforcementEnabled = try field(.enforcementEnabled, d.enforcementEnabled)
+        learningDays = try field(.learningDays, d.learningDays)
         // Saved before ask mode (no `trustApplePrograms` yet) on the old 7-day default: ask mode replaced
         // the learning period, so an upgrade does not keep one.
         if learningDays == 7 && !c.contains(.trustApplePrograms) { learningDays = d.learningDays }
-        retentionDays = try c.decodeIfPresent(Int.self, forKey: .retentionDays) ?? d.retentionDays
-        detailDays = try c.decodeIfPresent(Int.self, forKey: .detailDays) ?? d.detailDays
-        coalesceMinutes = try c.decodeIfPresent(Double.self, forKey: .coalesceMinutes) ?? d.coalesceMinutes
-        readdirEnabled = try c.decodeIfPresent(Bool.self, forKey: .readdirEnabled) ?? d.readdirEnabled
-        projectRoots = try c.decodeIfPresent([String].self, forKey: .projectRoots) ?? d.projectRoots
-        notifications = try c.decodeIfPresent(NotificationSettings.self, forKey: .notifications) ?? d.notifications
-        latencyP99ThresholdMs = try c.decodeIfPresent(Double.self, forKey: .latencyP99ThresholdMs) ?? d.latencyP99ThresholdMs
-        language = try c.decodeIfPresent(Language.self, forKey: .language)
-        trustApplePrograms = try c.decodeIfPresent(Bool.self, forKey: .trustApplePrograms) ?? d.trustApplePrograms
+        retentionDays = try field(.retentionDays, d.retentionDays)
+        detailDays = try field(.detailDays, d.detailDays)
+        coalesceMinutes = try field(.coalesceMinutes, d.coalesceMinutes)
+        readdirEnabled = try field(.readdirEnabled, d.readdirEnabled)
+        projectRoots = try field(.projectRoots, d.projectRoots)
+        notifications = try field(.notifications, d.notifications)
+        latencyP99ThresholdMs = try field(.latencyP99ThresholdMs, d.latencyP99ThresholdMs)
+        language = try SettingsDecodeFailures.field(.language, in: c, failures: failures, path: decoder.codingPath)
+        trustApplePrograms = try field(.trustApplePrograms, d.trustApplePrograms)
     }
 
     /// Clamps values to sane ranges.
@@ -96,6 +103,62 @@ public struct NotificationSettings: Codable, Hashable, Sendable {
         self.enabled = enabled
         self.minimumSeverity = minimumSeverity
         self.notifyWouldBlock = notifyWouldBlock
+    }
+
+    enum CodingKeys: String, CodingKey { case enabled, minimumSeverity, notifyWouldBlock }
+
+    /// As `Settings`: field by field when read back from the store (a newer build's severity keeps the
+    /// other two), strictly otherwise; a missing key takes its default.
+    public init(from decoder: Decoder) throws {
+        let d = NotificationSettings()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let failures = decoder.userInfo[SettingsDecodeFailures.key] as? SettingsDecodeFailures
+        func field<T: Decodable>(_ key: CodingKeys, _ fallback: T) throws -> T {
+            try SettingsDecodeFailures.field(key, in: c, failures: failures, path: decoder.codingPath) ?? fallback
+        }
+        enabled = try field(.enabled, d.enabled)
+        minimumSeverity = try field(.minimumSeverity, d.minimumSeverity)
+        notifyWouldBlock = try field(.notifyWouldBlock, d.notifyWouldBlock)
+    }
+}
+
+/// Collects the settings a stored blob holds and this build cannot read (`EventStore.loadSettings`). Only
+/// a decoder given one (in its userInfo) reads settings field by field.
+final class SettingsDecodeFailures: @unchecked Sendable {
+    static let key = CodingUserInfoKey(rawValue: "whoread.settingsDecodeFailures")!
+    /// Dotted paths of the keys whose value could not be read ("language", "notifications.minimumSeverity").
+    private(set) var paths: [String] = []
+
+    /// The value at `key` (nil when absent). With `failures`, one that cannot be read is recorded and read
+    /// as absent; without, its error is thrown.
+    static func field<K: CodingKey, T: Decodable>(_ key: K, in c: KeyedDecodingContainer<K>, failures: SettingsDecodeFailures?,
+                                                  path: [CodingKey]) throws -> T? {
+        guard let failures else { return try c.decodeIfPresent(T.self, forKey: key) }
+        do {
+            return try c.decodeIfPresent(T.self, forKey: key)
+        } catch {
+            // A nested value (notifications) records its own unreadable keys; the object itself only when
+            // it is not an object at all.
+            let name = (path + [key]).map(\.stringValue).joined(separator: ".")
+            if !failures.paths.contains(where: { $0.hasPrefix(name + ".") }) { failures.paths.append(name) }
+            return nil
+        }
+    }
+}
+
+/// The stored settings as this build could read them (`EventStore.loadSettings`).
+public struct SettingsLoad: Sendable {
+    public var settings: Settings
+    /// Dotted paths of the stored values this build could not read, which took their defaults
+    /// (`notifications.minimumSeverity` for a nested one); `["*"]` when the blob could not be read at all.
+    public var unreadable: [String]
+    /// The blob as stored; nil when there was none (or it could not be read from the store).
+    public var raw: Data?
+
+    public init(settings: Settings, unreadable: [String] = [], raw: Data? = nil) {
+        self.settings = settings
+        self.unreadable = unreadable
+        self.raw = raw
     }
 }
 
@@ -273,8 +336,21 @@ public struct StoreCounts: Codable, Hashable, Sendable {
 
 extension EventStore {
     public func settings() throws -> Settings {
-        guard let data = try value(forKey: "settings") else { return Settings() }
-        return (try? JSONDecoder().decode(Settings.self, from: data)) ?? Settings()
+        try loadSettings().settings
+    }
+
+    /// The stored settings, read field by field: a value this build cannot read (a newer build's language
+    /// or severity, a field whose type changed) takes its default and is named in `unreadable`, so it
+    /// does not reset every other setting (daemon-5). Throws only when the store cannot be read.
+    public func loadSettings() throws -> SettingsLoad {
+        guard let data = try value(forKey: "settings") else { return SettingsLoad(settings: Settings()) }
+        let failures = SettingsDecodeFailures()
+        let decoder = JSONDecoder()
+        decoder.userInfo[SettingsDecodeFailures.key] = failures
+        guard let s = try? decoder.decode(Settings.self, from: data) else {
+            return SettingsLoad(settings: Settings(), unreadable: ["*"], raw: data)
+        }
+        return SettingsLoad(settings: s, unreadable: failures.paths, raw: data)
     }
 
     public func saveSettings(_ s: Settings) throws {
