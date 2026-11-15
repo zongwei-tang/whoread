@@ -385,9 +385,11 @@ final class CLIStubDaemonTests: XCTestCase {
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
         try p.run()
-        Thread.sleep(forTimeInterval: 1)
+        defer { if p.isRunning { p.terminate() } }
+        // In its loop after event 5 (the start probes are done), then past the new event 9.
+        XCTAssertNotNil(waitFor(20) { stub.eventQueries.contains { $0.afterID == 5 } }, "tail never started after event 5")
         stub.events += [event(9, path: "/Users/alice/WhoReadTestVault/notes/new.txt")]
-        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertNotNil(waitFor(20) { stub.eventQueries.contains { $0.afterID == 9 } }, "tail never got past event 9")
         p.terminate()
         p.waitUntilExit()
         let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
