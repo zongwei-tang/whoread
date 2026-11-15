@@ -25,9 +25,41 @@ public enum Log {
         let tag = ["DEBUG", "INFO", "WARN", "ERROR"][level.rawValue]
         let line = "\(RFC3339.format(Date(), fractionDigits: 3)) \(tag) \(sanitize(message))\n"
         lock.lock()
-        FileHandle.standardError.write(Data(line.utf8))
+        writeAll(STDERR_FILENO, line)
         lock.unlock()
     }
+
+    /// Writes `text` to `fd` with write(2), again after an interrupted or short write. Any other error (a
+    /// full disk, a log file gone bad, a closed pipe) drops the rest: a line that cannot be written must
+    /// never end the process. Foundation's FileHandle.write(_: Data) raises an Objective-C exception on a
+    /// failed write, which aborts it (daemon-2): the daemon would crash-loop while the disk stays full,
+    /// on the very paths meant to work then (a kill switch, "applied but not saved"). Returns whether
+    /// everything was written.
+    @discardableResult
+    public static func writeAll(_ fd: Int32, _ text: String) -> Bool {
+        let bytes = Array(text.utf8)
+        return bytes.withUnsafeBytes { raw -> Bool in
+            guard var p = raw.baseAddress else { return true }
+            var left = raw.count
+            while left > 0 {
+                let n = posixWrite(fd, p, left)
+                if n > 0 {
+                    p += n
+                    left -= n
+                } else if n < 0 && errno == EINTR {
+                    continue
+                } else {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+}
+
+/// write(2); outside `Log`, whose own `write` hides it there.
+private func posixWrite(_ fd: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int {
+    write(fd, buffer, count)
 }
 
 extension Log {
