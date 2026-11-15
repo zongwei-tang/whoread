@@ -697,8 +697,9 @@ public final class AppModel {
 
     // MARK: - Rules
 
-    /// Display name: built-in template names and "Block <app> from <category>" rules created by
-    /// alert actions (stored in English) are shown in the UI language.
+    /// Display name: built-in template names, "Block <app> from <category>" rules created by alert
+    /// actions, and the "Allow <app> to read <category> (10 minutes)" rules answers save (all stored in
+    /// English) are shown in the UI language. Any other name (one the user gave) is shown as it is.
     public func ruleName(_ r: Rule) -> String {
         if let t = r.template, let localized = L10n.templateName(t, language),
            r.name == nil || r.name == RuleTemplates.all.first(where: { $0.template == t })?.name {
@@ -711,6 +712,25 @@ public final class AppModel {
                 // The app part is the name the app gave itself when the rule was made.
                 let app = DisplayText.name(String(name.dropFirst(prefix.count).dropLast(suffix.count)))
                 return L10n.f(.ruleBlockAppFormat, app, DisplayText.name(category.resolve(language)), language: language)
+            }
+        }
+        // "Allow once" and "always allow" (also on an alert): named as DaemonCore.answerRuleEdit names them,
+        // the verb by the access the rule allows, "(10 minutes)" for allow once.
+        if let name = r.name, r.template == RuleTemplates.askAnswer, r.action == .allow, case .responsible = r.subject,
+           case .category(let id) = r.target, let category = catalog?.catalog.category(id)?.name {
+            let (verb, format): (String, L) = {
+                switch r.access {
+                case .read: return ("read", .ruleAllowReadFormat)
+                case .write: return ("write", .ruleAllowWriteFormat)
+                case .any: return ("use", .ruleAllowUseFormat)
+                }
+            }()
+            let prefix = "Allow ", suffix = " to \(verb) " + category.en
+            for (end, localizedEnd) in [(suffix + " (10 minutes)", L10n.t(.ruleAllowOnceSuffix, language)), (suffix, "")]
+            where name.hasPrefix(prefix) && name.hasSuffix(end) && name.count > prefix.count + end.count {
+                // The app part is the name the app gave itself when the rule was made.
+                let app = DisplayText.name(String(name.dropFirst(prefix.count).dropLast(end.count)))
+                return L10n.f(format, app, DisplayText.name(category.resolve(language)), language: language) + localizedEnd
             }
         }
         return DisplayText.escaped(r.name ?? r.id, limit: 2 * DisplayText.nameLimit + 40)

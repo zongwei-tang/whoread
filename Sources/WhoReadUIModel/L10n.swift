@@ -70,6 +70,7 @@ public enum L: String, CaseIterable, Sendable {
     // Rule editor
     case ruleName, ruleSigningID, ruleTeamID, ruleNoTeamID, ruleProgramPath, ruleCdhash, ruleAgentsNote
     case rulePathNotMonitored, ruleBlockAppFormat
+    case ruleAllowReadFormat, ruleAllowWriteFormat, ruleAllowUseFormat, ruleAllowOnceSuffix
     case ruleErrCategory, ruleErrPath, ruleErrSigningID, ruleErrTeamID, ruleErrProgramPath, ruleErrCdhash, ruleErrApp
     case tplBlockAgentsCritical, tplAlertAgentsHigh, tplDenyNonOwnerSSH
     // Catalog editing (Settings → Monitored paths)
@@ -379,6 +380,11 @@ public enum L10n {
         .ruleAgentsNote: ("None selected means any AI agent.", "不选表示任意 AI agent。"),
         .rulePathNotMonitored: ("This path is not monitored yet: saving the rule adds it to the Custom category.", "这个路径尚未被监控：保存规则时会把它加入「自定义」类别。"),
         .ruleBlockAppFormat: ("Block %@ from %@", "拦截 %@ 访问 %@"),
+        // The rules "allow once" and "always allow" save (DaemonCore.answerRuleEdit), by the access they allow.
+        .ruleAllowReadFormat: ("Allow %@ to read %@", "允许 %@ 读取 %@"),
+        .ruleAllowWriteFormat: ("Allow %@ to write %@", "允许 %@ 写入 %@"),
+        .ruleAllowUseFormat: ("Allow %@ to use %@", "允许 %@ 使用 %@"),
+        .ruleAllowOnceSuffix: (" (10 minutes)", "（10 分钟）"),
         .ruleErrCategory: ("Choose a category.", "请选择类别。"),
         .ruleErrPath: ("The path must start with / or ~/.", "路径必须以 / 或 ~/ 开头。"),
         .ruleErrSigningID: ("Enter a signing ID.", "请填写 signing ID。"),

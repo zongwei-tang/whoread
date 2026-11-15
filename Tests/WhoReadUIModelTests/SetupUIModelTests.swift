@@ -329,4 +329,49 @@ final class SetupUIModelTests: XCTestCase {
         XCTAssertTrue(OnboardingModel.fullDiskAccessBody(monitorOnly: true, .en).contains("If whoreadd is in the list already"))
         XCTAssertTrue(OnboardingModel.fullDiskAccessBody(monitorOnly: true, .zhHans).contains("如果列表里已经有 whoreadd"))
     }
+
+    // MARK: - app-9: answer rules in the UI language
+
+    func testTheRulesAnswersSaveAreNamedInTheUILanguage() throws {
+        // Saved by the daemon in English (DaemonCore.answerRuleEdit): allow once, always allow a write, and
+        // always allow both.
+        let once = try openQuestion(access: .read)
+        let write = try openQuestion(access: .write)
+        let both = try openQuestion(access: .readWrite)
+        _ = try recognised.call(.answerAsk(id: once, action: .allowOnce))
+        _ = try recognised.call(.answerAsk(id: write, action: .alwaysAllow))
+        _ = try recognised.call(.answerAsk(id: both, action: .alwaysAllow))
+
+        let zh = AppModel(language: .zhHans)
+        poll(zh, recognised)
+        let vault = try XCTUnwrap(zh.catalog?.catalog.category("test-vault")?.name)
+        let answers = zh.rules.filter { $0.template == RuleTemplates.askAnswer }
+        XCTAssertEqual(answers.count, 3)
+        func rule(_ access: RuleAccess) throws -> Rule { try XCTUnwrap(answers.first { $0.access == access }, "\(access)") }
+        let read = try rule(.read), written = try rule(.write), any = try rule(.any)
+        // What the daemon calls them.
+        XCTAssertEqual(read.name, "Allow Terminal to read \(vault.en) (10 minutes)")
+        XCTAssertEqual(written.name, "Allow Terminal to write \(vault.en)")
+        XCTAssertEqual(any.name, "Allow Terminal to use \(vault.en)")
+
+        XCTAssertEqual(zh.ruleName(read), "允许 Terminal 读取 \(vault.zhHans)（10 分钟）")
+        XCTAssertEqual(zh.ruleName(written), "允许 Terminal 写入 \(vault.zhHans)")
+        XCTAssertEqual(zh.ruleName(any), "允许 Terminal 使用 \(vault.zhHans)")
+        // In English, as saved.
+        let en = AppModel(language: .en)
+        poll(en, recognised)
+        for r in [read, written, any] { XCTAssertEqual(en.ruleName(r), r.name) }
+
+        // A name the user gave, or one that no longer fits the rule, is shown as it is.
+        var renamed = written
+        renamed.name = "Terminal may write the vault"
+        XCTAssertEqual(zh.ruleName(renamed), "Terminal may write the vault")
+        var otherAccess = written
+        otherAccess.access = .read
+        XCTAssertEqual(zh.ruleName(otherAccess), written.name)
+        // The app's part is the name it gave itself: escaped, as everywhere.
+        var odd = read
+        odd.name = "Allow Term\u{202E}inal to read \(vault.en) (10 minutes)"
+        XCTAssertEqual(zh.ruleName(odd), "允许 Term\\u{202e}inal 读取 \(vault.zhHans)（10 分钟）")
+    }
 }
