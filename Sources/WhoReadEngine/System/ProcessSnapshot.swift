@@ -35,6 +35,20 @@ public enum ProcessSnapshot {
         #endif
     }
 
+    /// Whether the process instance (pid and start time) still runs (`ProcessTree.livenessProbe`): false
+    /// when the pid is gone, has exited (a zombie) or is held by a process that started at another time;
+    /// nil when libproc cannot tell.
+    public static func isRunning(pid: Int32, startTime: Date) -> Bool? {
+        #if os(macOS)
+        return MacProcessSnapshot.isRunning(pid: pid, startTime: startTime)
+        #elseif os(Linux)
+        guard let r = LinuxProcessSnapshot.record(pid: pid) else { return false }
+        return r.startTime.map { abs($0.timeIntervalSince(startTime)) <= 0.011 }  // starttime is in ticks of 10 ms
+        #else
+        return nil
+        #endif
+    }
+
     /// Path heuristic for Apple-signed system binaries (replaced by the first real event): only
     /// SIP-protected system locations. `/System/Volumes/Data/…` is the writable data volume (`/Users`,
     /// `/private/tmp`…) under another spelling, which libproc may report.
@@ -71,10 +85,21 @@ enum MacProcessSnapshot {
         let n = proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count))
         let path = n > 0 ? String(cString: pathBuf) : withUnsafeBytes(of: info.pbi_comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
         let start = Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec) + TimeInterval(info.pbi_start_tvusec) / 1_000_000)
+        // argv bounded as the process tree keeps it, here already: seeding reads every running process.
         return ProcessRecord(
             pid: pid, ppid: Int32(info.pbi_ppid), executablePath: path,
-            isPlatformBinary: ProcessSnapshot.looksLikePlatformBinary(path), argv: argv(pid: pid), startTime: start,
-            euid: info.pbi_uid)
+            isPlatformBinary: ProcessSnapshot.looksLikePlatformBinary(path), argv: argv(pid: pid).map(ProcessTree.boundedArgv),
+            startTime: start, euid: info.pbi_uid)
+    }
+
+    static func isRunning(pid: pid_t, startTime: Date) -> Bool? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        errno = 0
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return errno == ESRCH ? false : nil }
+        if info.pbi_status == UInt32(SZOMB) { return false }
+        let start = Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec) + TimeInterval(info.pbi_start_tvusec) / 1_000_000)
+        return abs(start.timeIntervalSince(startTime)) <= ProcessTree.startTimeTolerance
     }
 
     /// KERN_PROCARGS2: [argc: Int32][exec path\0][\0 padding][argv[0]\0]…[argv[argc-1]\0][env…]
@@ -115,7 +140,7 @@ enum LinuxProcessSnapshot {
         let exe = (try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/\(pid)/exe")) ?? "?"
         var argv: [String]?
         if let data = FileManager.default.contents(atPath: "/proc/\(pid)/cmdline"), !data.isEmpty {
-            argv = data.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+            argv = ProcessTree.boundedArgv(data.split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
         }
         // starttime is in clock ticks since boot; enough as a stable instance identifier here.
         let ticks = Double(fields[19]) ?? 0
