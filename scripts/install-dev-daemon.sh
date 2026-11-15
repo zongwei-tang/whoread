@@ -1,11 +1,19 @@
 #!/bin/bash
-# Installs the development LaunchDaemon (needs sudo). Run on your Mac after building:
-#   swift build -c release        (or scripts/build.sh for signed Xcode builds, see below)
-#   sudo scripts/install-dev-daemon.sh [eslogger|native] [--bin DIR]
+# Installs the development LaunchDaemon (needs sudo). Most people want scripts/install.sh instead,
+# which builds everything, runs this with --app and walks through Full Disk Access. By hand:
+#   WHOREAD_CONFIG=release scripts/dev/sc-build.sh app      (or swift build -c release, or scripts/build.sh)
+#   sudo scripts/install-dev-daemon.sh [eslogger|native] [--bin DIR] [--app WhoRead.app]
 #
 # Nothing is built here: it installs whoreadd and whoread from --bin DIR (or WHOREAD_BIN=DIR), else
 # from the first of .build/release, .build/debug, .build-sc/debug that has both. The test VM has no
 # Xcode and installs the host's build this way (scripts/vm/provision.sh).
+#
+# --app APP also installs the menu bar app as /Applications/WhoRead.app (owned by root) and makes
+# /usr/local/bin/whoread a link to the CLI inside it. Unless both requirements below are given, the
+# daemon is then told to recognise exactly that app and that CLI by their designated requirements
+# (for an ad-hoc build: the cdhash of that very build): the app may then weaken protection and read
+# the history as the signed app would, the CLI may talk to the daemon, and every other non-root
+# client is refused. A rebuilt app or CLI is a different program: install again.
 #
 # Then grant Full Disk Access to /usr/local/libexec/whoreadd (System Settings → Privacy & Security
 # → Full Disk Access → + → ⌘⇧G → /usr/local/libexec/whoreadd) and restart it:
@@ -13,7 +21,7 @@
 #
 # "native" (Endpoint Security) only in a VM with SIP disabled.
 #
-# To let the signed WhoRead app weaken protection (Settings, rules, Allow once…), pass both
+# To let a team-signed WhoRead app weaken protection (Settings, rules, Allow once…), pass both
 # requirements and install the team-signed CLI from the same Xcode build (docs/DEVELOPMENT.md):
 #   WHOREAD_BIN=<Xcode products dir>
 #   WHOREAD_CLIENT_REQUIREMENT='anchor apple generic and certificate leaf[subject.OU] = "TEAMID"'
@@ -134,20 +142,95 @@ require_trusted_dirs() {  # UID FIX DIR...
   done
 }
 
+# Prints the designated requirement codesign reports for PATH and succeeds; fails when there is none
+# (unsigned code). Ad-hoc code has an implicit one, `cdhash H"…"`, which codesign prints commented out.
+designated_requirement() {  # PATH
+  local dr
+  dr="$(codesign -d -r- "$1" 2>&1 | sed -n -E 's/^(# )?designated => //p' | head -1)"
+  [ -n "$dr" ] || return 1
+  printf '%s\n' "$dr"
+}
+
+# Sets PIN_APP and PIN_CLIENT to requirements that only the code at APP and CLI meets: their
+# designated requirements. The client requirement admits both (the app talks to the daemon too);
+# the daemon installs "(client) and (app)" on the app's connection (XPCPeerPolicy).
+pinned_requirements() {  # APP CLI
+  local app cli
+  app="$(designated_requirement "$1")" || { echo "$1 is not signed: it has no designated requirement" >&2; return 1; }
+  cli="$(designated_requirement "$2")" || { echo "$2 is not signed: it has no designated requirement" >&2; return 1; }
+  PIN_APP="$app"
+  PIN_CLIENT="($cli) or ($app)"
+}
+
+# Succeeds when the bundle at PATH is a WhoRead app (its identifier ends in .whoread), which this
+# script may replace. A release with an active system extension never gets here: see below.
+replaceable_app() {  # PATH
+  local id
+  id="$(plutil -extract CFBundleIdentifier raw -o - "$1/Contents/Info.plist" 2>/dev/null)" || return 1
+  case "$id" in *.whoread) return 0 ;; *) return 1 ;; esac
+}
+
+APP_DST=/Applications/WhoRead.app
+# Installs the bundle SRC as APP_DST, owned by root and changeable by no one else. With PIN 1 it sets
+# PIN_APP and PIN_CLIENT (pinned_requirements) from root's own copy before that copy is moved into
+# place: every administrator may rename entries in /Applications, so what is pinned must be what was
+# copied, not whatever is found at APP_DST later. The copy is checked with codesign first.
+install_app() {  # SRC PIN(1|0)
+  local src="$1" pin="$2" stage
+  stage="$(mktemp -d /private/tmp/whoread-app.XXXXXX)"
+  if ! ditto "$src" "$stage/WhoRead.app"; then
+    rm -rf "$stage"; echo "could not copy $src" >&2; return 1
+  fi
+  chown -R root:wheel "$stage/WhoRead.app"
+  chmod -R go-w "$stage/WhoRead.app"
+  if ! codesign --verify --deep --strict "$stage/WhoRead.app" 2>/dev/null; then
+    rm -rf "$stage"; echo "$src does not verify (codesign --verify --deep --strict): build it again" >&2; return 1
+  fi
+  if [ "$pin" = 1 ] && ! pinned_requirements "$stage/WhoRead.app" "$stage/WhoRead.app/Contents/Helpers/whoread"; then
+    rm -rf "$stage"; return 1
+  fi
+  if [ -L "$APP_DST" ] || { [ -e "$APP_DST" ] && [ ! -d "$APP_DST" ]; }; then
+    rm -f "$APP_DST"
+  elif [ -d "$APP_DST" ]; then
+    if ! replaceable_app "$APP_DST"; then
+      rm -rf "$stage"; echo "$APP_DST is not WhoRead: move it away first" >&2; return 1
+    fi
+    # Into root's own folder, removed with it: nothing is deleted through a path others can change.
+    mv "$APP_DST" "$stage/replaced.app"
+  fi
+  mv "$stage/WhoRead.app" "$APP_DST"
+  rm -rf "$stage"
+}
+
+# Makes /usr/local/bin/whoread a link to TARGET (the CLI inside the installed app), replacing a file
+# or link there; a folder is left alone.
+link_cli() {  # TARGET
+  if [ -d /usr/local/bin/whoread ] && [ ! -L /usr/local/bin/whoread ]; then
+    echo "/usr/local/bin/whoread is a folder: remove it first" >&2; return 1
+  fi
+  ln -sfn "$1" /usr/local/bin/whoread
+}
+
 # Sourced (by the tests): define the functions above, do nothing else. `return` works only there.
 if (return 0 2>/dev/null); then return 0; fi
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 77; }
-usage() { echo "usage: $0 [eslogger|native] [--bin DIR]" >&2; exit 64; }
+usage() { echo "usage: $0 [eslogger|native] [--bin DIR] [--app WhoRead.app]" >&2; exit 64; }
 SOURCE=eslogger
 BIN="${WHOREAD_BIN:-}"
+APP_SRC=""
 while [ $# -gt 0 ]; do
   case "$1" in
     eslogger|native) SOURCE="$1"; shift ;;
     --bin) [ $# -ge 2 ] || usage; BIN="$2"; shift 2 ;;
+    --app) [ $# -ge 2 ] || usage; APP_SRC="${2%/}"; shift 2 ;;
     *) usage ;;
   esac
 done
+if [ -n "$APP_SRC" ]; then
+  [ -d "$APP_SRC/Contents" ] && replaceable_app "$APP_SRC" || { echo "$APP_SRC is not a WhoRead.app bundle" >&2; exit 1; }
+  [ -x "$APP_SRC/Contents/Helpers/whoread" ] || { echo "$APP_SRC has no Contents/Helpers/whoread" >&2; exit 1; }
+fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -z "$BIN" ]; then
   for d in "$ROOT/.build/release" "$ROOT/.build/debug" "$ROOT/.build-sc/debug"; do
@@ -158,6 +241,9 @@ fi
 [ -x "$BIN/whoreadd" ] && [ -x "$BIN/whoread" ] || { echo "no whoreadd/whoread in $BIN: build first (swift build -c release)" >&2; exit 1; }
 # Prebuilt binaries from another Mac (the VM installs the host's build): fail here, not in launchd.
 "$BIN/whoread" version >/dev/null 2>&1 || { echo "$BIN/whoread does not run on this Mac (architecture or macOS version?)" >&2; exit 1; }
+if [ -n "$APP_SRC" ] && ! "$APP_SRC/Contents/Helpers/whoread" version >/dev/null 2>&1; then
+  echo "$APP_SRC/Contents/Helpers/whoread does not run on this Mac" >&2; exit 1
+fi
 CLIENT_REQ="${WHOREAD_CLIENT_REQUIREMENT:-}"
 APP_REQ="${WHOREAD_APP_REQUIREMENT:-}"
 # Without a client requirement no peer counts as verified code, so the app requirement would
@@ -166,9 +252,12 @@ if [ -n "$APP_REQ" ] && [ -z "$CLIENT_REQ" ]; then
   echo "WHOREAD_APP_REQUIREMENT has no effect without WHOREAD_CLIENT_REQUIREMENT; set both" >&2
   exit 64
 fi
-# The daemon refuses every client that does not satisfy the requirement, including this CLI.
-if [ -n "$CLIENT_REQ" ] && ! codesign --verify -R="$CLIENT_REQ" "$BIN/whoread" 2>/dev/null; then
-  echo "$BIN/whoread does not satisfy WHOREAD_CLIENT_REQUIREMENT, so the daemon would refuse it." >&2
+# The daemon refuses every client that does not satisfy the requirement, including this CLI (with
+# --app, the one inside the app).
+CLI_SRC="$BIN/whoread"
+[ -z "$APP_SRC" ] || CLI_SRC="$APP_SRC/Contents/Helpers/whoread"
+if [ -n "$CLIENT_REQ" ] && ! codesign --verify -R="$CLIENT_REQ" "$CLI_SRC" 2>/dev/null; then
+  echo "$CLI_SRC does not satisfy WHOREAD_CLIENT_REQUIREMENT, so the daemon would refuse it." >&2
   echo "Use the team-signed products of scripts/build.sh as WHOREAD_BIN." >&2
   exit 1
 fi
@@ -203,15 +292,40 @@ require_trusted_dirs 0 "check it, then remove its ACL entries (sudo chmod -N)" /
 # may still hold it open); a 0755 directory is kept and closed to others.
 private_log "$LOGS" whoreadd.log root wheel
 install -m 755 -o root -g wheel "$BIN/whoreadd" /usr/local/libexec/whoreadd
-install -m 755 -o root -g wheel "$BIN/whoread" /usr/local/bin/whoread
+if [ -n "$APP_SRC" ]; then
+  PIN=0
+  [ -n "$CLIENT_REQ" ] || [ -n "$APP_REQ" ] || PIN=1
+  install_app "$APP_SRC" "$PIN"
+  # Tells scripts/uninstall-dev-daemon.sh that the app in /Applications is the one installed here.
+  rm -f "$DATA/dev-installed-app"
+  printf '%s\n' "$APP_DST" > "$DATA/dev-installed-app"
+  chmod 644 "$DATA/dev-installed-app"
+  link_cli "$APP_DST/Contents/Helpers/whoread"
+  if [ "$PIN" = 1 ]; then CLIENT_REQ="$PIN_CLIENT"; APP_REQ="$PIN_APP"; fi
+  # What the daemon is told must hold for what is installed now.
+  if ! codesign --verify -R="$CLIENT_REQ" "$APP_DST/Contents/Helpers/whoread" 2>/dev/null; then
+    echo "the installed CLI does not meet the client requirement; nothing was started" >&2; exit 1
+  fi
+  if [ -n "$APP_REQ" ] && ! codesign --verify -R="($CLIENT_REQ) and ($APP_REQ)" "$APP_DST" 2>/dev/null; then
+    echo "the installed app does not meet the app requirement; nothing was started" >&2; exit 1
+  fi
+else
+  # Not through a link an earlier --app install left there.
+  rm -f /usr/local/bin/whoread
+  install -m 755 -o root -g wheel "$BIN/whoread" /usr/local/bin/whoread
+fi
 install -m 644 -o root -g wheel "$ROOT/Data/catalog.json" "$ROOT/Data/agents.json" "$ROOT/Data/benign.json" "$DATA/defaults/"
 if [ "$SOURCE" = "native" ]; then
   # The ES entitlement is required even with SIP off; sign ad hoc with it.
   codesign --force --sign - --entitlements "$ROOT/Extension/whoreadd.entitlements" /usr/local/libexec/whoreadd
 else
   # eslogger needs no entitlement. Strip the restricted one an Xcode build carries: without a
-  # provisioning profile AMFI would refuse to launch it on a normal Mac.
-  codesign --force --sign - /usr/local/libexec/whoreadd
+  # provisioning profile AMFI would refuse to launch it on a normal Mac. The identifier and the
+  # hardened runtime stay, and the same build gets the same signature again, so a reinstall of it
+  # keeps its Full Disk Access.
+  codesign --force --sign - --preserve-metadata=identifier,flags /usr/local/libexec/whoreadd 2>&1 \
+    | grep -v 'replacing existing signature' || true
+  codesign --verify --strict /usr/local/libexec/whoreadd || { echo "could not sign /usr/local/libexec/whoreadd" >&2; exit 1; }
 fi
 
 ARGS=()
@@ -230,5 +344,8 @@ chmod 644 "$PLIST"
 plutil -lint "$PLIST" >/dev/null || { echo "generated $PLIST is not a valid plist" >&2; exit 1; }
 launchctl bootstrap system "$PLIST"
 echo "Installed. Logs (root only): $LOGS/whoreadd.log"
+if [ -n "$APP_SRC" ]; then
+  echo "App: $APP_DST, CLI: /usr/local/bin/whoread$([ "${PIN:-0}" = 1 ] && echo ' (both pinned: the daemon recognises exactly these builds)')"
+fi
 echo "Now grant Full Disk Access to /usr/local/libexec/whoreadd, then: sudo launchctl kickstart -k system/com.whoread.daemon"
 echo "Owner team IDs are read from codesign at every daemon start; to see them: sudo whoread catalog resolve-owners"

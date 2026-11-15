@@ -186,7 +186,7 @@ WAITER=$!
 wait_for "$SHARE/.vm/results/*-jump-*.out" begin || bad "jump job did not start"
 echo 100000 > "$T/clock-offset"
 wait $WAITER; rc=$?
-[ $rc -eq 0 ] && grep -qx done "$T/jump.out" \
+[ $rc -eq 0 ] && grep -qx 'done' "$T/jump.out" \
   && ok "a forward jump of the VM's clock does not time a running job out" || bad "forward clock jump: rc $rc: $(cat "$T/jump.out")"
 # Backwards (the clock was ahead and is set right): the heartbeat must go on.
 echo -100000 > "$T/clock-offset"
@@ -203,7 +203,7 @@ wait_for "$SHARE/.vm/results/*-hjump-*.out" begin || bad "hjump job did not star
 echo 100000 > "$T/clock-offset"
 wait $WAITER; rc=$?
 echo 0 > "$T/clock-offset"
-[ $rc -eq 0 ] && grep -qx done "$T/hjump.out" \
+[ $rc -eq 0 ] && grep -qx 'done' "$T/hjump.out" \
   && ok "a jump of the host's clock does not make vmjob give up on a running job" || bad "host clock jump: rc $rc: $(cat "$T/hjump.out")"
 
 echo "== a runner stopped right after its job ended records the job's exit code"

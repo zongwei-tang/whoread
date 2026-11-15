@@ -3,8 +3,9 @@
 # Usage: scripts/dev/sc-app-test.sh [--unit]
 #   --unit  only the xcconfig resolver and the verification helpers (seconds); otherwise also
 #           builds, re-signs and inspects WhoRead.app three times (default, WHOREAD_ENTITLED=1 into
-#           .build-sc/debug/entitled, default again) and checks that a plain build after them leaves
-#           no entitlement in .build-sc/debug. Never launches anything.
+#           .build-sc/debug/entitled, default again), checks that a plain build after them leaves
+#           no entitlement in .build-sc/debug, and builds the release configuration into
+#           .build-sc/release (what scripts/install.sh installs). Never launches anything.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 X="$ROOT/scripts/dev/xcconfig.sh"
@@ -91,6 +92,7 @@ echo "== sc-app.sh verification helpers"
 sc_app() {
   ROOT="$ROOT" XC_FILE="${XC_FILE:-}" bash -c 'set -euo pipefail
     OUT="$ROOT/.build-sc/debug" MC= SDK= PLAT= PLUGINS= TARGET=arm64-apple-macosx14.0 JOBS=1
+    APPOPT=(-Onone -g)
     . "$ROOT/scripts/dev/sc-app.sh"
     [ -z "$XC_FILE" ] || XCCONFIG="$XC_FILE"
     show_settings() { app_settings >/dev/null; printf "%s\n" "$PREFIX" "$EXT_ID" "$MACH"; }
@@ -260,6 +262,25 @@ for p in "$APP" "$APP/$EXT" "$APP/Contents/Helpers/whoread" "$OUT/whoreadd"; do
   check "no entitlements: ${p#"$OUT"/}" "" "$(entitlements "$p")"
 done
 refuses "WHOREAD_ENTITLED other than 0/1" env WHOREAD_ENTITLED=yes "$ROOT/scripts/dev/sc-build.sh" app
+
+echo "== sc-build.sh app (WHOREAD_CONFIG=release, what scripts/install.sh installs)"
+ROUT="$ROOT/.build-sc/release"
+RAPP="$ROUT/WhoRead.app"
+WHOREAD_CONFIG=release "$ROOT/scripts/dev/sc-build.sh" app > "$T/build.log" 2>&1 \
+  || { tail -20 "$T/build.log"; echo "FAIL release app mode"; exit 1; }
+echo "ok   release app mode builds and verifies"
+check "release bundle layout" "$(cat "$T/expected-layout")" "$(layout "$RAPP")"
+for p in "$RAPP" "$RAPP/$EXT" "$RAPP/Contents/Helpers/whoread" "$ROUT/whoreadd" "$ROUT/whoread"; do
+  check "release, no entitlements: ${p#"$ROUT"/}" "" "$(entitlements "$p")"
+done
+"$ROUT/whoread" version > /dev/null 2>&1 && echo "ok   release CLI runs" \
+  || { echo "FAIL release CLI does not run"; FAILS=$((FAILS + 1)); }
+# The debug products are a separate tree: a release build leaves them alone.
+[ -x "$OUT/whoreadd" ] && [ -d "$APP" ] && echo "ok   release build leaves the debug products in place" \
+  || { echo "FAIL release build removed debug products"; FAILS=$((FAILS + 1)); }
+refuses "WHOREAD_CONFIG=release test (tests need the debug configuration)" \
+  env WHOREAD_CONFIG=release "$ROOT/scripts/dev/sc-build.sh" test
+refuses "WHOREAD_CONFIG other than debug/release" env WHOREAD_CONFIG=fast "$ROOT/scripts/dev/sc-build.sh" build
 
 echo "== $FAILS failure(s)"
 [ "$FAILS" -eq 0 ]

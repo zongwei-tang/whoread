@@ -65,6 +65,8 @@ stage vm-harness-selftest "^FAIL|passed," bash scripts/vm/selftest.sh
 stage app-bundle "^FAIL|failure|error" scripts/dev/sc-app-test.sh
 # Monitor-only facts the runner can show without Full Disk Access (listing events needs no root).
 stage eslogger-events "." eslogger --list-events
+# Last: installs WhoRead system-wide with scripts/install.sh (passwordless sudo), checks it, removes it.
+stage install-acceptance "^(PASS|FAIL|SKIP|INCOMPLETE)|passed,|^      " bash scripts/ci/install-acceptance.sh
 
 {
   echo "OVERALL: $([ $FAILED -eq 0 ] && echo PASS || echo FAIL)"

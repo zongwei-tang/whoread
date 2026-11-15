@@ -8,21 +8,41 @@
 # next to its outputs, so this script works there. Outside such a sandbox `swift build` / `swift
 # test` remain the normal way.
 #
-# Usage: scripts/dev/sc-build.sh [build|test|all|app] [XCTest filter]
+# Usage: [WHOREAD_CONFIG=debug|release] scripts/dev/sc-build.sh [build|test|all|app] [XCTest filter]
 #   build  libraries + whoreadd + whoread               (default)
 #   test   build, then build and run the four test bundles (optional filter, e.g. WhoReadCoreTests
 #          or WhoReadCoreTests.AnalyzerTests/testX)
 #   app    build, then WhoRead.app (menu bar app, CLI helper, system extension) signed ad hoc and
 #          verified; [WHOREAD_ENTITLED=1] builds a copy with the restricted entitlements in
-#          .build-sc/debug/entitled instead (SIP-disabled VM only). See scripts/dev/sc-app.sh.
-# Products: .build-sc/debug/{whoreadd,whoread,lib*.a,*.swiftmodule,*.xctest,WhoRead.app}, none of
-# them with an entitlement (AMFI kills an ad-hoc binary that claims a restricted one on a Mac with
-# SIP on); .build-sc/debug/entitled/{whoreadd,WhoRead.app} only from WHOREAD_ENTITLED=1 ... app.
+#          .build-sc/<config>/entitled instead (SIP-disabled VM only). See scripts/dev/sc-app.sh.
+# WHOREAD_CONFIG: debug (default: unoptimized, -enable-testing, into .build-sc/debug) or release
+# (optimized whole-module builds without -enable-testing, into .build-sc/release: what
+# scripts/install.sh installs). The tests need the debug configuration (@testable import).
+# Products: .build-sc/<config>/{whoreadd,whoread,lib*.a,*.swiftmodule,*.xctest,WhoRead.app}, none
+# of them with an entitlement (AMFI kills an ad-hoc binary that claims a restricted one on a Mac
+# with SIP on); .build-sc/<config>/entitled/{whoreadd,WhoRead.app} only from WHOREAD_ENTITLED=1 ... app.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MODE="${1:-build}"
 FILTER="${2:-}"
-OUT="$ROOT/.build-sc/debug"
+CONFIG="${WHOREAD_CONFIG:-debug}"
+JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
+# OPT: the configuration's optimization flags for the package; APPOPT: for the app and the extension
+# (as the Xcode targets: no -enable-testing).
+case "$CONFIG" in
+  debug)
+    OPT=(-Onone -g -enable-testing -DDEBUG -j"$JOBS")
+    APPOPT=(-Onone -g -DDEBUG -j"$JOBS") ;;
+  release)
+    OPT=(-O -wmo -num-threads "$JOBS")
+    APPOPT=(-O -wmo -num-threads "$JOBS") ;;
+  *) echo "sc-build.sh: WHOREAD_CONFIG must be debug or release, not '$CONFIG'" >&2; exit 2 ;;
+esac
+case "$CONFIG:$MODE" in
+  release:test|release:all)
+    echo "sc-build.sh: the tests need the debug configuration (they use @testable import)" >&2; exit 2 ;;
+esac
+OUT="$ROOT/.build-sc/$CONFIG"
 MC="$ROOT/.build-sc/ModuleCache"
 mkdir -p "$OUT" "$MC"
 SDK="$(xcrun --show-sdk-path)"
@@ -32,9 +52,8 @@ SWIFTC="$(xcrun -f swiftc)"
 # fails inside a sandbox.
 PLUGINS="$(dirname "$SWIFTC")/../lib/swift/host/plugins"
 TARGET="$(uname -m)-apple-macosx14.0"
-JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
-COMMON=(-target "$TARGET" -sdk "$SDK" -module-cache-path "$MC" -swift-version 5 -Onone -g
-        -enable-testing -DDEBUG -DSWIFT_PACKAGE -I "$OUT" -L "$OUT" -j"$JOBS" -plugin-path "$PLUGINS")
+COMMON=(-target "$TARGET" -sdk "$SDK" -module-cache-path "$MC" -swift-version 5 "${OPT[@]}"
+        -DSWIFT_PACKAGE -I "$OUT" -L "$OUT" -plugin-path "$PLUGINS")
 # Extra compiler flags, split on spaces.
 if [ -n "${WHOREAD_SWIFTFLAGS:-}" ]; then
   read -r -a EXTRA_FLAGS <<< "$WHOREAD_SWIFTFLAGS"

@@ -1,7 +1,8 @@
 # shellcheck shell=bash disable=SC2154
 # `scripts/dev/sc-build.sh app`: assembles a runnable WhoRead.app with plain swiftc, without Xcode,
-# for sandboxed hosts and the test VM. Sourced by sc-build.sh after `build` (uses its ROOT, OUT,
-# SWIFTC, SDK, PLAT, PLUGINS, TARGET, MC, JOBS, SYSLIBS, stale and sources).
+# for sandboxed hosts, the test VM and scripts/install.sh. Sourced by sc-build.sh after `build`
+# (uses its ROOT, OUT, SWIFTC, SDK, PLAT, PLUGINS, TARGET, MC, APPOPT, SYSLIBS, stale and sources).
+# Paths below say .build-sc/debug; WHOREAD_CONFIG=release builds the same into .build-sc/release.
 #
 # Mirrors the Xcode targets in Xcode/project.yml:
 #   .build-sc/debug/WhoRead.app
@@ -51,8 +52,9 @@ DAEMON="$OUT/whoreadd"
 XCCONFIG="$ROOT/Xcode/Shared.xcconfig"
 # Swift flags of the Xcode targets: as COMMON, minus the package-only -enable-testing and
 # -DSWIFT_PACKAGE, plus the platform's macro plugins (SwiftUI, Foundation), loaded in process.
-APPFLAGS=(-target "$TARGET" -sdk "$SDK" -module-cache-path "$MC" -swift-version 5 -Onone -g -DDEBUG
-          -I "$OUT" -L "$OUT" -j"$JOBS" -plugin-path "$PLUGINS"
+# APPOPT is the configuration's optimization (sc-build.sh: WHOREAD_CONFIG debug or release).
+APPFLAGS=(-target "$TARGET" -sdk "$SDK" -module-cache-path "$MC" -swift-version 5 "${APPOPT[@]}"
+          -I "$OUT" -L "$OUT" -plugin-path "$PLUGINS"
           -plugin-path "$PLAT/Developer/usr/lib/swift/host/plugins")
 if [ -n "${WHOREAD_SWIFTFLAGS:-}" ]; then
   read -r -a APPEXTRA <<< "$WHOREAD_SWIFTFLAGS"

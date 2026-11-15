@@ -6,10 +6,11 @@ import Glibc
 import Darwin
 #endif
 import WhoReadCore
+import WhoReadIPC
 @testable import WhoReadEngine
 
-// Regression tests for scripts/install-dev-daemon.sh: the dev daemon's log file (a macos-3 variant) and
-// the directories it installs into (macos-4 variants).
+// Regression tests for scripts/install-dev-daemon.sh: the dev daemon's log file (a macos-3 variant), the
+// directories it installs into (macos-4 variants), and how --app pins the app and the CLI.
 
 private func exists(_ path: String) -> Bool {
     var st = stat()
@@ -328,4 +329,130 @@ final class InstallScriptLogTests: XCTestCase {
         p.waitUntilExit()
         XCTAssertEqual(p.terminationStatus, 77)
     }
+}
+
+/// scripts/install-dev-daemon.sh --app pins the installed app and CLI by their designated requirements
+/// (for ad-hoc builds the cdhash of that very build), so the daemon recognises exactly those builds and
+/// refuses every other non-root client. These tests run the script's functions against ad-hoc copies of
+/// a system binary.
+final class InstallScriptPinTests: XCTestCase {
+    private var dir: TempDir!
+
+    override func setUpWithError() throws {
+        #if !os(macOS)
+        throw XCTSkip("codesign is macOS only")
+        #endif
+        dir = TempDir()
+    }
+
+    private struct Run {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+    }
+
+    /// Sources the script (which then only defines its functions) and runs `call` with bash.
+    private func shell(_ call: String, _ args: [String] = []) throws -> Run {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        let script = repoRoot.appendingPathComponent("scripts/install-dev-daemon.sh").path
+        p.arguments = ["-c", ". \"$1\"; shift; " + call, "bash", script] + args
+        p.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": dir.url.path]
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        try p.run()
+        let o = out.fileHandleForReading.readDataToEndOfFile()
+        let e = err.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return Run(status: p.terminationStatus, stdout: String(decoding: o, as: UTF8.self),
+                   stderr: String(decoding: e, as: UTF8.self))
+    }
+
+    private func run(_ tool: String, _ args: [String]) throws -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: tool)
+        p.arguments = args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try p.run()
+        p.waitUntilExit()
+        return p.terminationStatus
+    }
+
+    /// A copy of /usr/bin/true signed ad hoc under `identifier` (each identifier gives another cdhash).
+    private func adHocBinary(_ name: String, identifier: String) throws -> String {
+        let path = dir.path(name)
+        try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: path)
+        XCTAssertEqual(try run("/usr/bin/codesign", ["--force", "--sign", "-", "--identifier", identifier, path]), 0)
+        return path
+    }
+
+    private func satisfies(_ path: String, _ requirement: String) throws -> Bool {
+        try run("/usr/bin/codesign", ["--verify", "-R=\(requirement)", path]) == 0
+    }
+
+    func testAdHocCodeIsDesignatedByItsCdhash() throws {
+        let a = try adHocBinary("a", identifier: "com.example.a")
+        let r = try shell(#"designated_requirement "$1""#, [a])
+        XCTAssertEqual(r.status, 0, r.stderr)
+        let dr = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(dr.hasPrefix("cdhash H\""), dr)
+        XCTAssertTrue(try satisfies(a, dr))
+        let b = try adHocBinary("b", identifier: "com.example.b")
+        XCTAssertFalse(try satisfies(b, dr), "another build does not meet it")
+    }
+
+    func testUnsignedCodeHasNoDesignatedRequirement() throws {
+        let u = dir.path("unsigned")
+        try FileManager.default.copyItem(atPath: "/usr/bin/true", toPath: u)
+        XCTAssertEqual(try run("/usr/bin/codesign", ["--remove-signature", u]), 0)
+        let r = try shell(#"designated_requirement "$1""#, [u])
+        XCTAssertNotEqual(r.status, 0)
+        XCTAssertEqual(r.stdout, "")
+        let p = try shell(#"pinned_requirements "$1" "$1""#, [u])
+        XCTAssertNotEqual(p.status, 0)
+        XCTAssertTrue(p.stderr.contains("not signed"), p.stderr)
+    }
+
+    func testPinnedRequirementsAdmitTheCLIAndTheAppAndOnlyTheAppAsTheApp() throws {
+        let app = try adHocBinary("app", identifier: "com.example.whoread")
+        let cli = try adHocBinary("cli", identifier: "com.example.whoread.cli")
+        let other = try adHocBinary("other", identifier: "com.example.other")
+        let r = try shell(#"pinned_requirements "$1" "$2" && printf '%s\n' "$PIN_CLIENT" "$PIN_APP""#, [app, cli])
+        XCTAssertEqual(r.status, 0, r.stderr)
+        let lines = r.stdout.split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines.count, 2, r.stdout)
+        let client = lines[0], appReq = lines[1]
+        let appConnection = "(\(client)) and (\(appReq))"  // XPCPeerPolicy.combined
+        XCTAssertTrue(try satisfies(cli, client))
+        XCTAssertTrue(try satisfies(app, client))
+        XCTAssertFalse(try satisfies(other, client), "an unpinned client is refused")
+        XCTAssertTrue(try satisfies(app, appConnection))
+        XCTAssertFalse(try satisfies(cli, appConnection), "the CLI is never the app")
+        XCTAssertFalse(try satisfies(other, appConnection))
+        XCTAssertTrue(XPCPeerPolicyParses(client) && XPCPeerPolicyParses(appConnection))
+    }
+
+    func testOnlyAWhoReadBundleIsReplaceable() throws {
+        func bundle(_ name: String, identifier: String?) throws -> String {
+            let b = dir.path(name)
+            try FileManager.default.createDirectory(atPath: b + "/Contents", withIntermediateDirectories: true)
+            if let identifier {
+                let plist: [String: Any] = ["CFBundleIdentifier": identifier]
+                let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+                try data.write(to: URL(fileURLWithPath: b + "/Contents/Info.plist"))
+            }
+            return b
+        }
+        XCTAssertEqual(try shell(#"replaceable_app "$1""#, [try bundle("ours.app", identifier: "com.example.whoread")]).status, 0)
+        XCTAssertNotEqual(try shell(#"replaceable_app "$1""#, [try bundle("theirs.app", identifier: "com.example.whoreadx")]).status, 0)
+        XCTAssertNotEqual(try shell(#"replaceable_app "$1""#, [try bundle("other.app", identifier: "com.example.other")]).status, 0)
+        XCTAssertNotEqual(try shell(#"replaceable_app "$1""#, [try bundle("bare.app", identifier: nil)]).status, 0)
+    }
+}
+
+/// The requirement strings the installer pins must also parse for the daemon (XPCPeerPolicy).
+private func XPCPeerPolicyParses(_ requirement: String) -> Bool {
+    XPCPeerPolicy.parses(requirement)
 }
