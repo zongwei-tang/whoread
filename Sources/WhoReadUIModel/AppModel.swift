@@ -444,6 +444,15 @@ public final class AppModel {
     /// notifications are withdrawn) within a quarter second while any is open.
     public var pollInterval: TimeInterval { PollSchedule.interval(openAsks: asks.count) }
 
+    /// The daemon lists at most this many questions (`DaemonCore.maxListedAsks`).
+    public static let maxListedAsks = 200
+
+    /// The last list of questions (a poll, or the reply to an answer) has every open one: only such a
+    /// list withdraws the banners of questions it leaves out. The daemon lists them all below its cap.
+    /// Not compared with `status.pendingAsks`: the status comes from the other connection and can be
+    /// old (an answer's reply arrives before it, a status read that fails keeps the last one).
+    public var asksListComplete: Bool { asks.count < AppModel.maxListedAsks }
+
     public var formatter: AlertFormatter {
         let homes = catalog?.homeDirectories ?? status?.homeDirectories ?? []
         let n = PathNormalizer(homeDirectories: homes)

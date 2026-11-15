@@ -260,7 +260,7 @@ final class DaemonConnection {
     /// One banner per open question; banners of questions no longer open are withdrawn.
     private func planAsks() {
         // The daemon lists at most 200 questions; a capped reply must not withdraw banners.
-        let complete = model.asks.count < 200 && (model.status?.pendingAsks ?? 0) <= model.asks.count
+        let complete = model.asksListComplete
         // Before the first full poll, category and AI agent names are not known yet: such banners are
         // replaced once they are.
         let plan = planner.plan(asks: model.asks, formatter: model.formatter, complete: complete, agentName: model.agentName,

@@ -159,3 +159,58 @@ final class R5AppaRuleEditTests: XCTestCase {
         XCTAssertEqual(fromTemplate.build().template, "block-agents-critical")
     }
 }
+
+/// The questions and alerts as listed, and their banners, without the daemon.
+final class R5AppaListTests: XCTestCase {
+    static let base = Date(timeIntervalSince1970: 1_790_000_000)
+
+    static func ask(_ id: Int64, firstAt: Date? = nil, answerBy: Date? = nil) -> AskRequest {
+        let terminal = ResponsibleEntity(kind: .app, key: "app:/system/applications/utilities/terminal.app", displayName: "Terminal")
+        let t = firstAt ?? base.addingTimeInterval(Double(id))
+        return AskRequest(id: id, key: AskKey(responsibleKey: terminal.key, categoryID: "test-vault-\(id)", access: .read, chainAgents: []),
+                          responsible: terminal, severity: .critical, path: "/Users/alice/WhoReadTestVault/ssh/id_ed25519",
+                          process: ProcessRecord(pid: 42, ppid: 10, executablePath: "/bin/cat"), chain: [], agentID: nil,
+                          appleProgram: false, firstAt: t, lastAt: t, holding: answerBy == nil ? 0 : 1, answerBy: answerBy)
+    }
+
+    static func status(pendingAsks: Int? = nil, alerts: Int = 0, unread: Int = 0, enforcementActive: Bool = true) -> DaemonStatus {
+        DaemonStatus(version: "test", pid: 1, startedAt: base, mode: .enforcing, source: .native, sourceRunning: true,
+                     sourceError: nil, sourceHint: nil, sourceCanEnforce: true, learning: false,
+                     learningEndsAt: base, monitoringPaused: false, enforcementEnabled: true,
+                     enforcementActive: enforcementActive, enforcementInactiveReasons: [], latencyTripReason: nil,
+                     killSwitchFilePresent: false, latency: LatencyStats(), parser: nil,
+                     counts: StoreCounts(events: 0, aggregatedDays: 0, alerts: alerts, unreadAlerts: unread),
+                     unreadAlerts: unread, lastEventAt: nil, eventsProcessed: 0, writerDropped: 0, monitoredPrefixes: 1,
+                     homeDirectories: ["/Users/alice"], pendingAsks: pendingAsks)
+    }
+
+    static func model(_ status: DaemonStatus) -> AppModel {
+        let m = AppModel(language: .en)
+        var s = Snapshot()
+        s.status = status
+        m.apply(s)
+        return m
+    }
+
+    // MARK: - app-6: the reply to an answer withdraws the answered question's banner
+
+    func testApp6TheReplyToAnAnswerWithdrawsItsBannerWhateverTheStatusSays() {
+        // The status (read on the other connection) counted one open question.
+        let m = Self.model(Self.status(pendingAsks: 1))
+        m.apply(asks: .asks([Self.ask(1)]))
+        let planner = NotificationPlanner()
+        XCTAssertEqual(planner.plan(asks: m.asks, formatter: m.formatter, complete: m.asksListComplete).post.map(\.askID), [1])
+
+        // Answered in the menu bar: the daemon's reply lists the questions still open, none. The status
+        // still says 1 until the other connection reads it again (or for good, while that read fails).
+        m.apply(response: .asks([]))
+        XCTAssertEqual(m.status?.pendingAsks, 1)
+        XCTAssertTrue(m.asksListComplete, "the daemon lists every open question below its cap")
+        XCTAssertEqual(planner.plan(asks: m.asks, formatter: m.formatter, complete: m.asksListComplete).remove, ["ask-1"])
+
+        // A capped list may leave open questions out: never complete.
+        m.apply(asks: .asks((1...200).map { Self.ask(Int64($0)) }))
+        XCTAssertFalse(m.asksListComplete)
+        XCTAssertEqual(AppModel.maxListedAsks, DaemonCore.maxListedAsks, "the daemon's cap")
+    }
+}
