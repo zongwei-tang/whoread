@@ -213,4 +213,48 @@ final class R5AppaListTests: XCTestCase {
         XCTAssertFalse(m.asksListComplete)
         XCTAssertEqual(AppModel.maxListedAsks, DaemonCore.maxListedAsks, "the daemon's cap")
     }
+
+    // MARK: - app-8: the alerts notified are not remembered for good
+
+    static func alert(_ id: Int64, at t: Date, updated: Date? = nil, window: TimeInterval = 600, kind: AlertKind = .criticalNonOwner,
+                      firstEventID: Int64? = nil, count: Int = 1) -> Alert {
+        Alert(id: id, kind: kind, createdAt: t, updatedAt: updated ?? t, windowEndsAt: t.addingTimeInterval(window),
+              responsible: ResponsibleEntity(kind: .agent, key: "agent:claude-code", displayName: "Claude Code"),
+              categoryID: "test-vault", severity: .critical, count: count, accesses: .read,
+              firstPath: "/Users/alice/WhoReadTestVault/ssh/id_ed25519", firstEventID: firstEventID ?? id * 10, lastEventID: id * 10,
+              paths: ["/Users/alice/WhoReadTestVault/ssh/id_ed25519"], chain: [], agentID: "claude-code", ruleID: nil)
+    }
+
+    func testApp8AlertsWhoseWindowClosedAreForgottenOnceNoLongerListed() {
+        let planner = NotificationPlanner(launchedAt: Self.base)
+        let f = AlertFormatter(language: .en)
+        // An agent that keeps reading a critical file: a new alert every 10-minute window, for a week.
+        // The daemon lists the newest 300 by update.
+        var all: [Alert] = []
+        var notified = 0
+        for i in 1...1000 {
+            all.insert(Self.alert(Int64(i), at: Self.base.addingTimeInterval(Double(i) * 610)), at: 0)
+            notified += planner.plan(Array(all.prefix(300)), settings: NotificationSettings(), formatter: f).count
+        }
+        XCTAssertEqual(notified, 1000, "each new alert once")
+        XCTAssertLessThanOrEqual(planner.notifiedCount, 302, "only the listed alerts, and those whose window just closed")
+    }
+
+    func testApp8AnAlertThatLeftTheListWhileItsWindowIsOpenIsNotNotifiedAgain() {
+        let planner = NotificationPlanner(launchedAt: Self.base)
+        let f = AlertFormatter(language: .en)
+        let first = Self.alert(1, at: Self.base.addingTimeInterval(10))
+        XCTAssertEqual(planner.plan([first], settings: NotificationSettings(), formatter: f).map(\.alertID), [1])
+        // A flood of newer alerts pushes it out of the newest 300 while its window is still open.
+        let flood = (2...301).map { Self.alert(Int64($0), at: Self.base.addingTimeInterval(20 + Double($0))) }
+        XCTAssertEqual(planner.plan(flood.reversed(), settings: NotificationSettings(), formatter: f).count, 300)
+        // A repeat merges into it (same window, same first event): back in the list, and quiet.
+        let repeated = Self.alert(1, at: Self.base.addingTimeInterval(10), updated: Self.base.addingTimeInterval(500), count: 2)
+        XCTAssertEqual(planner.plan([repeated] + flood.reversed().prefix(299), settings: NotificationSettings(), formatter: f), [])
+        // Escalated: notified again, as before.
+        var escalated = repeated
+        escalated.kind = .blocked
+        escalated.updatedAt = Self.base.addingTimeInterval(550)
+        XCTAssertEqual(planner.plan([escalated] + flood.reversed().prefix(299), settings: NotificationSettings(), formatter: f).map(\.alertID), [1])
+    }
 }
