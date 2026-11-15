@@ -48,51 +48,91 @@ if ! err=$("$WR" events --since 1m --json 2>&1 >/dev/null); then
   exit 1
 fi
 
-probe() { # name, expected leaf name, command...
-  local name="$1" leaf="$2"; shift 2
+# This script's real ancestry from ps, itself ($$) first, up to launchd (pid 1), as a JSON array: what
+# the chain recorded above each probe must be.
+ancestry() {
+  local p=$$ out="" n=0
+  while [ -n "$p" ] && [ "$n" -lt 256 ]; do
+    out="${out:+$out,}$p"
+    [ "$p" -le 1 ] && break
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    n=$((n + 1))
+  done
+  echo "[$out]"
+}
+REAL=$(ancestry)
+
+probe() { # name, expected leaf name, file in the vault it reads, command...
+  local name="$1" leaf="$2" file="$3"; shift 3
   local start; start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   as_user "$@" >/dev/null 2>&1
   # Latency is counted from the end of the command: an interpreter that takes a second to start
   # (python3 on a loaded machine) says nothing about how fast the access was recorded.
   local t0; t0=$(now)
-  # The chain must be complete: rooted at launchd (pid 1) with this script ($$) above the leaf.
+  # Above the probe, the chain must be this script's real ancestry ($REAL): all the way to launchd, or
+  # up to a process that was already running when the daemon started and whose parent is launchd now.
+  # libproc has no fork-time parent for such a process, so the daemon marks the ancestry above it
+  # unknown (ancestryKnown false; docs/THREAT_MODEL.md, "Unknown ancestry") instead of guessing
+  # launchd. Only events on the probed file count: --since has whole seconds, and the vault was
+  # written (by cat, among others) just before.
   local found="" result=""
   for _ in $(seq 40); do
-    result=$("$WR" events --since "$start" --json 2>/dev/null | jq -r --arg leaf "$leaf" --argjson me "$$" '
+    result=$("$WR" events --since "$start" --json 2>/dev/null | jq -r --arg leaf "$leaf" --arg file "/WhoReadTestVault/$file" \
+        --argjson me "$$" --argjson real "$REAL" '
+      def verdict:
+        (.chain | map(.pid)) as $c
+        | ($c | index($me)) as $i
+        | if $i == null then "this script (\($me)) is not in it"
+          else ($c[0:$i + 1] | reverse) as $up
+            | ($real[$up | length]) as $above
+            | if $up != $real[0:($up | length)] then
+                "above this script it is not the ancestry ps shows: \($real | reverse | map(tostring) | join(" → "))"
+              elif $c[0] == 1 then (if .ancestryKnown == false then "it reaches launchd but is marked unknown" else "ok" end)
+              elif $above == 1 and .ancestryKnown == false then "unknown"
+              elif $above == 1 then "it stops below launchd but is not marked unknown"
+              else "it stops at pid \($c[0]), whose parent \($above) is not launchd"
+              end
+          end;
       [ .[] | select(((.chain // []) | length) > 0
                      and ((.chain[-1].name // "") | ascii_downcase | startswith($leaf))
-                     and ((.path // "") | contains("WhoReadTestVault")))
-            | { text: ([.chain[] | "\(.name)(\(.pid))"] | join(" → ")),
-                good: (.chain[0].pid == 1 and any(.chain[:-1][]; .pid == $me)) } ] as $m
-      | ($m | map(select(.good)) | first) as $ok
-      | if $ok then "ok " + $ok.text elif ($m | length) > 0 then "wrong " + ($m | last).text else "" end')
-    case "$result" in ok\ *) found="${result#ok }"; break ;; esac
+                     and ((.path // "") | endswith($file)))
+            | { text: ([.chain[] | "\(.name)(\(.pid))"] | join(" → ")), why: verdict } ] as $m
+      | ($m | map(select(.why == "ok" or .why == "unknown")) | first) as $ok
+      | (($m | map(select(.why | startswith("this script") | not)) | first) // $m[0]) as $near
+      | if $ok then "\($ok.why) \($ok.text)"
+        elif $near then "wrong \($near.text): \($near.why)"
+        else "" end')
+    case "$result" in ok\ *|unknown\ *) found="$result"; break ;; esac
     sleep 0.05
   done
   local dt; dt=$(jq -n "($(now) - $t0) * 100 | round / 100")
+  local chain="${found#* }"
+  case "$found" in
+    unknown\ *) chain="$chain (the ancestry above ${chain%% *} is unknown: it was running before the daemon started)" ;;
+  esac
   if [ -n "$found" ] && [ "$(jq -n "$dt <= 2.0")" = true ]; then
-    ok "$name recorded in ${dt}s, chain: $found"
+    ok "$name recorded in ${dt}s, chain: $chain"
   elif [ -n "$found" ]; then
-    bad "$name recorded but took ${dt}s (> 2 s): $found"
+    bad "$name recorded but took ${dt}s (> 2 s): $chain"
   elif [ -n "$result" ]; then
-    bad "$name recorded with a wrong parent chain (expected launchd(1) … bash($$) … $leaf): ${result#wrong }"
+    bad "$name recorded with a wrong parent chain: ${result#wrong }"
   else
     bad "$name not recorded within 2 s"
   fi
 }
 
-probe "cat reads fake private key"       cat     /bin/cat "$VAULT/ssh/id_ed25519"
+probe "cat reads fake private key"       cat     ssh/id_ed25519   /bin/cat "$VAULT/ssh/id_ed25519"
 # Without the Command Line Tools /usr/bin/python3 is only a stub that asks to install them.
 if xcode-select -p >/dev/null 2>&1 && [ -x /usr/bin/python3 ]; then
-  probe "python3 reads fake credentials" python  /usr/bin/python3 -c "open('$VAULT/aws/credentials').read()"
+  probe "python3 reads fake credentials" python  aws/credentials  /usr/bin/python3 -c "open('$VAULT/aws/credentials').read()"
 elif [ -x /usr/bin/perl ]; then
   echo "SKIP  python3 (no Command Line Tools); perl reads instead"
-  probe "perl reads fake credentials"    perl    /usr/bin/perl -e 'open(my $f, "<", $ARGV[0]) or die "$!\n"; my @l = <$f>;' "$VAULT/aws/credentials"
+  probe "perl reads fake credentials"    perl    aws/credentials  /usr/bin/perl -e 'open(my $f, "<", $ARGV[0]) or die "$!\n"; my @l = <$f>;' "$VAULT/aws/credentials"
 else
   echo "SKIP  python3 and perl not available"
 fi
 if [ -n "$node_bin" ]; then
-  probe "node reads fake private key"    node    "$node_bin" -e "require('fs').readFileSync('$VAULT/ssh/id_ed25519')"
+  probe "node reads fake private key"    node    ssh/id_ed25519   "$node_bin" -e "require('fs').readFileSync('$VAULT/ssh/id_ed25519')"
 else
   # sudo sets its own PATH, without Homebrew's folder.
   echo "SKIP  node not found on PATH (by hand, to include it: sudo env PATH=\"\$PATH\" $0)"

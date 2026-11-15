@@ -153,5 +153,7 @@ else
 fi
 say "The menu bar icon shows alerts; allow notifications when macOS asks. In Terminal: whoread status, sudo whoread events --since 1h" \
   "菜单栏图标会显示提醒；macOS 询问时请允许通知。终端里可以用：whoread status、sudo whoread events --since 1h"
+say "Programs that were already open (Terminal, editors, AI agents) are marked \"started by an unknown process\" until they are reopened: WhoRead did not see who started them. Restarting the Mac once clears all of them." \
+  "安装前就开着的程序（终端、编辑器、AI agent）会被标成「不知道是谁启动的」，直到它们重新打开：WhoRead 没看到是谁启动了它们。重启一次电脑就全部正常了。"
 say "Blocking needs a signed release, which is not available yet. To remove WhoRead: scripts/uninstall.sh" \
   "拦截功能需要签名的正式版，目前还没有。卸载：scripts/uninstall.sh"

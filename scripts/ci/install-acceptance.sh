@@ -30,6 +30,8 @@ echo "== runner preparation"
 # throwaway machine gets them back to root, as on a normal Mac.
 for d in /usr/local /usr/local/bin /usr/local/libexec; do
   [ -d "$d" ] || continue
+  # ls -e is how macOS shows a folder's ACL: stat has no format for it.
+  # shellcheck disable=SC2010
   if [ "$(stat -f %u "$d")" != 0 ] || [ $((8#$(stat -f %Lp "$d") & 8#022)) -ne 0 ] || ls -led "$d" | grep -q ' allow '; then
     echo "      $d: owner uid $(stat -f %u "$d"), mode $(stat -f %Lp "$d"): giving it to root"
     sudo chown root:wheel "$d" && sudo chmod go-w "$d" && sudo chmod -N "$d" 2>/dev/null || true
@@ -44,6 +46,8 @@ else
 fi
 tail -25 "$T/install.log" | indent
 
+# The reports below go to this user's temporary folder: written by this shell, not by sudo, on purpose.
+# shellcheck disable=SC2024
 if sudo launchctl print system/com.whoread.daemon > "$T/launchd.txt" 2>&1 && grep -q 'state = running' "$T/launchd.txt"; then
   ok "launchd runs com.whoread.daemon"
 else
@@ -89,6 +93,7 @@ echo "== monitoring (eslogger)"
 if "$WR" status --json 2>/dev/null | grep -Eq '"sourceRunning" *: *true'; then
   ok "eslogger runs under the daemon"
   "$ROOT/scripts/create-test-vault.sh" > /dev/null 2>&1 || true
+  # shellcheck disable=SC2024
   sudo "$ROOT/scripts/acceptance-m2.sh" > "$T/m2.log" 2>&1
   indent < "$T/m2.log" | tail -30
   passed="$(sed -n -E 's/^([0-9]+) passed, ([0-9]+) failed.*/\1 \2/p' "$T/m2.log" | tail -1)"

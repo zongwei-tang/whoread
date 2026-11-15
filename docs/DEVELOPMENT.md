@@ -143,7 +143,10 @@ Then:
    Reading the recorded accesses needs root (or the signed app), so the script stops when it is not
    root. It needs `jq` (part of macOS 15 and later; on 14: `brew install jq`). `sudo` drops
    Homebrew's folders from `PATH`; to include the node probe, run
-   `sudo env PATH="$PATH" scripts/acceptance-m2.sh`.
+   `sudo env PATH="$PATH" scripts/acceptance-m2.sh`. Each probe's recorded chain must be the script's
+   real ancestry as `ps` shows it: up to launchd, or up to a process that was already running when
+   the daemon started and whose parent is launchd now (a Terminal window opened before), with the
+   ancestry above it marked unknown (THREAT_MODEL.md, "Unknown ancestry").
 3. Owner apps are pinned to the team IDs `codesign -dv` reports for the apps installed here. The
    daemon does this in memory at every start and after catalog changes (unresolved third-party
    apps are not owners, so they alert). To see what it finds:

@@ -548,13 +548,17 @@ wait $UNINSTALLER; rc=$?
   && ok "uninstall.sh goes on once the runner is gone" || bad "uninstall.sh after the runner stopped: rc $rc: $(cat "$T/uninstall.out")"
 
 echo "== acceptance-m2.sh against a fake daemon (JSON handling without Python)"
-# The fake whoread reports, for every probe leaf, an access whose chain is launchd → the acceptance
-# script (its pid is in $T/m2.pid) → the leaf; with FAKE_CHAIN=wrong the script is missing from it.
+# The fake whoread reports, for every probe leaf, an access to the probed vault file whose chain is
+# launchd → 400 → 500 → the acceptance script (its pid is in $T/m2.pid) → the leaf, the ancestry the ps
+# stand-in gives the script. FAKE_CHAIN changes it: wrong leaves the script out, unknown starts it at
+# 400 with the ancestry marked unknown (a process already running when the daemon started, whose
+# parent is launchd now), unmarked starts it there without the mark, cut starts it at 500 (whose
+# parent, 400, is not launchd).
 # It logs every call as "root ..." or, when it runs through the sudo stand-in, "user ...", and
 # refuses a history query from the test user as the daemon does.
 # Stand-ins in $T/m2root let the script run "as root" here: id -u says 0, dscl gives the test user
-# the fake home, sudo -n -u USER -- runs the command as this user (marked as the test user's), and
-# launchctl asuser runs it in place.
+# the fake home, sudo -n -u USER -- runs the command as this user (marked as the test user's),
+# launchctl asuser runs it in place, and ps -o ppid= -p gives the script the made-up ancestry.
 mkdir -p "$T/m2home/WhoReadTestVault/ssh" "$T/m2home/WhoReadTestVault/aws" "$T/m2home/WhoReadTestVault/notes" "$T/m2bin" "$T/m2root"
 echo fake > "$T/m2home/WhoReadTestVault/ssh/id_ed25519"
 echo fake > "$T/m2home/WhoReadTestVault/aws/credentials"
@@ -563,6 +567,17 @@ printf '#!/bin/bash\nif [ "$#" -eq 1 ] && [ "$1" = -u ]; then echo 0; else exec 
 printf '#!/bin/bash\necho "NFSHomeDirectory: $FAKE_HOME"\n' > "$T/m2root/dscl"
 printf '#!/bin/bash\necho "sudo $*" >> "$FAKE_SUDO_LOG"\n[ "$1" = -n ] && [ "$2" = -u ] && [ "$4" = -- ] || exit 1\nshift 4\nFAKE_AS_USER=1 exec "$@"\n' > "$T/m2root/sudo"
 printf '#!/bin/bash\n[ "$1" = asuser ] || exit 1\nshift 2\nexec "$@"\n' > "$T/m2root/launchctl"
+cat > "$T/m2root/ps" <<'SH'
+#!/bin/bash
+[ "$#" -eq 4 ] && [ "$1" = -o ] && [ "$2" = ppid= ] && [ "$3" = -p ] || exec /bin/ps "$@"
+case "$4" in
+  "$(cat "$FAKE_PID_FILE")") echo "  500" ;;
+  500) echo "  400" ;;
+  400) echo "    1" ;;
+  1) echo "    0" ;;
+  *) exit 1 ;;
+esac
+SH
 cat > "$T/m2bin/whoread" <<'SH'
 #!/bin/bash
 if [ -n "${FAKE_AS_USER:-}" ]; then echo "user $*"; else echo "root $*"; fi >> "$FAKE_LOG"
@@ -575,14 +590,29 @@ case "$1" in
 esac
 me=$(cat "$FAKE_PID_FILE")
 [ "${FAKE_CHAIN:-}" = wrong ] && me=4242
-ev() { printf '{"path":"%s/WhoReadTestVault/x","chain":[{"name":"launchd","pid":1},{"name":"bash","pid":%s},{"name":"%s","pid":999}]%s}' "$HOME" "$me" "$1" "${2:-}"; }
+case "${FAKE_CHAIN:-}" in
+  unknown|unmarked) top='{"name":"bash","pid":400},{"name":"bash","pid":500}' ;;
+  cut) top='{"name":"bash","pid":500}' ;;
+  *) top='{"name":"launchd","pid":1},{"name":"bash","pid":400},{"name":"bash","pid":500}' ;;
+esac
+case "${FAKE_CHAIN:-}" in
+  unknown|cut) known=',"ancestryKnown":false' ;;
+  unmarked) known='' ;;
+  *) known=',"ancestryKnown":true' ;;
+esac
+# ev LEAF FILE [EXTRA]: LEAF's access to FILE in the vault.
+ev() {
+  printf '{"path":"%s/WhoReadTestVault/%s","chain":[%s,{"name":"bash","pid":%s},{"name":"%s","pid":999}]%s%s}' \
+    "$HOME" "$2" "$top" "$me" "$1" "$known" "${3:-}"
+}
+probes() { echo "$(ev cat ssh/id_ed25519),$(ev Python aws/credentials),$(ev perl5.34 aws/credentials),$(ev node ssh/id_ed25519)"; }
 case "$1" in
   status) echo "  source:       native running" ;;
   events)
     case " $* " in
       *" --category "*) echo '[]' ;;
-      *" --all "*) echo "[$(ev cat),$(ev Python),$(ev perl5.34),$(ev node),$(ev mdworker ',"benignServiceID":"spotlight"')]" ;;
-      *) echo "[$(ev cat),$(ev Python),$(ev perl5.34),$(ev node)]" ;;
+      *" --all "*) echo "[$(probes),$(ev mdworker notes/spotlight.txt ',"benignServiceID":"spotlight"')]" ;;
+      *) echo "[$(probes)]" ;;
     esac ;;
   export)
     while [ $# -gt 0 ]; do case "$1" in --format) f=$2; shift ;; --output) o=$2; shift ;; esac; shift; done
@@ -626,8 +656,21 @@ out=$(m2 "$T/m2root"); rc=$?
 [ $rc -ne 0 ] && grep -q '^running as root: set WHOREAD_TEST_USER' <<< "$out" && [ ! -s "$T/m2.calls" ] && [ ! -s "$T/m2.sudo" ] \
   && ok "acceptance-m2 as root without a test user stops before anything" || bad "acceptance-m2 (root, no user): rc $rc: $out"
 out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_CHAIN=wrong); rc=$?
-[ $rc -ne 0 ] && grep -q '^FAIL  cat reads fake private key recorded with a wrong parent chain' <<< "$out" \
+[ $rc -ne 0 ] && grep -q '^FAIL  cat reads fake private key recorded with a wrong parent chain: .*this script ([0-9]*) is not in it' <<< "$out" \
   && ok "acceptance-m2 reports a chain without the script" || bad "acceptance-m2 (fake, wrong chain): rc $rc: $out"
+out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_CHAIN=unknown); rc=$?
+[ $rc -eq 0 ] && grep -q ' 0 failed' <<< "$out" \
+  && grep -q '^PASS  cat reads fake private key recorded in .*chain: bash(400) → bash(500) → .*(the ancestry above bash(400) is unknown: it was running before the daemon started)' <<< "$out" \
+  && ok "acceptance-m2 takes a chain that stops, marked unknown, at a process whose parent is launchd" \
+  || bad "acceptance-m2 (fake, ancestry unknown above a child of launchd): rc $rc: $out"
+out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_CHAIN=unmarked); rc=$?
+[ $rc -ne 0 ] && grep -q '^FAIL  cat reads fake private key recorded with a wrong parent chain: .*it stops below launchd but is not marked unknown' <<< "$out" \
+  && ok "acceptance-m2 reports a chain that stops below launchd without the unknown mark" \
+  || bad "acceptance-m2 (fake, stops below launchd, not marked): rc $rc: $out"
+out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_CHAIN=cut); rc=$?
+[ $rc -ne 0 ] && grep -q '^FAIL  cat reads fake private key recorded with a wrong parent chain: .*it stops at pid 500, whose parent 400 is not launchd' <<< "$out" \
+  && ok "acceptance-m2 reports a chain cut short below the script's ancestry" \
+  || bad "acceptance-m2 (fake, chain cut short): rc $rc: $out"
 out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_REFUSE=1); rc=$?
 [ $rc -ne 0 ] && grep -q '^cannot read the recorded accesses: whoread: reading recorded accesses' <<< "$out" \
   && ! grep -q 'not recorded' <<< "$out" && [ ! -s "$T/m2.sudo" ] \
