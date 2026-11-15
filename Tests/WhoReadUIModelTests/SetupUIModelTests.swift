@@ -142,8 +142,11 @@ final class SetupUIModelTests: XCTestCase {
         let monitorOnly = OnboardingModel.showsMonitorOnly(m.status, connected: m.connected, viaExtension: m.viaExtension,
                                                            canInstallExtension: false)
         XCTAssertTrue(monitorOnly)
+        let daemonFDA = OnboardingModel.fullDiskAccessGoesToDaemon(m.status, connected: m.connected, viaExtension: m.viaExtension,
+                                                                   canInstallExtension: false)
+        XCTAssertTrue(daemonFDA)
         // Full Disk Access for the daemon's executable (not "turn on WhoRead"), and no promise to ask.
-        XCTAssertEqual(OnboardingModel.fullDiskAccessBody(monitorOnly: monitorOnly, .en),
+        XCTAssertEqual(OnboardingModel.fullDiskAccessBody(monitorOnly: daemonFDA, .en),
                        L10n.f(.onbFDABodyDaemonFormat, OnboardingModel.daemonExecutablePath, language: .en))
         XCTAssertEqual(OnboardingModel.daemonBody(monitorOnly: monitorOnly, .zhHans), L10n.t(.onbDaemonBodyMonitorOnly, .zhHans))
         XCTAssertEqual(OnboardingModel.extensionBody(monitorOnly: monitorOnly, .en), L10n.t(.onbExtNotAvailableBody, .en))
@@ -151,6 +154,8 @@ final class SetupUIModelTests: XCTestCase {
         // A build that can install the extension: the extension's steps until the daemon says otherwise.
         XCTAssertEqual(o.extensionStepState(nil, connected: false, viaExtension: false, canInstallExtension: true), .pending)
         XCTAssertFalse(OnboardingModel.showsMonitorOnly(nil, connected: false, viaExtension: false, canInstallExtension: true))
+        XCTAssertFalse(OnboardingModel.fullDiskAccessGoesToDaemon(nil, connected: false, viaExtension: false, canInstallExtension: true))
+        XCTAssertTrue(OnboardingModel.fullDiskAccessGoesToDaemon(seen, connected: true, viaExtension: false, canInstallExtension: true))
         XCTAssertFalse(OnboardingModel.showsMonitorOnly(seen, connected: false, viaExtension: false, canInstallExtension: true))
         XCTAssertTrue(OnboardingModel.showsMonitorOnly(seen, connected: true, viaExtension: false, canInstallExtension: true))
         XCTAssertFalse(OnboardingModel.showsMonitorOnly(seen, connected: true, viaExtension: true, canInstallExtension: true))
@@ -169,6 +174,11 @@ final class SetupUIModelTests: XCTestCase {
                            "connected: \(connected)")
             XCTAssertFalse(OnboardingModel.showsMonitorOnly(status, connected: connected, viaExtension: false, canInstallExtension: false),
                            "it can block: not \"This build does not block\"")
+            // It is still the dev LaunchDaemon: Full Disk Access goes to whoreadd, not to this app.
+            let daemonFDA = OnboardingModel.fullDiskAccessGoesToDaemon(status, connected: connected, viaExtension: false,
+                                                                       canInstallExtension: false)
+            XCTAssertTrue(daemonFDA, "connected: \(connected)")
+            XCTAssertTrue(OnboardingModel.fullDiskAccessBody(monitorOnly: daemonFDA, .en).contains(OnboardingModel.daemonExecutablePath))
         }
     }
 

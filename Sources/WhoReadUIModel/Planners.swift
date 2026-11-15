@@ -327,6 +327,15 @@ public struct OnboardingModel: Equatable, Sendable {
         return isMonitorOnly(status, connected: connected, viaExtension: viaExtension)
     }
 
+    /// The Full Disk Access step names the daemon's executable (`fullDiskAccessBody(monitorOnly: true)`, with
+    /// a button that copies its path), not this app: always for a build that cannot install the extension,
+    /// which only uses the dev LaunchDaemon (whoreadd needs Full Disk Access with the native source too),
+    /// otherwise in monitor-only mode.
+    public static func fullDiskAccessGoesToDaemon(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool,
+                                                  canInstallExtension: Bool) -> Bool {
+        !canInstallExtension || isMonitorOnly(status, connected: connected, viaExtension: viaExtension)
+    }
+
     /// Done once the daemon answers through the extension's Mach service (or runs the native
     /// Endpoint Security source), even if the extension was approved before this launch. Not
     /// available in monitor-only mode: nothing to install, monitoring runs without it. Never offered by
@@ -345,7 +354,7 @@ public struct OnboardingModel: Equatable, Sendable {
     }
 
     /// The Full Disk Access step's text: in monitor-only mode it names the daemon's executable, which
-    /// needs it, not this app.
+    /// needs it, not this app (onboarding passes `fullDiskAccessGoesToDaemon`).
     public static func fullDiskAccessBody(monitorOnly: Bool, _ language: Language = L10n.current) -> String {
         monitorOnly ? L10n.f(.onbFDABodyDaemonFormat, daemonExecutablePath, language: language) : L10n.t(.onbFDABody, language)
     }

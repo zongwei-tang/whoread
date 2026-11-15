@@ -4,8 +4,9 @@ import WhoReadUIModel
 
 /// FDA → system extension → monitoring running. Each step re-checks live (the model polls the
 /// daemon every second). Monitor-only mode (the dev daemon with eslogger, and any build that cannot
-/// install the extension): the extension step is not available, and Full Disk Access goes to the
-/// daemon's executable, not to this app.
+/// install the extension unless the dev daemon runs the native source): the extension step is not
+/// available. Full Disk Access goes to the daemon's executable, not to this app, whenever the dev
+/// daemon monitors (always for a build that cannot install the extension).
 struct OnboardingView: View {
     @Environment(DaemonConnection.self) private var connection
     @Environment(AppModel.self) private var model
@@ -20,6 +21,9 @@ struct OnboardingView: View {
         let canInstall = DaemonConnection.extensionServiceName != nil
         let monitorOnly = OnboardingModel.showsMonitorOnly(model.status, connected: model.connected, viaExtension: viaExtension,
                                                            canInstallExtension: canInstall)
+        // whoreadd, whenever the dev LaunchDaemon monitors (also with the native source, which can block).
+        let daemonFDA = OnboardingModel.fullDiskAccessGoesToDaemon(model.status, connected: model.connected,
+                                                                   viaExtension: viaExtension, canInstallExtension: canInstall)
         // Detected from the connection too, so an extension approved before this launch shows as done.
         let ext = o.extensionStepState(model.status, connected: model.connected, viaExtension: viaExtension,
                                        canInstallExtension: canInstall)
@@ -37,10 +41,10 @@ struct OnboardingView: View {
                     }
                 }
             }
-            step(2, L10n.t(.onbFDATitle), OnboardingModel.fullDiskAccessBody(monitorOnly: monitorOnly),
+            step(2, L10n.t(.onbFDATitle), OnboardingModel.fullDiskAccessBody(monitorOnly: daemonFDA),
                  state: o.fullDiskAccessState(model.status, connected: model.connected)) {
                 Button(L10n.t(.onbFDAButton)) { connection.openFullDiskAccessSettings() }
-                if monitorOnly {
+                if daemonFDA {
                     // For the + sheet's ⌘⇧G field.
                     Button(L10n.t(.onbCopyPath)) {
                         NSPasteboard.general.clearContents()
