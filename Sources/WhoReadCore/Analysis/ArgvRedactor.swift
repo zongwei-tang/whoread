@@ -240,12 +240,15 @@ public enum ArgvRedactor {
 
     public static func redact(_ argv: [String]?, maxArgs: Int = 8, maxLength: Int = 256) -> [String]? {
         guard let argv else { return nil }
-        let kept = argv.prefix(maxArgs).map(bounded)
+        // A process tree node's argv ends in a marker when the tree dropped elements: they count.
+        let (elements, dropped) = ProcessTree.droppedElements(argv)
+        let total = elements.count + dropped
+        let kept = elements.prefix(maxArgs).map(bounded)
         // Every event stores its whole chain, and the same ancestors' argv repeat event after event.
-        let key = RedactionCache.Key(argv: kept, count: argv.count, maxArgs: maxArgs, maxLength: maxLength)
+        let key = RedactionCache.Key(argv: kept, count: total, maxArgs: maxArgs, maxLength: maxLength)
         if let hit = cache.value(for: key) { return hit }
         var out = redactSequence(kept, firstIsProgram: true).map { truncate($0, maxLength) }
-        if argv.count > maxArgs { out.append("…(+\(argv.count - maxArgs))") }
+        if total > kept.count { out.append("…(+\(total - kept.count))") }
         cache.store(out, for: key)
         return out
     }

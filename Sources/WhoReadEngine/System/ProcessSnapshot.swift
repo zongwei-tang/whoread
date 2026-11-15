@@ -88,7 +88,8 @@ enum MacProcessSnapshot {
         // argv bounded as the process tree keeps it, here already: seeding reads every running process.
         return ProcessRecord(
             pid: pid, ppid: Int32(info.pbi_ppid), executablePath: path,
-            isPlatformBinary: ProcessSnapshot.looksLikePlatformBinary(path), argv: argv(pid: pid).map(ProcessTree.boundedArgv),
+            isPlatformBinary: ProcessSnapshot.looksLikePlatformBinary(path),
+            argv: argv(pid: pid).map { ProcessTree.boundedArgv($0, executableName: (path as NSString).lastPathComponent) },
             startTime: start, euid: info.pbi_uid)
     }
 
