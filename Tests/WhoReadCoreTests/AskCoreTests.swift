@@ -568,7 +568,7 @@ final class AskAnswerRoundTripTests: AskTestCase {
         // and the baseline approval.
         h.rules.replace(rules: [Rule(target: .category("ssh"), subject: .responsible(key: terminalKey, teamID: nil), action: .allow,
                                      template: RuleTemplates.askAnswer, chainAgents: [])])
-        h.baseline.approve(responsibleKey: terminalKey, categoryID: "ssh", at: at(4))
+        h.baseline.approve(responsibleKey: terminalKey, categoryID: "ssh", access: .read, at: at(4))
         XCTAssertTrue(h.open(user(P.cat(510, parent: 500)), sshKey, 5).alerts.isEmpty)
         // Terminal → zsh → Claude Code → zsh → cat is charged to Claude Code anyway; a tool inside an app
         // bundle is charged to that app, so only the agent scope keeps the approval away from the agent.

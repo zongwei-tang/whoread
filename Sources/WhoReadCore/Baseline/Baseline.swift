@@ -132,16 +132,16 @@ public final class Baseline: @unchecked Sendable {
         return true
     }
 
-    /// "Always allow" for an app on a category (both accesses unless one is given).
-    public func approve(responsibleKey: String, categoryID: String, access: AccessKind? = nil, at now: Date) {
+    /// "Always allow" for an app on a category, for one access kind: the caller approves the kinds that
+    /// were answered and no others (a read approval does not answer a write, daemon-1). No default: both
+    /// kinds are approved only kind by kind.
+    public func approve(responsibleKey: String, categoryID: String, access: AccessKind, at now: Date) {
         lock.lock(); defer { lock.unlock() }
-        for kind in access.map({ [$0] }) ?? AccessKind.allCases {
-            let key = BaselineKey(responsibleKey: responsibleKey, categoryID: categoryID, access: kind)
-            var e = entries[key] ?? BaselineEntry(key: key, firstSeen: now, lastSeen: now, count: 0, source: .approved)
-            e.source = .approved
-            entries[key] = e
-            dirty.insert(key)
-        }
+        let key = BaselineKey(responsibleKey: responsibleKey, categoryID: categoryID, access: access)
+        var e = entries[key] ?? BaselineEntry(key: key, firstSeen: now, lastSeen: now, count: 0, source: .approved)
+        e.source = .approved
+        entries[key] = e
+        dirty.insert(key)
     }
 
     public func remove(responsibleKey: String, categoryID: String? = nil) {

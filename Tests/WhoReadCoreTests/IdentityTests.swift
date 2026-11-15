@@ -525,7 +525,7 @@ final class UnknownAncestryAlertTests: AncestryTestCase {
         }
         let first = h.open(cat(710, originalPPID: 1, 1), sshKey, 2)
         let key = first.events[0].responsible.key
-        h.baseline.approve(responsibleKey: key, categoryID: first.events[0].categoryID, at: at(2))
+        h.baseline.approve(responsibleKey: key, categoryID: first.events[0].categoryID, access: .read, at: at(2))
         XCTAssertTrue(h.open(cat(711, originalPPID: 1, 3), sshKey, 4).alerts.isEmpty, "approved")
 
         let orphan = h.open(cat(712, originalPPID: 700, 5), sshKey, 6)
