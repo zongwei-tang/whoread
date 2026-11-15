@@ -130,9 +130,10 @@ final class DaemonConnection {
         // Every second only the alerts that changed; every 10 s (and after a change) the whole list.
         let alertsSince = full ? nil : model.alertsSince
         let summaries = views.needsSummaries
+        let unread = views.needsUnreadAlerts(unreadOnly: model.alertsUnreadOnly)
         queue.async {
             let snapshot = SnapshotFetcher.fetch(client, liveAfter: cursor, includeBenign: benign, full: full, hello: hello,
-                                                 alertsSince: alertsSince, summaries: summaries)
+                                                 alertsSince: alertsSince, summaries: summaries, unreadAlerts: unread)
             Task { @MainActor in
                 self.inFlight = false
                 self.received(snapshot)
@@ -142,11 +143,16 @@ final class DaemonConnection {
     }
 
     /// A view that needs more than the fast poll appeared or disappeared (`PollViews`). One that needs
-    /// the summaries is filled at once, not at the next full poll.
+    /// the summaries (or the unread alerts on their own) is filled at once, not at the next poll.
     func setShown(_ view: PollViews.View, _ shown: Bool) {
         let before = views
         views.set(view, shown: shown)
-        if views.needsSummaries && !before.needsSummaries { poll(full: true) }
+        let unreadOnly = model.alertsUnreadOnly
+        if views.needsSummaries && !before.needsSummaries {
+            poll(full: true)
+        } else if views.needsUnreadAlerts(unreadOnly: unreadOnly) && !before.needsUnreadAlerts(unreadOnly: unreadOnly) {
+            poll(full: false)
+        }
     }
 
     /// The open questions, on their own connection: answered ones disappear and their banners are
@@ -330,7 +336,7 @@ final class DaemonConnection {
     /// saved a rule that cannot block right now. A question's alert is answered like the question, on
     /// the questions' connection.
     func act(on alert: Int64, _ action: AlertAction, fromNotification: Bool = false) {
-        let kind = model.alerts.first { $0.id == alert }?.kind
+        let kind = model.alert(id: alert)?.kind
         run({ try $0.call(.alertAction(alertID: alert, action: action)) }, questions: kind == .ask, failed: { e in
             // The rule limit, an answer applied but not saved, no reply: said as such, not "refused".
             let text = L10n.alertActionError(e, alertID: alert, action: action, kind: kind)

@@ -162,6 +162,10 @@ struct AlertsView: View {
                 Text(problem).foregroundStyle(.red).font(.callout)
             }
             UnavailableNote(part: .alerts)
+            // The list has the most recently updated alerts: say so when there are more, and how to see them.
+            if let capped = model.alertsCappedText {
+                Text(capped).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
             if model.visibleAlerts.isEmpty && model.asks.isEmpty {
                 // Refused or not read: the note says so, not "no alerts".
                 if model.unavailableNote(.alerts) == nil {
@@ -184,6 +188,9 @@ struct AlertsView: View {
                 }
             }
         }
+        // "Unread only" reads the unread alerts on their own while this tab is shown (also older ones).
+        .readsWhileShown(.alerts)
+        .onChange(of: model.alertsUnreadOnly) { connection.poll(full: false) }
     }
 }
 

@@ -453,6 +453,61 @@ final class R5AppaListTests: XCTestCase {
         XCTAssertNotNil(m.liveGapText)
     }
 
+    // MARK: - app-5: more alerts than the list holds
+
+    func testApp5MoreAlertsThanTheListHolds() throws {
+        // 450 alerts in the 30 days kept: the 300 most recently updated were read, the 150 older ones not.
+        let all = (1...450).map { i -> Alert in
+            var a = Self.alert(Int64(i), at: Self.base.addingTimeInterval(Double(i) * 700))
+            if i > 150 { a.status = .read }
+            return a
+        }
+        let status = Self.status(alerts: 450, unread: 150)
+        let client = FixedClient { request in
+            switch request {
+            case .status: return .status(status)
+            case .alerts(let q):
+                // As the store lists them: most recently updated first, by status, capped.
+                let matching = all.filter { a in (q.statuses?.contains(a.status) ?? true) && (q.since.map { a.updatedAt >= $0 } ?? true) }
+                return .alerts(Array(matching.sorted { $0.updatedAt > $1.updatedAt }.prefix(q.limit)))
+            case .live: return .events([])
+            default: throw IPCError(.notPermitted, "not part of this test")
+            }
+        }
+        var views = PollViews()
+        func poll(_ m: AppModel, full: Bool = true) {
+            m.apply(SnapshotFetcher.fetch(client, liveAfter: m.liveCursor, includeBenign: false, full: full,
+                                          alertsSince: full ? nil : m.alertsSince, summaries: false,
+                                          unreadAlerts: views.needsUnreadAlerts(unreadOnly: m.alertsUnreadOnly)))
+        }
+        let m = AppModel(language: .en)
+        poll(m)
+        XCTAssertEqual(m.alerts.count, SnapshotFetcher.alertLimit)
+        // The Alerts tab's badge and the popover say what the menu bar badge says: every unread alert.
+        XCTAssertEqual(m.unreadCount, 150)
+        XCTAssertEqual(m.menuBar.unread, m.unreadCount)
+        // The list says it leaves alerts out, and how to see them all.
+        let capped = try XCTUnwrap(m.alertsCappedText)
+        XCTAssertTrue(capped.contains("300") && capped.contains("450") && capped.contains("sudo whoread alerts --limit"), capped)
+        let zh = AppModel(language: .zhHans)
+        poll(zh)
+        XCTAssertTrue(try XCTUnwrap(zh.alertsCappedText).contains("共 450 条"))
+
+        // "Unread only" in the Alerts tab: the unread alerts are read on their own, also those the list left out.
+        views.set(.alerts, shown: true)
+        m.alertsUnreadOnly = true
+        poll(m, full: false)
+        XCTAssertEqual(m.visibleAlerts.count, 150)
+        XCTAssertEqual(m.visibleAlerts.first?.id, 150, "newest first")
+        XCTAssertNil(m.alertsCappedText, "every unread alert is listed")
+        XCTAssertEqual(m.alerts.count, SnapshotFetcher.alertLimit, "notifications still see alerts of every status")
+        // Not read on their own while the tab is not shown, nor with the switch off.
+        XCTAssertTrue(views.needsUnreadAlerts(unreadOnly: true))
+        XCTAssertFalse(views.needsUnreadAlerts(unreadOnly: false))
+        views.set(.alerts, shown: false)
+        XCTAssertFalse(views.needsUnreadAlerts(unreadOnly: true))
+    }
+
     // MARK: - app-8: the alerts notified are not remembered for good
 
     static func alert(_ id: Int64, at t: Date, updated: Date? = nil, window: TimeInterval = 600, kind: AlertKind = .criticalNonOwner,

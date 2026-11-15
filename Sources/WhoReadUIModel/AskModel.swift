@@ -166,6 +166,10 @@ public struct PollViews: Equatable, Sendable {
     /// Full polls read the summaries (`SnapshotFetcher.fetch`): the Apps, Files or Agents tab, or the
     /// rule editor (its list of apps), is shown.
     public var needsSummaries: Bool { !shown.isDisjoint(with: [.apps, .files, .agents, .ruleEditor]) }
+
+    /// Polls also read the unread alerts on their own (`SnapshotFetcher.fetch`): "Unread only" is on and
+    /// the Alerts tab is shown.
+    public func needsUnreadAlerts(unreadOnly: Bool) -> Bool { unreadOnly && shown.contains(.alerts) }
 }
 
 /// When to drop a connection the daemon does not serve as the signed app, and open a new one.

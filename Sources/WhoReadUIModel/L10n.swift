@@ -40,6 +40,7 @@ public enum L: String, CaseIterable, Sendable {
     case liveSkippedNote
     // Alerts
     case markAllRead, unreadOnly, statusUnread, statusRead, statusResolved, alertsEmpty, pathsSeen
+    case alertsCappedFormat
     // Agents / apps / files
     case agentsEmpty, appsEmpty, filesEmpty
     // Rules
@@ -240,6 +241,8 @@ public enum L10n {
         .statusResolved: ("Handled", "已处理"),
         .alertsEmpty: ("No alerts. WhoRead only alerts on unusual access.", "没有告警。WhoRead 只在出现异常时提醒。"),
         .pathsSeen: ("Paths", "涉及路径"),
+        .alertsCappedFormat: ("Only the %ld most recently updated are listed here, of %ld. In Terminal, %@ lists them all.",
+                              "这里只列出最近更新的 %ld 条，共 %ld 条。在终端里运行 %@ 可以列出全部。"),
 
         .agentsEmpty: ("No AI agent has touched a sensitive file yet.", "还没有 AI agent 碰过敏感文件。"),
         .appsEmpty: ("No app has touched a sensitive file yet.", "还没有应用碰过敏感文件。"),

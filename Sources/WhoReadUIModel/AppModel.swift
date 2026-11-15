@@ -39,6 +39,8 @@ public struct Snapshot: Sendable {
     public var alerts: [Alert]?
     /// `alerts` holds only the alerts updated since then (nil: the whole list).
     public var alertsSince: Date?
+    /// The unread alerts, read on their own ("Unread only"); nil when not read.
+    public var unreadAlerts: [Alert]?
     /// Live events after `liveAfter` (the cursor this poll was fetched with); nil when not read.
     public var newLive: [AnalyzedEvent]?
     public var liveAfter: Int64?
@@ -98,6 +100,8 @@ public enum SnapshotFetcher {
     /// second. A full poll always reads the whole list: marking alerts read or answering one does not
     /// move their update time, so only a whole list shows such a change made by another program.
     /// `summaries`: a full poll reads them only while a view shows them (`PollViews.needsSummaries`).
+    /// `unreadAlerts`: also the unread alerts on their own ("Unread only" in the Alerts tab), the most
+    /// recently updated of them: the list of every status may leave older unread ones out.
     ///
     /// Only the handshake and the status decide whether the daemon can be read at all. Every other
     /// read is tried on its own: the daemon refuses history to an app it does not recognise as the
@@ -106,7 +110,7 @@ public enum SnapshotFetcher {
     /// A read that gets no answer at all (timed out, connection lost) ends the poll there: the reads
     /// after it would wait as long, and the next poll tries again. The questions are not read here.
     public static func fetch(_ client: IPCClient, liveAfter: Int64?, includeBenign: Bool, full: Bool, hello: Bool = false,
-                             alertsSince: Date? = nil, summaries: Bool = true) -> Snapshot {
+                             alertsSince: Date? = nil, summaries: Bool = true, unreadAlerts: Bool = false) -> Snapshot {
         var s = Snapshot()
         s.liveAfter = liveAfter
         s.liveIncludesBenign = includeBenign
@@ -145,6 +149,9 @@ public enum SnapshotFetcher {
         let since = full ? nil : alertsSince
         s.alertsSince = since
         s.alerts = read(.alerts) { try client.alerts(AlertQuery(since: since, limit: alertLimit)) }
+        if unreadAlerts {
+            s.unreadAlerts = read(.alerts) { try client.alerts(AlertQuery(statuses: [.unread], limit: alertLimit)) }
+        }
         s.newLive = read(.live) { () throws -> [AnalyzedEvent] in
             guard case .events(let e) = try client.call(.live(afterID: liveAfter, limit: liveLimit, includeBenign: includeBenign)) else {
                 throw IPCError(.internalError, "unexpected response")
@@ -331,7 +338,12 @@ public final class AppModel {
     public private(set) var status: DaemonStatus?
     public private(set) var connected = false
     public private(set) var lastError: IPCError?
+    /// The most recently updated alerts, of every status, as the daemon lists them (most recently
+    /// updated first, `SnapshotFetcher.alertLimit` at most). Notifications are planned on this list.
     public private(set) var alerts: [Alert] = []
+    /// The most recently updated unread alerts, read on their own while "Unread only" is on in the
+    /// Alerts tab (`PollViews.needsUnreadAlerts`): `alerts` may leave older unread ones out. nil until read.
+    public private(set) var unreadAlertList: [Alert]?
     /// Ask mode: questions waiting for an answer, oldest first. Set only from the questions' own
     /// connection (`apply(asks:)`, and the reply to an answer); empty while that cannot read them.
     public private(set) var asks: [AskRequest] = []
@@ -397,6 +409,7 @@ public final class AppModel {
                 alertsListedWhole = true
             }
         }
+        if let v = s.unreadAlerts { unreadAlertList = v }
         if !feedPaused, let v = s.newLive { applyLive(v, after: s.liveAfter, includesBenign: s.liveIncludesBenign) }
         if let v = s.summaries { summaries = v }
         if let v = s.rules { rules = v }
@@ -875,15 +888,41 @@ public final class AppModel {
     /// The Alerts tab's list, newest first by when each alert was raised. Not in the daemon's order
     /// (most recently updated first): a repeat merged into an alert would move it to the top, and every
     /// row above it down, under the pointer, as often as once a second.
+    /// "Unread only": the unread alerts read on their own (also older ones the list of every status
+    /// leaves out), or those in that list until they are read.
     public var visibleAlerts: [Alert] {
-        (alertsUnreadOnly ? alerts.filter { $0.status == .unread } : alerts)
+        (alertsUnreadOnly ? unreadListed : alerts)
             .sorted { ($0.createdAt, $0.id) > ($1.createdAt, $1.id) }
     }
 
-    /// Unread alerts: counted in the list while it is current, otherwise (refused, not answered) as the
-    /// status counts them, so the Alerts tab and the popover agree with the menu bar badge.
+    private var unreadListed: [Alert] { (unreadAlertList ?? alerts).filter { $0.status == .unread } }
+
+    /// An alert as listed: in the list of every status, or only in the unread alerts read on their own.
+    public func alert(id: Int64) -> Alert? {
+        alerts.first { $0.id == id } ?? unreadAlertList?.first { $0.id == id }
+    }
+
+    /// The daemon keeps alerts for the retention period (30 days by default); the list has the most
+    /// recently updated `SnapshotFetcher.alertLimit`.
+    static let allAlertsCommand = "sudo whoread alerts --limit 10000"
+    static let allUnreadAlertsCommand = "sudo whoread alerts --unread --limit 10000"
+
+    /// Under the Alerts tab's list while it leaves alerts out: how many it lists, of how many (as the
+    /// status counts them), and the command that lists them all.
+    public var alertsCappedText: String? {
+        guard let s = liveStatus else { return nil }
+        let listed = alertsUnreadOnly ? unreadListed.count : alerts.count
+        let total = alertsUnreadOnly ? s.unreadAlerts : s.counts.alerts
+        guard total > listed else { return nil }
+        return L10n.f(.alertsCappedFormat, listed, total,
+                      alertsUnreadOnly ? AppModel.allUnreadAlertsCommand : AppModel.allAlertsCommand, language: language)
+    }
+
+    /// Unread alerts as the status counts them, all of them (as the menu bar badge does): the list has
+    /// only the most recently updated. Counted in the list only while the status does not describe the
+    /// running daemon.
     public var unreadCount: Int {
-        if failures[.alerts] != nil, let s = liveStatus { return s.unreadAlerts }
+        if let s = liveStatus { return s.unreadAlerts }
         return alerts.filter { $0.status == .unread }.count
     }
 
