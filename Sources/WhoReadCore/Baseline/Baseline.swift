@@ -157,6 +157,44 @@ public final class Baseline: @unchecked Sendable {
         dirty.insert(key)
     }
 
+    /// Data from a build before daemon-1 was fixed: its "always allow" approved both access kinds of an app
+    /// on a category, whatever the alert covered. The answer rule saved with it records the kinds that were
+    /// answered: `answered(responsibleKey, categoryID)` gives the kinds its "always allow" rules cover and
+    /// the earliest of their dates (nil: none, and then the pair cannot be told apart and stays). Where
+    /// that is one kind, the approval of the other is taken back: an entry first seen before the answer
+    /// stays known as observed (it alerted then), one never seen, or seen only after the answer (whose
+    /// approval kept it from alerting), is forgotten. An AI agent's key with its team is this build's own.
+    /// Returns how many approvals were taken back.
+    @discardableResult
+    public func narrowLegacyApprovals(answered: (_ responsibleKey: String, _ categoryID: String) -> (kinds: Set<AccessKind>, since: Date)?) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        var approvedKinds: [String: [String: Set<AccessKind>]] = [:]
+        for e in entries.values where e.source == .approved {
+            let k = e.key
+            if k.responsibleKey.hasPrefix("agent:") && k.responsibleKey.contains("@") { continue }
+            approvedKinds[k.responsibleKey, default: [:]][k.categoryID, default: []].insert(k.access)
+        }
+        var revoked = 0
+        for (responsibleKey, categories) in approvedKinds {
+            for (categoryID, kinds) in categories where kinds == Set(AccessKind.allCases) {
+                guard let answer = answered(responsibleKey, categoryID), answer.kinds.count == 1 else { continue }
+                for kind in AccessKind.allCases where !answer.kinds.contains(kind) {
+                    let key = BaselineKey(responsibleKey: responsibleKey, categoryID: categoryID, access: kind)
+                    guard var e = entries[key] else { continue }
+                    if e.count > 0 && e.firstSeen < answer.since {
+                        e.source = .observed
+                        entries[key] = e
+                    } else {
+                        entries[key] = nil
+                    }
+                    dirty.insert(key)
+                    revoked += 1
+                }
+            }
+        }
+        return revoked
+    }
+
     public func remove(responsibleKey: String, categoryID: String? = nil) {
         lock.lock(); defer { lock.unlock() }
         for key in entries.keys where key.responsibleKey == responsibleKey && (categoryID == nil || key.categoryID == categoryID) {

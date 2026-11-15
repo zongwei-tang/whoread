@@ -274,6 +274,20 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         }
     }
 
+    /// In batches of 500 ids, decoded off the lock.
+    public func alerts(ids: [Int64]) throws -> [Alert] {
+        var bodies: [Data] = []
+        for start in stride(from: 0, to: ids.count, by: 500) {
+            let batch = ids[start..<min(start + 500, ids.count)]
+            try locked {
+                let sql = "SELECT body FROM alerts WHERE id IN (" + Array(repeating: "?", count: batch.count).joined(separator: ",") + ")"
+                try db.prepare(sql).query(batch.map { .int($0) }) { row in bodies.append(row.blob(0)) }
+            }
+        }
+        let decoder = Exporter.decoder()
+        return bodies.compactMap { try? decoder.decode(Alert.self, from: $0) }
+    }
+
     public func maxAlertID() throws -> Int64 {
         try locked {
             var v: Int64 = 0

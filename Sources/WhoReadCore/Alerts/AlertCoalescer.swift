@@ -24,6 +24,9 @@ public final class AlertCoalescer: @unchecked Sendable {
         case asked(chainAgents: [String], ancestryKnown: Bool)
     }
 
+    /// `responsibleKey`: what the baseline knows the app or AI agent by (`ResponsibleEntity.baselineKey`):
+    /// an agent with a team and a process that only looks like it (no team) are not one alert
+    /// (attribution-2), or the impostor's accesses would join an alert the user already handled.
     private struct Key: Hashable {
         var responsibleKey: String
         var categoryID: String
@@ -58,7 +61,7 @@ public final class AlertCoalescer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         self.nextID = max(self.nextID, nextID)
         for a in openAlerts {
-            open[Key(responsibleKey: a.responsible.key, categoryID: a.categoryID,
+            open[Key(responsibleKey: a.responsible.baselineKey, categoryID: a.categoryID,
                      lane: AlertCoalescer.lane(kind: a.kind, denied: a.kind == .blocked, chainAgents: a.scopeAgents,
                                                ancestryKnown: a.ancestryKnown))] = a
         }
@@ -69,7 +72,7 @@ public final class AlertCoalescer: @unchecked Sendable {
     /// `appleProgram` that the alert may offer "allow all Apple programs".
     public func ingest(_ event: AnalyzedEvent, kind: AlertKind?, firstTime: Bool = false, appleProgram: Bool = false) -> AlertUpdate? {
         lock.lock(); defer { lock.unlock() }
-        let key = Key(responsibleKey: event.responsible.key, categoryID: event.categoryID,
+        let key = Key(responsibleKey: event.responsible.baselineKey, categoryID: event.categoryID,
                       lane: AlertCoalescer.lane(kind: kind, denied: event.decision == .denied,
                                                 chainAgents: event.chainAgents ?? Set(event.chain.compactMap(\.agentID)).sorted(),
                                                 ancestryKnown: event.ancestryKnown))

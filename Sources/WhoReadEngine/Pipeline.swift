@@ -104,7 +104,7 @@ public final class EventWriter: @unchecked Sendable {
     /// A timer tick: a flush, unless backing off after failures.
     private func tick() {
         guard Date() >= retryAt else { return }
-        flushLocked()
+        _ = flushLocked()
     }
 
     public func enqueue(events: [AnalyzedEvent]) {
@@ -133,10 +133,18 @@ public final class EventWriter: @unchecked Sendable {
 
     /// Synchronous flush (queries call this so they see everything processed so far).
     public func flush() {
-        queue.sync { flushLocked() }
+        queue.sync { _ = flushLocked() }
     }
 
-    private func flushLocked() {
+    /// `flush()`, throwing when the queued alerts could not be written (they stay queued for the next one).
+    public func flushOrThrow() throws {
+        var failure: Error?
+        queue.sync { failure = flushLocked() }
+        if let failure { throw failure }
+    }
+
+    /// Returns why the alerts could not be written, if they could not.
+    private func flushLocked() -> Error? {
         lock.lock()
         var events = pendingEvents
         let droppedPrefix = pendingStart
@@ -167,7 +175,7 @@ public final class EventWriter: @unchecked Sendable {
         guard let failure else {
             failedFlushes = 0
             retryAt = .distantPast
-            return
+            return nil
         }
         let now = Date()
         failedFlushes += 1
@@ -186,6 +194,7 @@ public final class EventWriter: @unchecked Sendable {
         if report { lastErrorReport = now }
         lock.unlock()
         if report { onError?(failure) }
+        return failedAlerts.isEmpty ? nil : failure
     }
 
     public var droppedCount: UInt64 {

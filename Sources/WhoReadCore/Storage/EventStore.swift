@@ -419,6 +419,8 @@ public protocol EventStore: AnyObject, Sendable {
     func event(id: Int64) throws -> AnalyzedEvent?
     func alerts(_ query: AlertQuery) throws -> [Alert]
     func alert(id: Int64) throws -> Alert?
+    /// The stored alerts with these ids (those that exist), in no particular order.
+    func alerts(ids: [Int64]) throws -> [Alert]
     func summaries(since: Date?) throws -> [UsageSummary]
     /// Daily aggregates of rolled-up details, newest day first.
     func dailyAggregates(since: Date?) throws -> [DailyAggregate]
@@ -495,6 +497,10 @@ extension EventStore {
 
     // Generic versions of the bounded reads, for stores that do not implement them (test doubles).
     // Both stores here implement them without reading everything first.
+
+    public func alerts(ids: [Int64]) throws -> [Alert] {
+        try ids.compactMap { try alert(id: $0) }
+    }
 
     public func summaries(limit: Int) throws -> [UsageSummary] {
         Array(try summaries(since: nil).sorted(by: UsageSummary.newestFirst).prefix(max(0, limit)))
@@ -586,6 +592,11 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
     public func alert(id: Int64) throws -> Alert? {
         lock.lock(); defer { lock.unlock() }
         return alertsByID[id]
+    }
+
+    public func alerts(ids: [Int64]) throws -> [Alert] {
+        lock.lock(); defer { lock.unlock() }
+        return ids.compactMap { alertsByID[$0] }
     }
 
     public func summaries(since: Date?) throws -> [UsageSummary] {

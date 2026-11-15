@@ -347,6 +347,10 @@ public final class DaemonCore: @unchecked Sendable {
     private var unreadableSettings: Set<String> = []
     private var storedSettings: Data?
     private var settingsBase = Settings()
+    /// Guarded by `lock`: retention settings whose stored values could not be read and are not kept in the
+    /// stored blob (the whole blob was unreadable, "*"): retention waits until one of them is set again
+    /// (daemon-5), after the settings were saved anew and the daemon restarted too (`retentionHoldKey`).
+    private var retentionHold: Set<String> = []
     /// Settings a period of retention depends on: while one is unreadable, retention waits.
     static let retentionSettings: Set<String> = ["*", "retentionDays", "detailDays"]
     private var lastRediscovery = Date()
@@ -382,6 +386,11 @@ public final class DaemonCore: @unchecked Sendable {
     static let uncleanStopKey = "unclean_stop"
     /// The stored settings blob as it was when this build could not read all of it (daemon-5).
     static let settingsBackupKey = "settings_backup"
+    /// Store key: the approvals an older build made for both access kinds were narrowed (daemon-1), once.
+    static let approvalsNarrowedKey = "baseline_approvals_narrowed"
+    /// Store key: the retention settings stored last could not be read (daemon-5), so retention waits
+    /// until they are set again, also after the stored settings were saved anew and the daemon restarted.
+    static let retentionHoldKey = "settings_retention_hold"
     /// Marks rules made by "block from now on" (the app localizes their names).
     public static let blockFromNowOnTemplate = "block-from-now-on"
     /// Marks allow rules made from answers to ask-mode questions ("allow once", "always allow").
@@ -469,6 +478,14 @@ public final class DaemonCore: @unchecked Sendable {
         unreadableSettings = Set(loaded.unreadable)
         storedSettings = loaded.raw
         settingsBase = settings
+        // A whole blob that could not be read holds retention until its settings are set (saveSettings);
+        // so does a hold saved before, when the blob was saved anew.
+        var hold: Set<String> = loaded.unreadable.contains("*") ? DaemonCore.retentionSettings.subtracting(["*"]) : []
+        if let saved = try? store.value(forKey: DaemonCore.retentionHoldKey) {
+            hold.formUnion((try? JSONDecoder().decode([String].self, from: saved)) ?? Array(DaemonCore.retentionSettings.subtracting(["*"])))
+            Log.warning("retention waits: the retention settings stored before could not be read; set them again to resume it")
+        }
+        retentionHold = hold
         _homes = config.homeDirectories ?? HomeDirectories.discover()
         normalizerBox = LockedBox(PathNormalizer(homeDirectories: _homes))
         detector = AgentDetector(catalog: data.agents)
@@ -513,6 +530,9 @@ public final class DaemonCore: @unchecked Sendable {
         }
         baseline = Baseline(learningStartedAt: learningStart, learningDuration: settings.learningDays * 86400,
                             entries: (try? store.loadBaseline()) ?? [])
+        // Only on rules that were read (or a fresh store's): without them nothing tells what an older build's
+        // approvals answered.
+        if rulesOK { DaemonCore.narrowLegacyApprovals(baseline, rules: ruleList, store: store) }
 
         coalescer = AlertCoalescer(window: settings.coalesceMinutes * 60, nextID: ((try? store.maxAlertID()) ?? 0) + 1)
         if let open = try? store.alerts(AlertQuery(since: now.addingTimeInterval(-settings.coalesceMinutes * 60), limit: 1000)) {
@@ -917,35 +937,40 @@ public final class DaemonCore: @unchecked Sendable {
     /// Gives the alerts the user acted on (`acted`, as read from the store) a new status, each only if it
     /// did not escalate since (daemon-3): one that did (the same app now writing a key, say) stays unread,
     /// to be seen. The eslogger reader keeps ingesting meanwhile, so the change is made on the coalescer's
-    /// open copy and queued while no event can be merged in between; an alert whose window closed changes
-    /// on its stored copy, read again then. Never a copy read earlier written over a newer one. Returns
-    /// the alerts changed.
+    /// open copy and queued while no event can be merged in between; that is all the ingestion lock is
+    /// held for (every file event waits on it). An alert whose window closed takes no event any more: its
+    /// last snapshot, if still queued, is written first, then its stored copy is read again and changed.
+    /// Never a copy read earlier written over a newer one. Returns the alerts changed.
     @discardableResult
     private func setAlertStatus(_ acted: [Alert], to status: AlertStatus, resolution: AlertAction?) throws -> [Alert] {
         guard !acted.isEmpty else { return [] }
-        return try pipeline.whileIngestionHeld {
-            var changed: [Alert] = []
+        let (open, closed) = pipeline.whileIngestionHeld { () -> ([Alert], [Alert]) in
+            var open: [Alert] = []
+            var closed: [Alert] = []
             for (seen, change) in zip(acted, coalescer.setStatus(of: acted, to: status, resolution: resolution)) {
                 switch change {
-                case .changed(let a):
-                    changed.append(a)
-                case .escalated:
-                    continue
-                case .notOpen:
-                    // Nothing merges into it any more.
-                    guard var a = try store.alert(id: seen.id), a.firstEventID == seen.firstEventID else { continue }
-                    a.status = status
-                    a.resolution = resolution
-                    changed.append(a)
+                case .changed(let a): open.append(a)
+                case .escalated: continue
+                case .notOpen: closed.append(seen)
                 }
             }
-            guard !changed.isEmpty else { return [] }
-            // Queued too: it replaces an older snapshot the writer may hold (re-queued after a failed flush),
-            // and is retried if the write below fails.
-            writer.enqueue(alerts: changed)
-            try store.upsert(changed)
-            return changed
+            // It replaces an older snapshot the writer may hold, and is retried if the write fails.
+            if !open.isEmpty { writer.enqueue(alerts: open) }
+            return (open, closed)
         }
+        try writer.flushOrThrow()
+        guard !closed.isEmpty else { return open }
+        var current: [Int64: Alert] = [:]
+        for a in try store.alerts(ids: closed.map(\.id)) { current[a.id] = a }
+        var changed: [Alert] = []
+        for seen in closed {
+            guard var a = current[seen.id], a.firstEventID == seen.firstEventID else { continue }
+            a.status = status
+            a.resolution = resolution
+            changed.append(a)
+        }
+        if !changed.isEmpty { try store.upsert(changed) }
+        return open + changed
     }
 
     /// Releases the held accesses "trust Apple programs" now allows (the setting was just turned on).
@@ -1351,7 +1376,13 @@ public final class DaemonCore: @unchecked Sendable {
                 return isOwn(resolved)
             }
             guard own else {
-                throw IPCError(.notPermitted, "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app")
+                var message = "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app"
+                if p.hasPrefix("~/") && expanded.count > 1 {
+                    // `~/` is every monitored home here: the same path in the peer's own home is allowed.
+                    let mine = (home.hasSuffix("/") ? String(home.dropLast()) : home) + p.dropFirst()
+                    message += ". On this Mac ~/ stands for every user's home; for your own files write it as \(mine)"
+                }
+                throw IPCError(.notPermitted, message)
             }
         }
         var catalog = data.catalog
@@ -1467,27 +1498,48 @@ public final class DaemonCore: @unchecked Sendable {
         let unreadable = unreadableSettings
         let stored = storedSettings
         let base = settingsBase
+        var hold = retentionHold
         lock.unlock()
         var blob = try JSONEncoder().encode(s)
         var keep: Set<String> = []
-        if !unreadable.isEmpty, let stored, let old = try? JSONSerialization.jsonObject(with: stored) as? [String: Any],
+        let retention = DaemonCore.retentionSettings.subtracting(["*"])
+        if !unreadable.isEmpty || !hold.isEmpty,
            var fresh = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],
            let was = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(base)) as? [String: Any] {
-            for path in unreadable where path != "*" {
-                let keys = path.split(separator: ".").map(String.init)
-                // Changed by the user: their value is saved.
-                guard DaemonCore.sameJSON(DaemonCore.jsonValue(keys, in: fresh), DaemonCore.jsonValue(keys, in: was)),
-                      let value = DaemonCore.jsonValue(keys, in: old) else { continue }
-                DaemonCore.setJSONValue(value, keys, in: &fresh)
-                keep.insert(path)
+            func unchanged(_ keys: [String]) -> Bool {
+                DaemonCore.sameJSON(DaemonCore.jsonValue(keys, in: fresh), DaemonCore.jsonValue(keys, in: was))
             }
+            if let stored, let old = try? JSONSerialization.jsonObject(with: stored) as? [String: Any] {
+                for path in unreadable where path != "*" {
+                    let keys = path.split(separator: ".").map(String.init)
+                    // Changed by the user: their value is saved.
+                    guard unchanged(keys), let value = DaemonCore.jsonValue(keys, in: old) else { continue }
+                    DaemonCore.setJSONValue(value, keys, in: &fresh)
+                    keep.insert(path)
+                }
+            }
+            // Nothing of a whole unreadable blob can be kept, but retention keeps waiting: this save may be a
+            // pause, a kill switch or a console user's, not the user setting the retention again. Setting one
+            // of its settings resumes it.
+            if unreadable.contains("*") { hold.formUnion(retention) }
+            if retention.contains(where: { !unchanged([$0]) }) { hold = [] }
             if !keep.isEmpty { blob = try JSONSerialization.data(withJSONObject: fresh, options: [.sortedKeys]) }
         }
+        // Settings that could not be read at the start were not backed up then: before they are replaced.
+        if unreadable.contains("*") && stored == nil, let current = try? store.value(forKey: "settings"),
+           (try? store.value(forKey: DaemonCore.settingsBackupKey)) == nil {
+            try store.setValue(current, forKey: DaemonCore.settingsBackupKey)
+        }
+        if !hold.isEmpty {
+            try store.setValue(try JSONEncoder().encode(hold.sorted()), forKey: DaemonCore.retentionHoldKey)
+        }
         try store.setValue(blob, forKey: "settings")
+        if hold.isEmpty { try store.setValue(nil, forKey: DaemonCore.retentionHoldKey) }
         lock.lock()
         unreadableSettings = keep
         storedSettings = keep.isEmpty ? nil : blob
         settingsBase = s
+        retentionHold = hold
         lock.unlock()
     }
 
@@ -1873,6 +1925,38 @@ public final class DaemonCore: @unchecked Sendable {
 
     // MARK: - Maintenance & status
 
+    /// daemon-1, once (`approvalsNarrowedKey`): approvals an older build made for both access kinds where
+    /// the "always allow" rule saved with them allowed one (`Baseline.narrowLegacyApprovals`). Saved before
+    /// it is marked done; a store that cannot be read or written leaves it for the next start.
+    static func narrowLegacyApprovals(_ baseline: Baseline, rules: [Rule], store: EventStore) {
+        do {
+            guard try store.value(forKey: approvalsNarrowedKey) == nil else { return }
+        } catch {
+            Log.error("could not read whether older approvals were narrowed: \(error)")
+            return
+        }
+        var answered: [String: (kinds: Set<AccessKind>, since: Date)] = [:]
+        for r in rules where r.template == askAnswerTemplate && r.action == .allow && r.expiresAt == nil {
+            guard case .category(let categoryID) = r.target, case .responsible(let key, _, _, _) = r.subject else { continue }
+            let kinds: Set<AccessKind> = r.access == .read ? [.read] : (r.access == .write ? [.write] : Set(AccessKind.allCases))
+            let k = key + "\u{0}" + categoryID
+            let earlier = answered[k]
+            answered[k] = (kinds.union(earlier?.kinds ?? []), min(r.createdAt, earlier?.since ?? r.createdAt))
+        }
+        let revoked = baseline.narrowLegacyApprovals { answered[$0 + "\u{0}" + $1] }
+        let dirty = baseline.takeDirty()
+        do {
+            if !dirty.isEmpty { try store.saveBaseline(dirty) }
+            try store.setValue(Data("1".utf8), forKey: approvalsNarrowedKey)
+            if revoked > 0 {
+                Log.info("baseline: \(revoked) approvals an older version made for an access kind its \"always allow\" did not cover were taken back")
+            }
+        } catch {
+            baseline.markDirty(dirty.map(\.0))
+            Log.error("could not save the narrowed approvals (\(error)); tried again at the next start")
+        }
+    }
+
     public func persistBaseline() {
         let dirty = baseline.takeDirty()
         guard !dirty.isEmpty else { return }
@@ -1976,7 +2060,7 @@ public final class DaemonCore: @unchecked Sendable {
         if forgotten > 0 { Log.info("baseline: forgot \(forgotten) least recently seen unapproved entries (over the limit of \(baseline.maxUnapproved))") }
         persistBaseline()
         lock.lock()
-        let periodUnknown = !DaemonCore.retentionSettings.isDisjoint(with: unreadableSettings)
+        let periodUnknown = !DaemonCore.retentionSettings.isDisjoint(with: unreadableSettings) || !retentionHold.isEmpty
         lock.unlock()
         if now.timeIntervalSince(lastRetention) > 3600 && periodUnknown {
             // Never on a default period in place of one this build could not read: what it deletes is gone
