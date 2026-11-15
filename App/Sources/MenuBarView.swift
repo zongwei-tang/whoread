@@ -113,11 +113,12 @@ struct MenuBarView: View {
         }
     }
 
-    /// Questions waiting for an answer, those about to be denied first, with the answers as buttons.
+    /// Questions waiting for an answer, with the answers as buttons. Each keeps its place while it is
+    /// open (`AppModel.listedAsks`): a click never lands on another question's buttons.
     private var openAsks: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(L10n.t(.asksTitle)).font(.subheadline.weight(.semibold))
-            ForEach(Array(model.asksByUrgency.prefix(3))) { ask in
+            ForEach(Array(model.listedAsks.prefix(3))) { ask in
                 AskRow(ask: ask)
             }
             if model.asks.count > 3 {

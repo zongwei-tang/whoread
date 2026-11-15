@@ -362,7 +362,7 @@ public final class AppModel {
         case .catalog(let v): catalog = v
         case .status(let v): setStatus(v)
         case .asks(let v):
-            asks = v
+            setAsks(v)
             asksError = nil
         default: break
         }
@@ -373,10 +373,10 @@ public final class AppModel {
     public func apply(asks poll: AskPoll) {
         switch poll {
         case .asks(let v):
-            asks = v
+            setAsks(v)
             asksError = nil
         case .failed(let e):
-            asks = []
+            setAsks([])
             asksError = e
         }
     }
@@ -426,9 +426,10 @@ public final class AppModel {
         MenuBarState.make(status: liveStatus, connected: connected, openAsks: asks.count, language: language)
     }
 
-    /// Open questions as listed (menu bar, Alerts tab): those holding an access first, the one
-    /// denied soonest on top, then the others oldest first. The menu bar shows only the first few,
-    /// and old questions that hold nothing must not hide one that is about to be denied.
+    /// Open questions by urgency: those holding an access first, the one denied soonest on top, then
+    /// the others oldest first. The order questions are added to the list in (`listedAsks`): the menu
+    /// bar shows only the first few, and old questions that hold nothing must not hide one that is
+    /// about to be denied.
     public var asksByUrgency: [AskRequest] {
         asks.enumerated().sorted { a, b in
             switch (a.element.answerBy, b.element.answerBy) {
@@ -438,6 +439,27 @@ public final class AppModel {
             default: return a.offset < b.offset
             }
         }.map(\.element)
+    }
+
+    /// Open questions as listed (menu bar, Alerts tab). A question keeps its place while it is open: a
+    /// hold timing out or a new one (every few seconds while questions are open) never moves another
+    /// question's answer buttons under the pointer. Questions newly open are added after those already
+    /// listed, in `asksByUrgency` order; so are all of them when none was listed. The menu bar shows
+    /// the first three; each row shows when its access is denied, and every question has its banner.
+    public var listedAsks: [AskRequest] {
+        let byID = Dictionary(asks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return askOrder.compactMap { byID[$0] }
+    }
+
+    /// The ids of `listedAsks`, in order.
+    private var askOrder: [Int64] = []
+
+    private func setAsks(_ new: [AskRequest]) {
+        asks = new
+        let open = Set(new.map(\.id))
+        let kept = askOrder.filter { open.contains($0) }
+        let placed = Set(kept)
+        askOrder = kept + asksByUrgency.map(\.id).filter { !placed.contains($0) }
     }
 
     /// How long until the next read of the questions: answered ones disappear (and their
@@ -755,8 +777,12 @@ public final class AppModel {
     /// The same for a question.
     public func answerTitle(_ action: AlertAction, for ask: AskRequest) -> String { answerTitle(action, for: ask.asAlert) }
 
+    /// The Alerts tab's list, newest first by when each alert was raised. Not in the daemon's order
+    /// (most recently updated first): a repeat merged into an alert would move it to the top, and every
+    /// row above it down, under the pointer, as often as once a second.
     public var visibleAlerts: [Alert] {
-        alertsUnreadOnly ? alerts.filter { $0.status == .unread } : alerts
+        (alertsUnreadOnly ? alerts.filter { $0.status == .unread } : alerts)
+            .sorted { ($0.createdAt, $0.id) > ($1.createdAt, $1.id) }
     }
 
     /// Unread alerts: counted in the list while it is current, otherwise (refused, not answered) as the

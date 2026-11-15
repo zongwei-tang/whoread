@@ -163,10 +163,11 @@ struct AlertsView: View {
                 }
             } else {
                 List {
-                    // Ask mode: questions waiting for an answer come first.
+                    // Ask mode: questions waiting for an answer come first. Rows keep their place while
+                    // open (questions) and when repeats merge (alerts): a click lands on the row aimed at.
                     if !model.asks.isEmpty {
                         Section(L10n.t(.asksTitle)) {
-                            ForEach(model.asksByUrgency) { ask in AskRow(ask: ask) }
+                            ForEach(model.listedAsks) { ask in AskRow(ask: ask) }
                         }
                     }
                     Section {

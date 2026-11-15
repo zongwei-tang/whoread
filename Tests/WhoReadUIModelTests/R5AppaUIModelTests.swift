@@ -214,6 +214,67 @@ final class R5AppaListTests: XCTestCase {
         XCTAssertEqual(AppModel.maxListedAsks, DaemonCore.maxListedAsks, "the daemon's cap")
     }
 
+    // MARK: - app-2: rows do not move under the pointer
+
+    func testApp2AQuestionKeepsItsPlaceWhenItsHoldTimesOut() {
+        let now = Date()
+        let m = Self.model(Self.status())
+        // B was asked first and holds nothing; A holds an access, denied in 20 s: A is listed first.
+        let b = Self.ask(1, firstAt: Self.base)
+        var a = Self.ask(2, firstAt: Self.base.addingTimeInterval(5), answerBy: now.addingTimeInterval(20))
+        m.apply(asks: .asks([b, a]))
+        XCTAssertEqual(m.listedAsks.map(\.id), [2, 1])
+        // The user aims at A's "Always allow" as A's hold times out: A stays where it is.
+        a.answerBy = nil
+        a.holding = 0
+        m.apply(asks: .asks([b, a]))
+        XCTAssertEqual(m.listedAsks.map(\.id), [2, 1], "the row under the pointer is still A")
+        // B gets a new hold: it does not jump above A either.
+        var bHeld = b
+        bHeld.answerBy = now.addingTimeInterval(10)
+        bHeld.holding = 1
+        m.apply(asks: .asks([bHeld, a]))
+        XCTAssertEqual(m.listedAsks.map(\.id), [2, 1])
+        // A new question goes after them (its banner and the badge show it), whatever its deadline.
+        let c = Self.ask(3, firstAt: Self.base.addingTimeInterval(9), answerBy: now.addingTimeInterval(3))
+        m.apply(asks: .asks([bHeld, a, c]))
+        XCTAssertEqual(m.listedAsks.map(\.id), [2, 1, 3])
+        // The menu bar's first rows stay the same questions.
+        XCTAssertEqual(Array(m.listedAsks.prefix(2)).map(\.id), [2, 1])
+        // Answered (the reply to the answer): the others keep their order.
+        m.apply(response: .asks([bHeld, c]))
+        XCTAssertEqual(m.listedAsks.map(\.id), [1, 3])
+        // None open: the next ones are listed by urgency again (holding an access first).
+        m.apply(asks: .asks([]))
+        let d = Self.ask(4, firstAt: Self.base.addingTimeInterval(20))
+        let e = Self.ask(5, firstAt: Self.base.addingTimeInterval(30), answerBy: now.addingTimeInterval(15))
+        m.apply(asks: .asks([d, e]))
+        XCTAssertEqual(m.listedAsks.map(\.id), [5, 4])
+        XCTAssertEqual(m.listedAsks.map(\.id), m.asksByUrgency.map(\.id))
+        // A read that fails lists none.
+        m.apply(asks: .failed(IPCError(.unavailable, "gone")))
+        XCTAssertEqual(m.listedAsks, [])
+    }
+
+    func testApp2AlertsKeepTheirPlaceWhenRepeatsMerge() {
+        let m = Self.model(Self.status())
+        let t = Self.base
+        // The daemon lists the most recently updated first.
+        var s = Snapshot()
+        s.status = Self.status()
+        s.alerts = [Self.alert(3, at: t + 30), Self.alert(2, at: t + 20), Self.alert(1, at: t + 10)]
+        m.apply(s)
+        XCTAssertEqual(m.visibleAlerts.map(\.id), [3, 2, 1], "newest first")
+        // Alert 1 merges a repeat: the daemon now lists it first; it stays where it is.
+        s.alerts = [Self.alert(1, at: t + 10, updated: t + 40, count: 2), Self.alert(3, at: t + 30), Self.alert(2, at: t + 20)]
+        m.apply(s)
+        XCTAssertEqual(m.alerts.map(\.id), [1, 3, 2], "the daemon's order, most recently updated first")
+        XCTAssertEqual(m.visibleAlerts.map(\.id), [3, 2, 1])
+        XCTAssertEqual(m.visibleAlerts.last?.count, 2, "the merged copy")
+        m.alertsUnreadOnly = true
+        XCTAssertEqual(m.visibleAlerts.map(\.id), [3, 2, 1])
+    }
+
     // MARK: - app-8: the alerts notified are not remembered for good
 
     static func alert(_ id: Int64, at t: Date, updated: Date? = nil, window: TimeInterval = 600, kind: AlertKind = .criticalNonOwner,
