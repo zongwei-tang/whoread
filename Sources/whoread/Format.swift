@@ -9,23 +9,33 @@ enum Format {
         return f.string(from: d)
     }
 
-    static func ago(_ d: Date?, now: Date = Date()) -> String {
-        guard let d else { return "never" }
+    static func ago(_ d: Date?, now: Date = Date(), language: Language = .en) -> String {
+        let zh = language == .zhHans
+        guard let d else { return zh ? "从未" : "never" }
         let s = Int(now.timeIntervalSince(d))
-        if s < 60 { return "\(s)s ago" }
-        if s < 3600 { return "\(s / 60)m ago" }
-        if s < 86400 { return "\(s / 3600)h ago" }
-        return "\(s / 86400)d ago"
+        if s < 60 { return zh ? "\(s) 秒前" : "\(s)s ago" }
+        if s < 3600 { return zh ? "\(s / 60) 分钟前" : "\(s / 60)m ago" }
+        if s < 86400 { return zh ? "\(s / 3600) 小时前" : "\(s / 3600)h ago" }
+        return zh ? "\(s / 86400) 天前" : "\(s / 86400)d ago"
     }
 
-    /// "15m", "2h", "3d", "1w"; "YYYY-MM-DD[ HH:MM[:SS]]" in local time (the zone `time` prints in,
-    /// so a timestamp copied from the output round-trips); or RFC 3339 with `Z` / `±hh:mm`.
+    /// "15m", "2h", "3d", "1w" back from now; "YYYY-MM-DD[ HH:MM[:SS]]" in local time (the zone
+    /// `time` prints in, so a timestamp copied from the output round-trips); or RFC 3339 with `Z` /
+    /// `±hh:mm`. Anything else is a usage error: a negative span (a window in the future) and a day
+    /// that does not exist (2026-02-31, which the parser would carry into March) included.
     static func parseSince(_ s: String, now: Date = Date(), timeZone: TimeZone = .current) throws -> Date {
         let units: [Character: Double] = ["s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400]
         if let last = s.last, let unit = units[last], let n = Double(s.dropLast()) {
             // Bounded so "infd" or "1e300w" is a usage error, not a trap when the date is encoded.
-            guard n.isFinite, abs(n * unit) < 1e10 else { throw CLIError("time span out of range: \(s)") }
+            guard n.isFinite, abs(n * unit) < 1e10 else { throw CLIError.usage("time span out of range: \(s)") }
+            guard n >= 0 else { throw CLIError.usage("time span \(s) is negative: \(s.dropFirst()) means that long ago") }
             return now.addingTimeInterval(-n * unit)
+        }
+        // RFC3339.parse checks only that a day is 1...31 (eslogger never writes one that does not
+        // exist): the date must come back the same.
+        if s.count >= 10, let midnight = RFC3339.parse(String(s.prefix(10)) + "T00:00:00Z"),
+           !RFC3339.format(midnight, fractionDigits: 0).hasPrefix(s.prefix(10)) {
+            throw CLIError.usage("no such day: \(s.prefix(10))")
         }
         let zoned = s.count > 19 && s.dropFirst(19).contains { "Zz+-".contains($0) }
         if zoned {
@@ -39,7 +49,7 @@ enum Format {
                 return utc.addingTimeInterval(-Double(timeZone.secondsFromGMT(for: guess)))
             }
         }
-        throw CLIError("cannot parse time \"\(s)\" (use 15m, 2h, 3d, 1w, 2026-10-04, \"2026-10-04 09:30\" or RFC 3339)")
+        throw CLIError.usage("cannot parse time \"\(s)\" (use 15m, 2h, 3d, 1w, 2026-10-04, \"2026-10-04 09:30\" or RFC 3339)")
     }
 
     static func pad(_ s: String, _ n: Int) -> String {

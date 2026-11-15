@@ -188,6 +188,11 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             clauses.append("instr(search, ?) > 0")
             args.append(.text(text.lowercased()))
         }
+        if let app = query.appName, !app.isEmpty {
+            // `search` is "display name \u{1} process name \u{1} path": only what comes before the second \u{1}.
+            clauses.append("instr(substr(search, 1, instr(search, char(1)) + instr(substr(search, instr(search, char(1)) + 1), char(1)) - 1), ?) > 0")
+            args.append(.text(app.lowercased()))
+        }
         let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
         let order = query.newestFirst ? "DESC" : "ASC"
         let sql = "SELECT body FROM events \(whereSQL) ORDER BY id \(order) LIMIT ?"

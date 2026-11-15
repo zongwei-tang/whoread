@@ -13,8 +13,10 @@ import Foundation
 /// invisible formatting characters (`.format`), U+2028/U+2029, private-use characters (U+F8FF
 /// renders as the Apple logo on macOS), and the other default-ignorable characters, which render as
 /// nothing or as blank space (Hangul fillers such as U+3164, the combining grapheme joiner, variation
-/// selectors; the emoji presentation selectors U+FE0E/U+FE0F only pick a glyph and stay). Everything
-/// else, Chinese included, is kept.
+/// selectors; the emoji presentation selectors U+FE0E/U+FE0F only pick a glyph and stay), and the
+/// few symbols that render as blank space without being any of those (`blankSymbols`: U+2800
+/// BRAILLE PATTERN BLANK, U+1D159 MUSICAL SYMBOL NULL NOTEHEAD, U+FFFC OBJECT REPLACEMENT
+/// CHARACTER). Everything else, Chinese and Braille with dots included, is kept.
 public enum DisplayText {
     /// Longest app, process, agent or category name shown. A long lookalike name cannot fill a
     /// banner by itself.
@@ -29,7 +31,15 @@ public enum DisplayText {
     public static func isHidden(_ u: Unicode.Scalar) -> Bool {
         switch u.properties.generalCategory {
         case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .surrogate: return true
-        default: return u.properties.isDefaultIgnorableCodePoint && u.value != 0xFE0E && u.value != 0xFE0F
+        default:
+            switch u.value {
+            // `blankSymbols`: symbols (So) that display as blank space. They are not space separators
+            // (which `name` collapses), format or default-ignorable characters, so nothing above
+            // catches them, and a name padded with them could push the real path out of a banner
+            // or fake a table's columns.
+            case 0x2800, 0x1D159, 0xFFFC: return true
+            default: return u.properties.isDefaultIgnorableCodePoint && u.value != 0xFE0E && u.value != 0xFE0F
+            }
         }
     }
 
