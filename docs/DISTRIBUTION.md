@@ -34,8 +34,13 @@ What to write in the request:
 - What WhoRead does: local monitoring of access to sensitive files, optional user-defined
   blocking.
 - Which events it uses: NOTIFY and AUTH for open, rename, clone, copyfile, link, unlink, truncate,
-  exchangedata, and NOTIFY fork/exec/exit.
-- That it uses inverted target-path muting, so only monitored prefixes are delivered.
+  exchangedata, create, setmode, setowner, setacl, setattrlist and mount; NOTIFY readdir (only
+  when the user enables it); NOTIFY fork/exec/exit on a second client. AUTH events are subscribed
+  only while the user has blocking on.
+- That it uses inverted target-path muting, so only monitored prefixes are delivered (mount
+  supports no target muting; mounts are rare).
+- That on macOS 27 and later it sets the fail-closed deadline miss mode: an access it cannot answer
+  in time is denied.
 - That nothing leaves the machine.
 
 While the request is in review you can develop in a SIP-disabled VM (DEVELOPMENT.md).
@@ -52,9 +57,16 @@ Info.plist keys, already in `Xcode/project.yml`:
 - extension: `NSEndpointSecurityMachServiceName` (= `$(DEVELOPMENT_TEAM).<extension id>.xpc`;
   documented only in the `EndpointSecurity(7)` man page), `NSSystemExtensionUsageDescription`
   (localized in `Extension/*.lproj/InfoPlist.strings`), `CFBundlePackageType` =
-  `$(PRODUCT_BUNDLE_PACKAGE_TYPE)` (XcodeGen does not set it for system extensions);
+  `$(PRODUCT_BUNDLE_PACKAGE_TYPE)` (XcodeGen does not set it for system extensions),
+  `NSEndpointSecurityEarlyBoot` = false (`NSEndpointSecurityRebootRequired` is not set);
 - `WhoReadClientRequirement` / `WhoReadAppRequirement`: the code-signing requirements the
-  extension enforces on XPC clients (team-pinned).
+  extension enforces on XPC clients. The client requirement admits the CLI
+  (`<prefix>.whoread.cli`) and the app (`<prefix>.whoread`), the app requirement the app alone; both
+  are pinned to the team and to `WHOREAD_SIGNING_ANCHOR`, which differs per configuration. Release
+  (and any configuration but Debug) requires a Developer ID Application certificate and refuses
+  code with the `get-task-allow`, `disable-library-validation` or
+  `allow-dyld-environment-variables` entitlement; Debug accepts any certificate of the team, Apple
+  Development included, and is for development only.
 
 The `whoread` CLI is embedded as `WhoRead.app/Contents/Helpers/whoread` and signed with the same
 team, so it satisfies `WhoReadClientRequirement`; a self-built CLI does not. It has no restricted
@@ -68,16 +80,23 @@ scripts/release/release.sh whoread-notary
 ```
 
 `release.sh`:
-1. archives the app;
+1. archives the app (Release configuration);
 2. exports it with Developer ID;
-3. checks signatures, that the embedded extension carries the ES entitlement, and that the
-   embedded CLI and the app satisfy the extension's client and app requirements;
+3. checks the app's signature, that the embedded extension carries the ES entitlement, and that
+   the embedded CLI and the app satisfy the extension's client and app requirements (so the
+   Developer ID pin and the absence of those three entitlements are checked too);
 4. zips it with `ditto`, then `notarytool submit --wait`, `stapler staple` the app;
 5. builds a DMG, signs, notarizes and staples it.
 
 Output: `build/release/WhoRead.dmg`.
 
 Hardened Runtime is on for all targets (`ENABLE_HARDENED_RUNTIME`), as notarization requires.
+
+Build with umask 022. The extension runs as root, so it reads its bundled `Contents/Resources/Data`
+(catalog, agents, benign services) only when no one but root can change those files and the
+directories above them, and refuses to start otherwise. A checkout or copy made under umask 002
+keeps group-writable files. Whether macOS keeps the bundle's modes when it installs the extension
+is UNVERIFIED: check the installed copy in the VM before a release.
 
 ## 5. What the user does
 
@@ -100,10 +119,17 @@ Hardened Runtime is on for all targets (`ENABLE_HARDENED_RUNTIME`), as notarizat
    ```bash
    sudo whoread catalog resolve-owners
    ```
-6. WhoRead learns for 7 days, then alerts only on unusual access. Blocking stays off until the
-   user turns on enforcement and marks rules as Enforce.
+6. There is no learning period: from the start WhoRead alerts on each first access of an app to a
+   category, and on unusual ones. Blocking stays off until the user turns enforcement on; from then
+   on every access to a sensitive file that no rule, owner, system service or Apple trust decides is
+   held and asked (docs/ASK_MODE.md), and an unanswered question means denied.
 
-The extension logs to `/Library/Logs/WhoRead/extension.log` (root only).
+The extension logs to `/Library/Logs/WhoRead/extension.log` (root only); a link, another user's file
+or one others could change at that path is moved aside, never written through. If no safe log file
+can be had, the reason goes to the unified log (subsystem `com.whoread.extension`). The extension
+refuses to start, and logs why, when its data directory
+(`/Library/Application Support/WhoRead`), a directory above it or anything in it could be changed by
+someone other than root; it never adopts or moves such a directory itself.
 
 ## 6. Uninstall
 
