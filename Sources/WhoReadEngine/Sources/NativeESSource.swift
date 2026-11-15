@@ -830,18 +830,26 @@ final class NativeHandlerWatchdog: @unchecked Sendable {
     }
 }
 
-/// The file client's AUTH subscription (setAuth): wanted exactly while enforcement is active. Client
-/// thread only. Outside the EndpointSecurity guard so it is unit-tested on any host.
+/// The file client's AUTH subscription (setAuth): wanted exactly while enforcement is active. When
+/// es_subscribe fails (the header names no cause: event types the system does not know are ignored and
+/// still succeed, so an internal error, or a client that is going away), nothing is asked about or
+/// blocked although enforcement shows as active. That is the source's error until it is over
+/// (NativeSetupProblems), so that status shows an error instead of Enforcing, and the subscription is
+/// retried, first after `initialRetryDelay`, then twice as long after each failure up to
+/// `maxRetryDelay`, until it takes or enforcement goes off. NOTIFY events go on meanwhile: no reconnect.
+/// Client thread only. Outside the EndpointSecurity guard so it is unit-tested on any host.
 struct NativeAuthSubscription {
     static let initialRetryDelay: TimeInterval = 5
     static let maxRetryDelay: TimeInterval = 60
 
     /// Wanted, but es_subscribe failed: nothing is enforced.
     private(set) var failed = false
+    /// How long the next retry waits.
+    private var retryDelay = NativeAuthSubscription.initialRetryDelay
 
     /// Brings the subscription from `current` to `on` with `subscribe` (es_subscribe; false when it
     /// failed) or `unsubscribe`. Returns whether AUTH events are subscribed now, and when to try again
-    /// (nil: no retry is due).
+    /// (nil: no retry is due, the subscription took or is not wanted).
     mutating func set(_ on: Bool, current: Bool, subscribe: () -> Bool, unsubscribe: () -> Void)
         -> (subscribed: Bool, retryIn: TimeInterval?) {
         var now = on
@@ -850,13 +858,24 @@ struct NativeAuthSubscription {
         } else if !on && current {
             unsubscribe()
         }
-        return (now, nil)
+        failed = on && !now
+        guard failed else {
+            retryDelay = NativeAuthSubscription.initialRetryDelay
+            return (now, nil)
+        }
+        let wait = retryDelay
+        retryDelay = min(retryDelay * 2, NativeAuthSubscription.maxRetryDelay)
+        return (now, wait)
     }
 }
 
-/// What a source with connected clients shows about the parts of their setup that can fail without a
-/// reconnect: the target-path mute set (selecting nothing, it monitors nothing; the next catalog or
-/// settings change retries). Outside the EndpointSecurity guard so it is unit-tested on any host.
+/// What a source with connected clients shows about the two parts of their setup that can fail without
+/// a reconnect, and are retried while it runs: the target-path mute set (selecting nothing, it monitors
+/// nothing; the next catalog or settings change retries) and the AUTH subscription
+/// (NativeAuthSubscription: nothing is enforced). Either one is the source's error, with running false,
+/// so that status shows an error instead of Monitoring or Enforcing; with both, the mute set's, which
+/// leaves nothing to enforce either. Each clears only itself. Outside the EndpointSecurity guard so it
+/// is unit-tested on any host.
 enum NativeSetupProblems {
     static let mutingError = "es_mute_path failed for every monitored prefix"
     static let mutingHint = "File events are not monitored; the next catalog or settings change retries."
@@ -865,9 +884,11 @@ enum NativeSetupProblems {
 
     /// `state` as a connected source shows it; its other fields (the deadline miss mode) are left alone.
     static func apply(to state: inout SourceState, mutingFailed: Bool, authFailed: Bool) {
-        state.running = !mutingFailed
-        state.error = mutingFailed ? mutingError : nil
-        state.hint = mutingFailed ? mutingHint : nil
+        let problem: (error: String, hint: String)? =
+            mutingFailed ? (mutingError, mutingHint) : authFailed ? (authError, authHint) : nil
+        state.running = problem == nil
+        state.error = problem?.error
+        state.hint = problem?.hint
     }
 }
 
@@ -961,7 +982,8 @@ import WhoReadIPC
 // Two clients, as the brief requires:
 // - file client: target-path muting INVERTED, so only events touching monitored prefixes (or the
 //   literal ancestor directories) are delivered (MOUNT supports no target muting: every mount is).
-//   NOTIFY events always; AUTH events only while enforcement is active. Deadline miss mode
+//   NOTIFY events always; AUTH events only while enforcement is active (a failed AUTH subscription
+//   is the source's error and is retried: NativeAuthSubscription). Deadline miss mode
 //   fail-closed on macOS 27 and later (NativeDeadlineMissMode). A multi-target event
 //   (rename/clone/copyfile/link/exchangedata) is delivered if ANY of its targets is selected
 //   (header), so covering source paths is enough.
@@ -1048,8 +1070,12 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private var retryDelay = NativeESSource.initialRetryDelay
     private var lastError: String?
     private var stopped = false
-    /// The AUTH subscription's failures (NativeAuthSubscription).
+    /// The AUTH subscription's failures (NativeAuthSubscription), and the retry while it fails.
     private var authSubscription = NativeAuthSubscription()
+    private var authRetryTimer: DispatchSourceTimer?
+    /// Counts the AUTH retries scheduled and cancelled: one whose block was queued before it was
+    /// cancelled or replaced does nothing.
+    private var authRetryGeneration: UInt64 = 0
     /// The connected file client's mute set selects nothing (applyMuting): nothing is monitored.
     private var mutingFailed = false
     private var cacheClear = NativeCacheClearThrottle()
@@ -1266,7 +1292,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         retryDelay = NativeESSource.initialRetryDelay
         lastError = nil
         publish {
-            // The mute set selects something (above).
+            // The mute set selects something (above). A failed AUTH subscription is shown, not running,
+            // and setAuth has scheduled its retry.
             NativeSetupProblems.apply(to: &$0, mutingFailed: false, authFailed: authSubscription.failed)
             $0.deadlineMissMode = deadlineMode.name
         }
@@ -1328,6 +1355,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     /// The clients are gone (deleted, or left to the kernel's teardown). Client thread.
     private func forgetClients() {
+        // A new file client subscribes afresh (connect).
+        retryAuth(after: nil)
         procClient = nil
         fileClient = nil
         fileGate = nil
@@ -1691,24 +1720,55 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     }
 
     public func enforcementChanged(active: Bool) {
-        clientThread.run { self.setAuth(active) }
+        clientThread.run {
+            self.setAuth(active)
+            self.publishSetup()
+        }
     }
 
+    /// Subscribes the AUTH events (`on`) or unsubscribes them. A failed subscription is retried
+    /// (`retryAuth`) and shown by the caller's publish (NativeSetupProblems). Client thread.
     private func setAuth(_ on: Bool) {
         guard let file = fileClient else { return }
         let events = NativeESSource.authFileEvents
         lock.lock()
         let current = authSubscribed
         lock.unlock()
+        let wasFailing = authSubscription.failed
         // Failed: nothing is enforced, so NOTIFY events must not be treated as `.afterAuth`.
-        let (now, _) = authSubscription.set(on, current: current, subscribe: { subscribe(file, events) },
-                                            unsubscribe: { unsubscribe(file, events) })
+        let (now, retryIn) = authSubscription.set(on, current: current, subscribe: { subscribe(file, events) },
+                                                  unsubscribe: { unsubscribe(file, events) })
         lock.lock()
         authSubscribed = now
         lock.unlock()
         // The marker exists exactly while AUTH events are subscribed (NativeAuthArmedMarker).
         if now && !current { authMarker.arm() } else if !now && current { authMarker.disarm() }
+        if wasFailing && now { Log.info("Endpoint Security AUTH events subscribed after a failed attempt: enforcement is in effect") }
+        retryAuth(after: retryIn)
         clearCacheSoon()
+    }
+
+    /// While the AUTH subscription fails (NativeAuthSubscription): one retry `delay` from now, in place
+    /// of the one pending; nil only cancels that. The retry asks for what enforcement wants by then.
+    /// Client thread.
+    private func retryAuth(after delay: TimeInterval?) {
+        authRetryGeneration &+= 1
+        authRetryTimer?.cancel()
+        authRetryTimer = nil
+        guard let delay, !stopped else { return }
+        let generation = authRetryGeneration
+        let t = DispatchSource.makeTimerSource(queue: .global())
+        t.schedule(deadline: .now() + delay)
+        t.setEventHandler { [weak self] in
+            self?.clientThread.run {
+                guard let self, !self.stopped, self.authRetryGeneration == generation else { return }
+                self.authRetryTimer = nil
+                self.setAuth(self.core?.enforcement.isActive == true)
+                self.publishSetup()
+            }
+        }
+        t.resume()
+        authRetryTimer = t
     }
 
     public func policyChanged() {

@@ -12,6 +12,131 @@ private func exists(_ path: String) -> Bool {
     return lstat(path, &st) == 0
 }
 
+// MARK: - native-3: a failed AUTH subscription
+
+final class NativeAuthSubscriptionTests: XCTestCase {
+    func testAFailedSubscriptionIsAFailureRetriedWithBackoff() {
+        // Enforcement is on and es_subscribe fails: nothing is asked about or blocked.
+        var s = NativeAuthSubscription()
+        var attempts = 0
+        let failing = { () -> Bool in
+            attempts += 1
+            return false
+        }
+        let first = s.set(true, current: false, subscribe: failing, unsubscribe: { XCTFail("nothing to unsubscribe") })
+        XCTAssertFalse(first.subscribed)
+        XCTAssertTrue(s.failed, "enforcement is on but nothing is enforced: a failure the source must show")
+        XCTAssertEqual(first.retryIn, NativeAuthSubscription.initialRetryDelay,
+                       "retried, not left until enforcement is switched again or the client reconnects")
+        // Each failed retry waits twice as long, up to the maximum.
+        var waits: [TimeInterval] = []
+        for _ in 0..<6 {
+            waits.append(s.set(true, current: false, subscribe: failing, unsubscribe: { XCTFail("nothing to unsubscribe") }).retryIn ?? -1)
+        }
+        XCTAssertEqual(waits, [10, 20, 40, 60, 60, 60])
+        XCTAssertEqual(NativeAuthSubscription.maxRetryDelay, 60)
+        XCTAssertEqual(attempts, 7)
+        // A retry that takes: subscribed, nothing to show, no retry; a later failure backs off from the start.
+        let ok = s.set(true, current: false, subscribe: { true }, unsubscribe: { XCTFail("nothing to unsubscribe") })
+        XCTAssertTrue(ok.subscribed)
+        XCTAssertNil(ok.retryIn)
+        XCTAssertFalse(s.failed)
+        let again = s.set(true, current: false, subscribe: failing, unsubscribe: { XCTFail("nothing to unsubscribe") })
+        XCTAssertEqual(again.retryIn, NativeAuthSubscription.initialRetryDelay)
+    }
+
+    func testEnforcementOffEndsTheFailureAndItsRetries() {
+        var s = NativeAuthSubscription()
+        _ = s.set(true, current: false, subscribe: { false }, unsubscribe: { XCTFail("nothing to unsubscribe") })
+        XCTAssertTrue(s.failed)
+        // Nothing was subscribed, so nothing is unsubscribed either.
+        let off = s.set(false, current: false, subscribe: {
+            XCTFail("not wanted")
+            return true
+        }, unsubscribe: { XCTFail("nothing subscribed") })
+        XCTAssertFalse(off.subscribed)
+        XCTAssertNil(off.retryIn)
+        XCTAssertFalse(s.failed, "nothing is wanted any more")
+    }
+
+    func testASubscriptionThatTookIsKeptUntilEnforcementGoesOff() {
+        var s = NativeAuthSubscription()
+        var unsubscribed = 0
+        let on = s.set(true, current: false, subscribe: { true }, unsubscribe: { XCTFail("nothing to unsubscribe") })
+        XCTAssertTrue(on.subscribed)
+        XCTAssertNil(on.retryIn)
+        let still = s.set(true, current: true, subscribe: {
+            XCTFail("already subscribed")
+            return false
+        }, unsubscribe: { XCTFail("still wanted") })
+        XCTAssertTrue(still.subscribed)
+        XCTAssertNil(still.retryIn)
+        let off = s.set(false, current: true, subscribe: {
+            XCTFail("not wanted")
+            return true
+        }, unsubscribe: { unsubscribed += 1 })
+        XCTAssertFalse(off.subscribed)
+        XCTAssertNil(off.retryIn)
+        XCTAssertEqual(unsubscribed, 1)
+        XCTAssertFalse(s.failed)
+    }
+}
+
+final class NativeSetupProblemsTests: XCTestCase {
+    func testAFailedAUTHSubscriptionIsTheSourcesError() {
+        var state = SourceState(running: true, deadlineMissMode: "fail-closed")
+        NativeSetupProblems.apply(to: &state, mutingFailed: false, authFailed: true)
+        XCTAssertFalse(state.running, "status must not show it as enforcing")
+        XCTAssertEqual(state.error, NativeSetupProblems.authError)
+        XCTAssertEqual(state.hint, NativeSetupProblems.authHint)
+        XCTAssertEqual(state.deadlineMissMode, "fail-closed", "the file client still exists")
+        // Onboarding takes an error or hint that mentions permissions for missing Full Disk Access.
+        XCTAssertFalse((NativeSetupProblems.authError + " " + NativeSetupProblems.authHint).lowercased().contains("permitted"))
+        NativeSetupProblems.apply(to: &state, mutingFailed: false, authFailed: false)
+        XCTAssertEqual(state, SourceState(running: true, deadlineMissMode: "fail-closed"), "a retry that took clears it")
+    }
+
+    func testEachProblemClearsOnlyItself() {
+        var state = SourceState(running: true)
+        // Both: nothing monitored outweighs nothing enforced (it leaves nothing to enforce either).
+        NativeSetupProblems.apply(to: &state, mutingFailed: true, authFailed: true)
+        XCTAssertEqual(state.error, NativeSetupProblems.mutingError)
+        XCTAssertFalse(state.running)
+        // The mute set recovers while the AUTH subscription still fails: that one still shows.
+        NativeSetupProblems.apply(to: &state, mutingFailed: false, authFailed: true)
+        XCTAssertEqual(state.error, NativeSetupProblems.authError, "a muting recovery must not hide that nothing is enforced")
+        XCTAssertFalse(state.running)
+        // And the other way round.
+        NativeSetupProblems.apply(to: &state, mutingFailed: true, authFailed: false)
+        XCTAssertEqual(state.error, NativeSetupProblems.mutingError)
+        XCTAssertEqual(state.hint, NativeSetupProblems.mutingHint)
+        NativeSetupProblems.apply(to: &state, mutingFailed: false, authFailed: false)
+        XCTAssertEqual(state, SourceState(running: true))
+    }
+
+    func testStatusShowsAnErrorInsteadOfEnforcing() throws {
+        let dir = TempDir()
+        var config = baseConfig(dir)
+        config.resolveOwners = false
+        let core = try DaemonCore(config: config, makeSource: { _ in FakeSource(canEnforce: true) })
+        try core.mutateSettings(peer: .inProcess, reenable: true) { $0.enforcementEnabled = true }
+        core.drainPolicyQueue()
+        // What the native source publishes once its clients are connected and the AUTH subscription failed.
+        var state = SourceState(deadlineMissMode: "fail-closed")
+        NativeSetupProblems.apply(to: &state, mutingFailed: false, authFailed: true)
+        core.pipeline.sourceStateChanged(state)
+        let failed = core.status()
+        XCTAssertEqual(failed.mode, .error, "nothing is asked about or blocked: not Enforcing")
+        XCTAssertEqual(failed.sourceError, NativeSetupProblems.authError)
+        XCTAssertEqual(failed.sourceHint, NativeSetupProblems.authHint)
+        XCTAssertTrue(failed.enforcementActive, "the setting stays as the user set it")
+        // A retry that takes.
+        NativeSetupProblems.apply(to: &state, mutingFailed: false, authFailed: false)
+        core.pipeline.sourceStateChanged(state)
+        XCTAssertEqual(core.status().mode, .enforcing)
+        XCTAssertNil(core.status().sourceError)
+    }
+}
 
 // MARK: - native-4: the ES result cache after a wall-clock change
 
