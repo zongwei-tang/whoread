@@ -1,4 +1,4 @@
-commit: a24bc40a15f0b046a7ec11353363436e5f0315b4
-run: https://github.com/zongwei-tang/whoread/actions/runs/43681312718
-macos-15: OVERALL: FAIL
-macos-latest: OVERALL: FAIL
+commit: 983eb13cd6a543a6e2f92bbd716fee5cb5f01d74
+run: https://github.com/zongwei-tang/whoread/actions/runs/43689759340
+macos-15: OVERALL: PASS
+macos-latest: OVERALL: PASS
