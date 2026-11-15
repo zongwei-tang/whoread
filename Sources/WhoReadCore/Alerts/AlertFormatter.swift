@@ -65,7 +65,7 @@ public struct AlertFormatter: Sendable {
         }
         if alert.ancestryKnown == false {
             // The chain does not reach launchd: whoever started the program was not seen, so "no AI agent
-            // in the chain" cannot be told (an answer here covers only such chains).
+            // in the chain" cannot be told (an answer here covers such chains too: Rule.coversUnknownAncestry).
             text += language == .zhHans ? "（不知道是谁启动的，可能是 AI agent）" : " (started by an unknown process, possibly an AI agent)"
         }
         if alert.count > 1 {
