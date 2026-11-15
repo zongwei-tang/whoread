@@ -15,24 +15,29 @@ or alert rule, catalog changes, allowing a question).
   status                         state, source, deadline mode, enforcement, questions, counters
   events [filters]               [sudo] recorded accesses (newest first)
       --since 1h|2d|2026-10-04|"2026-10-04 09:30"   --until …   (no offset = local time)
-      --category ID (repeatable)   --app TEXT   --agent ID   --agents-only   --denied
-      --all (include folded system noise)   --limit N
+      --category ID (repeatable)   --agent ID   --agents-only   --denied
+      --app TEXT (app or program name)   --search TEXT (app or program name, or file path)
+      --all (include folded system noise)   --limit N (default 500)
+                                 a note on stderr says when more events match than are shown
   tail [--all]                   [sudo] follow new events live
   asks [--json]                  questions waiting for your answer (ask mode, see below); file paths
-                                 and command lines are shown only with sudo
+                                 and command lines are shown only with sudo; at most 200 are listed
+                                 (those holding an access first): answer the rest in whoread alerts
   ask <id> deny|block            deny now | deny now and from now on (saves a deny rule)
   ask <id> allow-once|allow      [sudo] allow for 10 minutes | always (saves an allow rule)
   ask <id> trust-apple           [sudo] allow all Apple programs without asking (never under an
                                  AI agent)
-  alerts [--unread] [--since …] [--limit N]   [sudo]
+  alerts [--unread] [--since …] [--limit N (default 200)]   [sudo] newest first
   alert <id> block               deny this app from now on (the alert stays open without sudo)
   alert <id> allow-once|always-allow|keep-blocking|ignore|trust-apple
                                  [sudo] (keep-blocking on a question's alert only denies: no sudo)
   read-all                       [sudo] mark every alert read
   apps | files | agents          [sudo] who touched what (Apps / Files / Agents tabs)
-  daily [--since …] [filters]    [sudo] per-day totals for days past the detail window (detail-days)
+  daily [--since …] [filters]    [sudo] per-day totals for days past the detail window (detail-days);
+                                 newest first; --app matches the app name (no --search)
   export --format json|jsonl|csv [--output FILE] [filters]      [sudo] all matching events, oldest first
   export --aggregates --format json|jsonl|csv [--output FILE] [--since …]   [sudo] per-day totals
+                                 --limit N: the oldest N (events or per-day rows)
                                  FILE is owner-only (0600); under sudo, in a folder you own, it is
                                  yours. CSV: a cell that starts like a formula (= + - @) gets a
                                  leading apostrophe; on a terminal, hidden characters are escaped
@@ -58,6 +63,8 @@ or alert rule, catalog changes, allowing a question).
                                        notifications on|off  min-severity medium|high|critical
                                        latency-p99-ms N (status warning)  language en|zh-Hans|system
                                        trust-apple on|off (allow Apple programs without asking)
+                                    PATH: absolute, ~/FOLDER (in every home), or relative to the
+                                    current folder (stored as an absolute path)
   baseline                       [sudo] (app, category, access) combinations seen so far (the
                                  10,000 seen most recently)
 
@@ -78,7 +85,8 @@ Local (no daemon):
   fixture sanitize --input RAW|/dev/stdin --output OUT [--home DIR] [--vault DIR] [--capture-pid PID] [--sample N]
   version
 
-Global: --json   --lang en|zh-Hans   --service MACH_NAME   --socket PATH
+Global: --json   --lang en|zh-Hans   --service MACH_NAME   --socket PATH   -h|--help
+An option a command does not take, or a value that does not parse, is a usage error (exit 64).
 """
 
 let args = Args(Array(CommandLine.arguments.dropFirst()))
@@ -97,8 +105,13 @@ func out(_ s: String) { print(DisplayText.lines(s)) }
 /// characters JSONEncoder leaves raw are written as `\u` escapes (`Format.terminalSafeJSON`).
 func outJSON(_ s: String) { print(Format.terminalSafeJSON(s)) }
 
-/// Writes text for a person to stderr, escaped like `out`.
-func note(_ s: String) { FileHandle.standardError.write(Data((DisplayText.lines(s) + "\n").utf8)) }
+/// Writes text for a person to stderr, escaped like `out`. A closed or broken stderr loses the
+/// message instead of raising (the legacy `write(_:)` throws an Objective-C exception, which
+/// aborts).
+func note(_ s: String) { try? FileHandle.standardError.write(contentsOf: Data((DisplayText.lines(s) + "\n").utf8)) }
+
+/// English or Chinese, as the output language says.
+func tr(_ en: String, _ zh: String) -> String { language == .zhHans ? zh : en }
 
 /// The request never got an answer (no daemon, timeout, connection lost), as opposed to an
 /// `.error` the daemon replied with.
@@ -187,19 +200,45 @@ func handshake(_ c: IPCClient) throws {
     }
 }
 
+/// `--limit N`: a whole number, 0 or more. Anything else is a usage error, never the default.
+func limitArg() throws -> Int? {
+    guard let l = args.value("limit") else { return nil }
+    guard let n = Int(l), n >= 0 else { throw CLIError.usage("--limit: a whole number, 0 or more (not \"\(l)\")") }
+    return n
+}
+
+/// The event filters of `events`, `daily` and `export` (no daemon needed: also the argument check).
 func eventQuery() throws -> EventQuery {
     var q = EventQuery()
     if let s = args.value("since") { q.since = try Format.parseSince(s) }
     if let u = args.value("until") { q.until = try Format.parseSince(u) }
     let cats = args.all("category")
     if !cats.isEmpty { q.categoryIDs = cats }
-    q.text = args.value("app")
+    // --app: the app's or the program's name only. `text` goes along so that a daemon that predates
+    // `appName` still narrows by it (with its wider match, paths included) instead of ignoring it.
+    if let app = args.value("app") {
+        q.appName = app
+        q.text = app
+    }
+    // --search: the name of the app or program, or the file path.
+    if let search = args.value("search") { q.text = search }
     q.agentID = args.value("agent")
     q.agentsOnly = args.has("agents-only")
     q.includeBenign = args.has("all")
     if args.has("denied") { q.decisions = [.denied] }
-    if let l = args.value("limit"), let n = Int(l) { q.limit = n }
+    if let n = try limitArg() { q.limit = n }
     return q
+}
+
+/// The most events and alerts one reply of the daemon's store holds (SQLiteEventStore).
+let storeEventReplyCap = 100_000
+let storeAlertReplyCap = 10_000
+
+/// The newest `limit` items, and whether more match: asks for one more than it shows (a reply
+/// that fills the store's cap may hide more as well).
+func newest<T>(_ limit: Int, cap: Int, _ fetch: (Int) throws -> [T]) rethrows -> (shown: [T], more: Bool) {
+    let reply = try fetch(limit < Int.max ? limit + 1 : limit)
+    return (Array(reply.prefix(limit)), reply.count > limit || (limit >= cap && reply.count >= cap))
 }
 
 struct Context {
@@ -265,52 +304,69 @@ func cmdStatus(_ c: IPCClient) throws {
     let m = modeName[s.mode].map { language == .zhHans ? $0.1 : $0.0 } ?? s.mode.rawValue
     // Settings only add warnings: a daemon that cannot send them still gets a full status.
     let settings = try? c.settings()
+    let zh = language == .zhHans
+    /// "  source:       " (the labels line up at 16 columns, Chinese ones too).
+    func field(_ en: String, _ zhLabel: String) -> String { "  " + Format.pad(zh ? zhLabel + "：" : en + ":", 14) }
+    let warning = tr("  WARNING: ", "  警告：")
     out("WhoRead \(s.version) — \(m)")
-    out("  source:       \(s.source.rawValue) \(s.sourceRunning ? "running" : "stopped")"
-        + (s.sourceError.map { "  ERROR: \(DisplayText.escaped($0))" } ?? ""))
-    if let h = s.sourceHint { out("                hint: \(DisplayText.escaped(h))") }
-    if let d = s.sourceDeadlineMissMode { out("  deadline:     AUTH " + NativeDeadlineMissMode.statusDescription(d)) }
-    out("  enforcement:  \(s.enforcementActive ? "ACTIVE" : "inactive") (setting \(s.enforcementEnabled ? "on" : "off"))"
-        + (s.enforcementInactiveReasons.isEmpty ? "" : " — " + s.enforcementInactiveReasons.map(\.rawValue).joined(separator: ", ")))
-    out("  kill switch:  file \(s.killSwitchFilePresent ? "PRESENT (enforcement forced off)" : "absent")")
+    out(field("source", "事件源") + "\(s.source.rawValue) " + (s.sourceRunning ? tr("running", "运行中") : tr("stopped", "已停止"))
+        + (s.sourceError.map { tr("  ERROR: ", "  错误：") + DisplayText.escaped($0) } ?? ""))
+    if let h = s.sourceHint { out("                " + tr("hint: ", "提示：") + DisplayText.escaped(h)) }
+    if let d = s.sourceDeadlineMissMode { out(field("deadline", "截止模式") + "AUTH " + NativeDeadlineMissMode.statusDescription(d)) }
+    out(field("enforcement", "拦截") + enforcementText(s, reasonsAfter: tr(" — ", "：")))
+    out(field("kill switch", "kill switch") + (s.killSwitchFilePresent ? tr("file PRESENT (enforcement forced off)", "文件存在（拦截被强制关闭）")
+                                                                    : tr("file absent", "文件不存在")))
     if let n = s.pendingAsks {
-        out("  questions:    " + (n == 0 ? "none waiting" : "\(n) waiting for your answer (whoread asks)"))
+        out(field("questions", "问题") + (n == 0 ? tr("none waiting", "没有等待回答的问题")
+                                             : tr("\(n) waiting for your answer (whoread asks)", "\(n) 个等待你回答（whoread asks）")))
     }
     if settings?.trustApplePrograms == true {
-        out("  trust Apple:  on (Apple programs in system locations are not asked, unless an AI agent is in the chain)")
+        out(field("trust Apple", "信任苹果程序") + tr("on (Apple programs in system locations are not asked, unless an AI agent is in the chain)",
+                                                  "已打开（系统位置中的苹果程序不会被询问，除非调用链中有 AI agent）"))
     }
     if let u = s.uncleanStop {
-        out("  unclean stop: \(DisplayText.escaped(u)); enforcement was kept as you set it")
+        out(field("unclean stop", "异常停止") + DisplayText.escaped(u) + tr("; enforcement was kept as you set it", "；拦截保持你设定的状态"))
     }
-    out("  events:       \(s.counts.events) stored (+\(s.counts.aggregatedDays) days aggregated), \(s.eventsProcessed) since start, last \(Format.ago(s.lastEventAt))")
-    out("  alerts:       \(s.unreadAlerts) unread of \(s.counts.alerts)")
-    out("  coverage:     \(s.monitoredPrefixes) monitored prefixes, homes \(s.homeDirectories.map { DisplayText.escaped($0) }.joined(separator: ", "))")
+    out(field("events", "事件") + tr("\(s.counts.events) stored (+\(s.counts.aggregatedDays) days aggregated), \(s.eventsProcessed) since start, last \(Format.ago(s.lastEventAt))",
+                                    "已存储 \(s.counts.events) 条（另有 \(s.counts.aggregatedDays) 天按天汇总），启动以来 \(s.eventsProcessed) 条，最近一次 \(Format.ago(s.lastEventAt, language: language))"))
+    out(field("alerts", "告警") + tr("\(s.unreadAlerts) unread of \(s.counts.alerts)", "未读 \(s.unreadAlerts) 条，共 \(s.counts.alerts) 条"))
+    let homes = s.homeDirectories.map { DisplayText.escaped($0) }.joined(separator: ", ")
+    out(field("coverage", "覆盖范围") + tr("\(s.monitoredPrefixes) monitored prefixes, homes \(homes)", "监控 \(s.monitoredPrefixes) 个前缀，主目录 \(homes)"))
     if let m = s.sourceAuth?.mutedLine { out(m) }
     if let p = s.parser {
-        out("  eslogger:     \(p.lines) lines read, \(p.events) events parsed, \(p.malformed) malformed, schema \(p.schemaVersions), kernel drops \(p.droppedByKernel)")
+        out(field("eslogger", "eslogger") + tr("\(p.lines) lines read, \(p.events) events parsed, \(p.malformed) malformed, schema \(p.schemaVersions), kernel drops \(p.droppedByKernel)",
+                                              "读取 \(p.lines) 行，解析 \(p.events) 个事件，\(p.malformed) 行格式错误，schema \(p.schemaVersions)，内核丢弃 \(p.droppedByKernel)"))
     }
     if s.latency.samples > 0 {
-        out(String(format: "  AUTH latency: p50 %.0f µs, p99 %.0f µs, max %.0f µs, %d deadline misses", s.latency.p50Micros,
-                   s.latency.p99Micros, s.latency.maxMicros, s.latency.deadlineMisses))
+        out(field("AUTH latency", "AUTH 延迟") + String(format: tr("p50 %.0f µs, p99 %.0f µs, max %.0f µs, %d deadline misses",
+                                                                   "p50 %.0f µs，p99 %.0f µs，最大 %.0f µs，%d 次错过截止时间"),
+                                                         s.latency.p50Micros, s.latency.p99Micros, s.latency.maxMicros, s.latency.deadlineMisses))
         if let t = settings?.latencyP99ThresholdMs, s.latency.p99Micros > t * 1000 {
-            out(String(format: "  WARNING: AUTH p99 latency %.1f ms is over latency-p99-ms %.0f ms (enforcement stays on)",
-                       s.latency.p99Micros / 1000, t))
+            out(warning + String(format: tr("AUTH p99 latency %.1f ms is over latency-p99-ms %.0f ms (enforcement stays on)",
+                                            "AUTH p99 延迟 %.1f ms 超过 latency-p99-ms %.0f ms（拦截保持开启）"),
+                                 s.latency.p99Micros / 1000, t))
         }
     }
     // Missed deadlines never switch enforcement off: only counted. The kernel allowed those accesses,
     // unless the native client runs in fail-closed mode (macOS 27), where it denied them.
     if s.latency.deadlineMisses > 0 {
-        let outcome = NativeDeadlineMissMode.missesDenied(s.sourceDeadlineMissMode) ? "denied" : "allowed"
-        out("  WARNING: \(s.latency.deadlineMisses) AUTH deadline miss\(s.latency.deadlineMisses == 1 ? "" : "es"): "
-            + "the kernel \(outcome) those accesses; enforcement stays on (turn it off by hand: sudo whoread enforcement off)")
+        let denied = NativeDeadlineMissMode.missesDenied(s.sourceDeadlineMissMode)
+        let n = s.latency.deadlineMisses
+        out(warning + tr("\(n) AUTH deadline miss\(n == 1 ? "" : "es"): the kernel \(denied ? "denied" : "allowed") those accesses; "
+                            + "enforcement stays on (turn it off by hand: sudo whoread enforcement off)",
+                         "\(n) 次错过 AUTH 截止时间：内核\(denied ? "拒绝" : "允许")了这些访问；拦截保持开启（手动关闭：sudo whoread enforcement off）"))
     }
-    if s.writerDropped > 0 { out("  WARNING: \(s.writerDropped) events dropped before storage") }
+    if s.writerDropped > 0 { out(warning + tr("\(s.writerDropped) events dropped before storage", "\(s.writerDropped) 个事件在存储前被丢弃")) }
     if let d = s.sourceDroppedEvents, d > 0 {
-        out("  WARNING: \(d) events dropped or merged by the source (analysis backlog full; denials were still enforced)")
+        out(warning + tr("\(d) events dropped or merged by the source (analysis backlog full; denials were still enforced)",
+                         "事件源丢弃或合并了 \(d) 个事件（分析队列已满；拒绝仍然生效）"))
     }
     if s.parser == nil, let line = SourceAuthCounts.kernelDropLine(total: s.sourceKernelDrops ?? 0, auth: s.sourceAuth) { out(line) }
     s.sourceAuth?.warningLines.forEach(out)
-    if let e = s.rulesLoadError { out("  WARNING: stored rules failed to load (\(DisplayText.escaped(e))); enforcement stays off") }
+    if let e = s.rulesLoadError {
+        out(warning + tr("stored rules failed to load (\(DisplayText.escaped(e))); enforcement stays off",
+                         "已存储的规则加载失败（\(DisplayText.escaped(e))）；拦截保持关闭"))
+    }
 }
 
 /// Details older than `detailDays` survive only as per-day totals: say so when `--since` reaches
@@ -325,11 +381,17 @@ func noteRolledUp(_ c: IPCClient, since: Date?) {
 }
 
 func cmdEvents(_ c: IPCClient) throws {
-    let q = try eventQuery()
+    var q = try eventQuery()
     noteRolledUp(c, since: q.since)
-    let events = try c.events(q)
-    if args.json { return outJSON(try Format.json(events)) }
-    printEvents(events, context(c))
+    let (events, more) = try newest(q.limit, cap: storeEventReplyCap) { n in
+        q.limit = n
+        return try c.events(q)
+    }
+    if args.json { outJSON(try Format.json(events)) } else { printEvents(events, context(c)) }
+    if more {
+        note(tr("note: only the newest \(events.count) matching events are shown; use --limit N for more, or whoread export for all of them",
+                "注意：只显示了最新的 \(events.count) 条匹配事件；用 --limit N 显示更多，或用 whoread export 导出全部"))
+    }
 }
 
 /// The store applies a page's LIMIT before it drops rows it cannot decode (written by a newer
@@ -337,18 +399,44 @@ func cmdEvents(_ c: IPCClient) throws {
 /// beyond it. For a page `q` that came back empty: true when it held only such rows, so every
 /// matching row in (afterID, afterID + limit] is undecodable and can be stepped over. A newer
 /// matching event must exist, and the page must still be empty when read again after that probe
-/// (so an event arriving in between does not pass for a skipped block).
-func onlyUndecodable(_ c: IPCClient, _ q: EventQuery) throws -> Bool {
+/// (so an event arriving in between does not pass for a skipped block). The newest matching row
+/// can itself be undecodable: with `depth` above 1, up to that many of the newest are looked at
+/// before deciding that nothing matches beyond the page (an export would otherwise end early and
+/// leave out every event after such a block).
+func onlyUndecodable(_ c: IPCClient, _ q: EventQuery, depth: Int = 1) throws -> Bool {
     var probe = q
     probe.limit = 1
     probe.newestFirst = true
-    guard try !c.events(probe).isEmpty else { return false }
+    if try c.events(probe).isEmpty {
+        guard depth > 1 else { return false }
+        probe.limit = depth
+        guard try !c.events(probe).isEmpty else { return false }
+    }
     return try c.events(q).isEmpty
+}
+
+/// How far back from the newest matching rows `export` and `tail` look for one they can decode.
+let undecodableProbeDepth = 1_000
+
+/// Where `tail` starts: after the newest stored event. The newest rows can be undecodable (the
+/// store applies LIMIT before decoding), so it looks further back before taking the store for
+/// empty: starting from nothing would print the whole history as if it were new.
+func tailStart(_ c: IPCClient) throws -> Int64? {
+    for depth in [1, undecodableProbeDepth] {
+        if let id = try c.events(EventQuery(includeBenign: true, limit: depth)).map(\.id).max() { return id }
+    }
+    guard ((try? c.status())?.counts.events ?? 0) == 0 else {
+        throw CLIError(tr("cannot find the newest stored event (the newest \(undecodableProbeDepth) could not be decoded: "
+                            + "written by a newer build, or damaged); not printing the whole history as new",
+                          "找不到最新存储的事件（最新的 \(undecodableProbeDepth) 条都无法解码：由较新的版本写入，或已损坏）；"
+                            + "不会把全部历史当作新事件打印"))
+    }
+    return nil
 }
 
 func cmdTail(_ c: IPCClient) throws {
     let ctx = context(c)
-    var after: Int64? = try c.events(EventQuery(includeBenign: true, limit: 1)).first?.id
+    var after: Int64? = try tailStart(c)
     out(language == .zhHans ? "正在跟踪新事件（Ctrl-C 退出）…" : "Following new events (Ctrl-C to stop)…")
     fflush(stdout)
     // Pages from the store in id order (not the live ring's newest-N), so a burst larger than one
@@ -376,12 +464,27 @@ let alertActionWords: [(word: String, action: AlertAction)] = [
     ("ignore", .ignore), ("trust-apple", .trustApplePrograms),
 ]
 
-func cmdAlerts(_ c: IPCClient) throws {
+/// The filters of `alerts` (no daemon needed: also the argument check).
+func alertQuery() throws -> AlertQuery {
     var q = AlertQuery()
     if args.has("unread") { q.statuses = [.unread] }
-    if let l = args.value("limit"), let n = Int(l) { q.limit = n }
+    if let n = try limitArg() { q.limit = n }
     if let s = args.value("since") { q.since = try Format.parseSince(s) }
-    let alerts = try c.alerts(q)
+    return q
+}
+
+func cmdAlerts(_ c: IPCClient) throws {
+    var q = try alertQuery()
+    let (alerts, more) = try newest(q.limit, cap: storeAlertReplyCap) { n in
+        q.limit = n
+        return try c.alerts(q)
+    }
+    defer {
+        if more {
+            note(tr("note: only the \(alerts.count) most recently updated alerts are shown; use --limit N for more",
+                    "注意：只显示了最近更新的 \(alerts.count) 条告警；用 --limit N 显示更多"))
+        }
+    }
     if args.json { return outJSON(try Format.json(alerts)) }
     let ctx = context(c)
     let f = ctx.formatter
@@ -399,15 +502,21 @@ func cmdAlerts(_ c: IPCClient) throws {
     if alerts.isEmpty { out(language == .zhHans ? "没有告警。" : "No alerts.") }
 }
 
-func cmdAlertAction(_ c: IPCClient) throws {
-    guard args.positional.count >= 3, let id = Int64(args.positional[1]) else {
-        throw CLIError("usage: whoread alert <id> <" + alertActionWords.map(\.word).joined(separator: "|") + ">")
-    }
+/// `whoread alert ID WORD`, checked (also before connecting).
+func alertArgs() throws -> (id: Int64, action: AlertAction) {
+    let usage = "usage: whoread alert <id> <" + alertActionWords.map(\.word).joined(separator: "|") + ">"
+    guard args.positional.count == 3, let id = Int64(args.positional[1]) else { throw CLIError.usage(usage) }
     guard let action = alertActionWords.first(where: { $0.word == args.positional[2] })?.action else {
-        throw CLIError("unknown action \(args.positional[2])")
+        throw CLIError.usage("unknown action \(args.positional[2])\n\(usage)")
     }
+    return (id, action)
+}
+
+func cmdAlertAction(_ c: IPCClient) throws {
+    let (id, action) = try alertArgs()
     _ = try c.call(.alertAction(alertID: id, action: action))
-    out("alert #\(id): \(action.rawValue)")
+    // What was done, in the words the alert lines use ("Block from now on"), not the enum's name.
+    out(tr("alert #\(id): ", "告警 #\(id)：") + AlertFormatter(language: language).actionTitle(action))
     if action == .blockFromNowOn && geteuid() != 0 {
         // The daemon adds the deny rule for anyone, but only root or the app may close the alert.
         out(language == .zhHans ? "  已添加拦截规则；告警本身仍保持打开，请在 WhoRead 应用中处理（或用 sudo）。"
@@ -424,8 +533,26 @@ let askAnswerWords: [(word: String, action: AlertAction)] = [
     ("trust-apple", .trustApplePrograms), ("always-allow", .alwaysAllow), ("keep-blocking", .keepBlocking),
 ]
 
+/// The most questions the daemon lists (DaemonCore.maxListedAsks), those holding an access first.
+let daemonListedAsksLimit = 200
+
+/// The daemon left a question's file path out (it does not serve this connection as root or the
+/// signed app): its note instead, in the output language. Every real path is absolute.
+func askPath(_ path: String, _ ctx: Context) -> String {
+    path.hasPrefix("/") ? ctx.normalizer.abbreviate(path)
+        : tr(ServiceHandler.hiddenPath, "（文件路径已隐藏：用 sudo 运行才能看到）")
+}
+
 func cmdAsks(_ c: IPCClient) throws {
     guard case .asks(let asks) = try c.call(.asks) else { throw IPCError(.internalError, "unexpected response") }
+    defer {
+        if asks.count >= daemonListedAsksLimit {
+            note(tr("note: the daemon lists at most \(daemonListedAsksLimit) questions (those holding an access first); "
+                        + "more may be waiting: answer the rest in whoread alerts",
+                    "注意：daemon 最多列出 \(daemonListedAsksLimit) 个问题（正在等待访问的优先）；可能还有更多问题在等待："
+                        + "其余的可以在 whoread alerts 中回答"))
+        }
+    }
     if args.json { return outJSON(try Format.json(asks)) }
     let zh = language == .zhHans
     if asks.isEmpty { return out(zh ? "没有等待回答的问题。" : "No questions waiting.") }
@@ -441,7 +568,7 @@ func cmdAsks(_ c: IPCClient) throws {
         // Who started the program was not seen: an AI agent may be behind it.
         let unknown = r.key.ancestryKnown ? [] : [zh ? "启动者未知" : "unknown starter"]
         return [String(r.id), DisplayText.name(r.responsible.displayName), program, ctx.categoryName(r.key.categoryID) + "/" + r.severity.rawValue,
-                r.key.access.label, ctx.normalizer.abbreviate(r.path),
+                r.key.access.label, askPath(r.path, ctx),
                 (agentIDs.map { ctx.agentName($0, agents) } + unknown).joined(separator: ", "),
                 "\(r.holding)/\(r.attempts)", r.appleProgram ? (zh ? "是" : "yes") : ""]
     }
@@ -458,12 +585,18 @@ func cmdAsks(_ c: IPCClient) throws {
            : "\nanswer: whoread ask ID allow-once|allow|deny|block|trust-apple (allowing needs sudo)")
 }
 
-func cmdAsk(_ c: IPCClient) throws {
+/// `whoread ask ID WORD`, checked (also before connecting).
+func askArgs() throws -> (id: Int64, action: AlertAction) {
     let usage = "usage: whoread ask <id> allow-once|allow|deny|block|trust-apple"
-    guard args.positional.count == 3, let id = Int64(args.positional[1]) else { throw CLIError(usage) }
+    guard args.positional.count == 3, let id = Int64(args.positional[1]) else { throw CLIError.usage(usage) }
     guard let action = askAnswerWords.first(where: { $0.word == args.positional[2] })?.action else {
-        throw CLIError("unknown answer \(args.positional[2])\n\(usage)")
+        throw CLIError.usage("unknown answer \(args.positional[2])\n\(usage)")
     }
+    return (id, action)
+}
+
+func cmdAsk(_ c: IPCClient) throws {
+    let (id, action) = try askArgs()
     let zh = language == .zhHans
     let reply: IPCResponse
     do {
@@ -542,8 +675,11 @@ func cmdAgents(_ c: IPCClient) throws {
     out(Format.table(rows, header: language == .zhHans ? ["AI agent", "碰过的类别", "被拦截", "最近", "次数"] : ["AI AGENT", "CATEGORIES", "BLOCKED", "LAST", "COUNT"]))
 }
 
-/// Daily aggregates matching the event filters (the daemon applies `--since`).
-func dailyRows(_ c: IPCClient) throws -> [DailyAggregate] {
+/// Daily aggregates matching the event filters (the daemon applies `--since`), newest day first,
+/// or oldest first with `oldestFirst`. `--limit N` keeps the first N in that order: the newest N
+/// for `daily`, the oldest N for `export --aggregates` (as for the events `export` writes).
+/// `--app` matches the app's name (a day's row has no program name or path).
+func dailyRows(_ c: IPCClient, oldestFirst: Bool = false) throws -> [DailyAggregate] {
     let q = try eventQuery()
     let rows = try c.dailyAggregates(since: q.since).filter { a in
         let s = a.summary
@@ -553,10 +689,11 @@ func dailyRows(_ c: IPCClient) throws -> [DailyAggregate] {
         if q.agentsOnly && s.agentID == nil { return false }
         if !q.includeBenign && s.benign { return false }
         if q.decisions != nil && s.denied == 0 { return false }
-        if let t = q.text?.lowercased(), !t.isEmpty, !s.responsible.displayName.lowercased().contains(t) { return false }
+        if let t = q.appName?.lowercased(), !t.isEmpty, !s.responsible.displayName.lowercased().contains(t) { return false }
         return true
     }
-    return args.value("limit") == nil ? rows : Array(rows.prefix(max(0, q.limit)))
+    let ordered = oldestFirst ? Array(rows.reversed()) : rows
+    return try limitArg().map { Array(ordered.prefix($0)) } ?? ordered
 }
 
 func cmdDaily(_ c: IPCClient) throws {
@@ -636,8 +773,13 @@ final class ExportWriter {
 /// Events per request: far below the dev socket's 64 MiB reply frame and the store's 100k cap.
 let exportPageSize = 5_000
 
+func exportFormat() throws -> Exporter.Format {
+    guard let f = Exporter.Format(rawValue: args.value("format") ?? "json") else { throw CLIError.usage("--format json|jsonl|csv") }
+    return f
+}
+
 func cmdExport(_ c: IPCClient) throws {
-    guard let f = Exporter.Format(rawValue: args.value("format") ?? "json") else { throw CLIError("--format json|jsonl|csv") }
+    let f = try exportFormat()
     let path = args.value("output") ?? args.value("o")
     let writer = try ExportWriter(path: path)
     let count: Int
@@ -649,15 +791,16 @@ func cmdExport(_ c: IPCClient) throws {
         throw error
     }
     if let path {
-        FileHandle.standardError.write(Data("exported \(count) \(args.has("aggregates") ? "daily aggregates" : "events") to \(path)\n".utf8))
+        note(args.has("aggregates") ? tr("exported \(count) daily aggregates to \(path)", "已导出 \(count) 条按天汇总到 \(path)")
+                                    : tr("exported \(count) events to \(path)", "已导出 \(count) 条事件到 \(path)"))
     }
 }
 
-/// Every matching event, oldest first, fetched in pages and streamed out.
+/// Every matching event, oldest first, fetched in pages and streamed out (`--limit N`: the oldest N).
 func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter) throws -> Int {
     var q = try eventQuery()
     noteRolledUp(c, since: q.since)
-    let total = args.value("limit") == nil ? Int.max : max(0, q.limit)
+    let total = try limitArg() ?? Int.max
     q.newestFirst = false
     // Pin the end of the window so a busy machine cannot keep the export chasing new events.
     if q.until == nil { q.until = Date() }
@@ -678,7 +821,7 @@ func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter)
         q.limit = min(exportPageSize, total - count)
         let page = try c.events(q)
         guard let last = page.last else {
-            guard try onlyUndecodable(c, q) else { break }
+            guard try onlyUndecodable(c, q, depth: undecodableProbeDepth) else { break }
             q.afterID = (q.afterID ?? 0) + Int64(q.limit)
             skipped = true
             continue
@@ -707,14 +850,15 @@ func exportEvents(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter)
     }
     if f == .json { try w.write(count == 0 ? "]\n" : "\n]\n") }
     if skipped {
-        FileHandle.standardError.write(Data("warning: the daemon could not decode some stored events (written by a newer build, or damaged); they are not in the export\n".utf8))
+        note(tr("warning: the daemon could not decode some stored events (written by a newer build, or damaged); they are not in the export",
+                "警告：daemon 无法解码部分已存储的事件（由较新的版本写入，或已损坏）；它们不在导出结果中"))
     }
     return count
 }
 
 /// Per-day totals (details older than detail-days live only here), oldest day first.
 func exportAggregates(_ c: IPCClient, format f: Exporter.Format, to w: ExportWriter) throws -> Int {
-    let rows = Array(try dailyRows(c).reversed())
+    let rows = try dailyRows(c, oldestFirst: true)
     switch f {
     case .json:
         try w.write(Format.terminalSafeJSON(String(decoding: try Exporter.encoder(pretty: true).encode(rows), as: UTF8.self)))
@@ -741,20 +885,42 @@ func exportAggregates(_ c: IPCClient, format f: Exporter.Format, to w: ExportWri
     return rows.count
 }
 
+/// `whoread enforcement [on|off|status]`, checked (also before connecting).
+func enforcementWord() throws -> String {
+    let word = args.positional.dropFirst().first ?? "status"
+    guard ["on", "off", "status"].contains(word) else {
+        throw CLIError.usage("unknown: enforcement \(word)\nusage: whoread enforcement on|off|status")
+    }
+    return word
+}
+
+/// Why enforcement is not in effect, in the output language.
+func reasonText(_ r: EnforcementState.InactiveReason) -> String {
+    guard language == .zhHans else { return r.rawValue }
+    switch r {
+    case .disabledByUser: return "已被关闭"
+    case .killSwitchFile: return "kill switch 文件存在"
+    case .latencyTripped: return "延迟超限"
+    case .rulesFailedToLoad: return "规则加载失败"
+    case .sourceCannotEnforce: return "当前事件源不能拦截"
+    }
+}
+
+/// "ACTIVE (setting on)", "inactive (setting off)" and why, as `status` and `enforcement` show it.
+func enforcementText(_ s: DaemonStatus, reasonsAfter sep: String) -> String {
+    tr("\(s.enforcementActive ? "ACTIVE" : "inactive") (setting \(s.enforcementEnabled ? "on" : "off"))",
+       "\(s.enforcementActive ? "已生效" : "未生效")（设置：\(s.enforcementEnabled ? "开" : "关")）")
+        + (s.enforcementInactiveReasons.isEmpty ? "" : sep + s.enforcementInactiveReasons.map(reasonText).joined(separator: tr(", ", "、")))
+}
+
 func cmdEnforcement(_ c: IPCClient) throws {
-    switch args.positional.dropFirst().first ?? "status" {
-    case "on":
-        _ = try c.call(.setEnforcement(enabled: true))
-    case "off":
-        _ = try c.call(.setEnforcement(enabled: false))
-    case "status":
-        break
-    case let other:
-        throw CLIError("unknown: enforcement \(other)")
+    switch try enforcementWord() {
+    case "on": _ = try c.call(.setEnforcement(enabled: true))
+    case "off": _ = try c.call(.setEnforcement(enabled: false))
+    default: break
     }
     let s = try c.status()
-    out("enforcement \(s.enforcementActive ? "ACTIVE" : "inactive") (setting \(s.enforcementEnabled ? "on" : "off"))"
-        + (s.enforcementInactiveReasons.isEmpty ? "" : ": " + s.enforcementInactiveReasons.map(\.rawValue).joined(separator: ", ")))
+    out(tr("enforcement ", "拦截") + enforcementText(s, reasonsAfter: tr(": ", "：")))
 }
 
 func cmdRules(_ c: IPCClient) throws {
@@ -784,26 +950,30 @@ func cmdRules(_ c: IPCClient) throws {
             + (r.expiresAt.map { " until " + Format.time($0) } ?? "")
         return [r.id, state, r.action.rawValue, r.access.rawValue, target, subject + scope, r.name ?? ""]
     }
+    let rulesHeader = language == .zhHans ? ["编号", "状态", "动作", "访问", "目标", "主体", "名称"] : ["ID", "STATE", "ACTION", "ACCESS", "TARGET", "SUBJECT", "NAME"]
     func modify(_ id: String, _ f: (inout Rule) -> Void) throws {
         guard var r = try c.rules().first(where: { $0.id == id }) else { throw CLIError("no rule \(id)") }
         f(&r)
         _ = try c.call(.upsertRule(r))
-        out(Format.table([describe(r)], header: ["ID", "STATE", "ACTION", "ACCESS", "TARGET", "SUBJECT", "NAME"]))
+        out(Format.table([describe(r)], header: rulesHeader))
     }
     switch sub {
     case "list":
         let rules = try c.rules()
         if let e = try? c.status().rulesLoadError {
-            note("warning: the stored rules could not be loaded (\(DisplayText.escaped(e))); enforcement is off. "
-                + "Fix with: sudo whoread rules replace --json-file RULES.json --confirm "
-                + "(unreadable rows are kept in the rules_backup table)")
+            note(tr("warning: the stored rules could not be loaded (\(DisplayText.escaped(e))); enforcement is off. "
+                        + "Fix with: sudo whoread rules replace --json-file RULES.json --confirm "
+                        + "(unreadable rows are kept in the rules_backup table)",
+                    "警告：已存储的规则无法加载（\(DisplayText.escaped(e))）；拦截已关闭。"
+                        + "修复：sudo whoread rules replace --json-file RULES.json --confirm"
+                        + "（无法读取的行保存在 rules_backup 表中）"))
         }
         if args.json { return outJSON(try Format.json(rules)) }
-        out(Format.table(rules.map(describe), header: ["ID", "STATE", "ACTION", "ACCESS", "TARGET", "SUBJECT", "NAME"]))
+        out(Format.table(rules.map(describe), header: rulesHeader))
     case "templates":
         outJSON(try Format.json(RuleTemplates.all))
     case "add":
-        guard let file = args.value("json-file") else { throw CLIError("rules add --json-file RULE.json") }
+        let file = try rulesFileArg()
         let data = try Data(contentsOf: URL(fileURLWithPath: file))
         let rules: [Rule]
         if let list = try? Exporter.decoder().decode([Rule].self, from: data) {
@@ -812,12 +982,9 @@ func cmdRules(_ c: IPCClient) throws {
             rules = [try Exporter.decoder().decode(Rule.self, from: data)]
         }
         for r in rules { _ = try c.call(.upsertRule(r)) }
-        out("saved \(rules.count) rule(s)")
+        out(tr("saved \(rules.count) rule(s)", "已保存 \(rules.count) 条规则"))
     case "replace":
-        guard let file = args.value("json-file") else { throw CLIError("rules replace --json-file RULES.json --confirm") }
-        guard args.has("confirm") else {
-            throw CLIError("rules replace deletes every current rule and stores the file's rules instead; add --confirm")
-        }
+        let file = try rulesFileArg()
         let data = try Data(contentsOf: URL(fileURLWithPath: file))
         let rules: [Rule]
         if let list = try? Exporter.decoder().decode([Rule].self, from: data) {
@@ -826,24 +993,36 @@ func cmdRules(_ c: IPCClient) throws {
             rules = [try Exporter.decoder().decode(Rule.self, from: data)]
         }
         _ = try c.call(.replaceRules(rules))
-        out("replaced: \(rules.count) rule(s)")
+        out(tr("replaced: \(rules.count) rule(s)", "已替换：\(rules.count) 条规则"))
     case "enable": try modify(try idArg()) { $0.enabled = true }
     case "disable": try modify(try idArg()) { $0.enabled = false }
     case "enforce": try modify(try idArg()) { $0.enforce = true; $0.enabled = true }
     case "dry-run": try modify(try idArg()) { $0.enforce = false }
     case "delete":
         _ = try c.call(.deleteRule(id: try idArg()))
-        out("deleted")
+        out(tr("deleted", "已删除"))
     default:
-        throw CLIError("unknown: rules \(sub)")
+        throw CLIError.usage("unknown: rules \(sub)")
     }
 }
 
 func idArg() throws -> String {
-    guard args.positional.count >= 3 else { throw CLIError("missing rule id") }
+    guard args.positional.count >= 3 else { throw CLIError.usage("missing rule id") }
     // A stray extra word is a mistake (an unquoted name with a space), not something to ignore.
-    guard args.positional.count == 3 else { throw CLIError("one rule id at a time: whoread rules \(args.positional[1]) ID") }
+    guard args.positional.count == 3 else { throw CLIError.usage("one rule id at a time: whoread rules \(args.positional[1]) ID") }
     return args.positional[2]
+}
+
+/// `rules add|replace --json-file F` (`replace` also needs `--confirm`), checked (also before connecting).
+func rulesFileArg() throws -> String {
+    let replace = args.positional.dropFirst().first == "replace"
+    guard let file = args.value("json-file") else {
+        throw CLIError.usage(replace ? "usage: whoread rules replace --json-file RULES.json --confirm" : "usage: whoread rules add --json-file RULE.json")
+    }
+    if replace && !args.has("confirm") {
+        throw CLIError.usage("rules replace deletes every current rule and stores the file's rules instead; add --confirm")
+    }
+    return file
 }
 
 /// A catalog prefix as the classifier expects it: absolute or `~/`, no `.`/`..`, narrower than a
@@ -851,38 +1030,77 @@ func idArg() throws -> String {
 /// is refused however it is spelled (`~/` alone, `/Users/alice`, `/Users`, a firmlinked form).
 func catalogPath(_ raw: String, homes: [String]) throws -> String {
     let p = raw.trimmingCharacters(in: .whitespaces)
-    guard p.hasPrefix("/") || p.hasPrefix("~/") else { throw CLIError("path must start with / or ~/: \(raw)") }
+    guard p.hasPrefix("/") || p.hasPrefix("~/") else { throw CLIError.usage("path must start with / or ~/: \(raw)") }
     let parts = p.split(separator: "/")
-    guard !parts.contains("..") && !parts.contains(".") else { throw CLIError("path must not contain . or ..: \(raw)") }
-    guard parts.count > (p.hasPrefix("~/") ? 1 : 0) else { throw CLIError("\(p) is too broad to monitor") }
+    guard !parts.contains("..") && !parts.contains(".") else { throw CLIError.usage("path must not contain . or ..: \(raw)") }
+    guard parts.count > (p.hasPrefix("~/") ? 1 : 0) else { throw CLIError.usage("\(p) is too broad to monitor") }
     if p.hasPrefix("/") {
         let normalizer = PathNormalizer(homeDirectories: homes)
         let key = normalizer.matchKey(p)
         // The data volume's own spelling (/System/Volumes/Data) is the whole disk too.
-        guard key != "/" else { throw CLIError("\(p) is too broad to monitor") }
+        guard key != "/" else { throw CLIError.usage("\(p) is too broad to monitor") }
         let homeKeys = normalizer.homeDirectories.map(PathNormalizer.fold) + ["/users"]
         if homeKeys.contains(where: { $0 == key || $0.hasPrefix(key + "/") }) {
-            throw CLIError("\(p) is too broad to monitor: it is or holds a home folder (use ~/FOLDER for a folder in every home)")
+            throw CLIError.usage("\(p) is too broad to monitor: it is or holds a home folder (use ~/FOLDER for a folder in every home)")
         }
     }
     return p
 }
 
 func severityArg(_ v: String) throws -> Severity {
-    guard let s = Severity(rawValue: v.lowercased()) else { throw CLIError("severity must be medium, high or critical") }
+    guard let s = Severity(rawValue: v.lowercased()) else { throw CLIError.usage("severity must be medium, high or critical") }
     return s
+}
+
+/// A project root as typed (`settings set project-root-add`): absolute, `~/FOLDER` (that folder in
+/// every home), or relative to the current folder, which is made absolute here (`.` in a project
+/// means that project; the daemon has no current folder). Then the checks of a catalog path
+/// (`catalogPath`): an entry the classifier cannot expand, or one as broad as a home, would be
+/// stored and never monitored. `~name` (another user's home) is not a form the catalog knows.
+func projectRoot(_ raw: String, homes: [String] = []) throws -> String {
+    let p = raw.trimmingCharacters(in: .whitespaces)
+    guard !p.isEmpty else { throw CLIError.usage("project root: the path is empty") }
+    if p.hasPrefix("~") && !p.hasPrefix("~/") {
+        throw CLIError.usage("project root \(raw): use ~/FOLDER for that folder in every home, or an absolute path")
+    }
+    return try catalogPath(fromCurrentFolder(p) ?? p, homes: homes)
+}
+
+/// A relative path made absolute against the current folder; nil for one that is absolute or
+/// starts with `~`.
+func fromCurrentFolder(_ p: String) -> String? {
+    guard !p.hasPrefix("/") && !p.hasPrefix("~") else { return nil }
+    return PathNormalizer().normalize(FileManager.default.currentDirectoryPath + "/" + p)
+}
+
+/// The key two spellings of one project root share (a trailing /, case, a firmlinked form).
+func projectRootKey(_ p: String) -> String { PathNormalizer().matchKey(p.trimmingCharacters(in: .whitespaces)) }
+
+/// `catalog add-category ID NAME_EN NAME_ZH SEVERITY [--path PATH]...`, checked (also before
+/// connecting, with no homes: the daemon's homes are checked again once it answers).
+func newCategory(homes: [String]) throws -> CategorySpec {
+    let p = args.positional
+    guard p.count == 6 else { throw CLIError.usage("usage: whoread catalog add-category ID NAME_EN NAME_ZH medium|high|critical [--path PATH]...") }
+    let id = p[2], en = p[3], zh = p[4]
+    let severity = try severityArg(p[5])
+    guard id.range(of: "^[a-z0-9][a-z0-9-]*$", options: .regularExpression) != nil else {
+        throw CLIError.usage("category id: lowercase letters, digits and -")
+    }
+    guard !en.trimmingCharacters(in: .whitespaces).isEmpty else { throw CLIError.usage("NAME_EN must not be empty") }
+    let paths = try args.all("path").map { try catalogPath($0, homes: homes) }
+    return CategorySpec(id: id, name: LocalizedText(en: en, zhHans: zh), kind: .custom, group: "custom", severity: severity, paths: paths)
 }
 
 func cmdCatalog(_ c: IPCClient) throws {
     let sub = args.positional.dropFirst().first ?? "show"
     func arg(_ n: Int, _ usage: String) throws -> String {
-        guard args.positional.count > n else { throw CLIError("usage: whoread catalog \(usage)") }
+        guard args.positional.count > n else { throw CLIError.usage("usage: whoread catalog \(usage)") }
         return args.positional[n]
     }
     /// Exactly `count` positionals (counting "catalog" and the subcommand): a stray word, such as
     /// the tail of an unquoted path with a space, must not be silently dropped.
     func expect(_ count: Int, _ usage: String) throws {
-        guard args.positional.count == count else { throw CLIError("usage: whoread catalog \(usage)") }
+        guard args.positional.count == count else { throw CLIError.usage("usage: whoread catalog \(usage)") }
     }
     var fetched: CatalogInfo?
     func info() throws -> CatalogInfo {
@@ -910,13 +1128,16 @@ func cmdCatalog(_ c: IPCClient) throws {
         if let id = args.positional.dropFirst(2).first {
             guard let cat = info.catalog.category(id) else { throw CLIError("unknown category \(id) (see whoread catalog show)") }
             if args.json { return outJSON(try Format.json(cat)) }
-            out("\(cat.id) — \(cat.name.resolve(language))  [\(cat.kind.rawValue), \(cat.severity.rawValue)\(cat.enabled ? "" : ", disabled")]")
-            out(cat.paths.isEmpty ? "  (no paths)" : cat.paths.map { "  " + $0 }.joined(separator: "\n"))
-            if !cat.patterns.isEmpty { out("  \(cat.patterns.count) file pattern(s), \(cat.owners.count) owner(s)") }
+            out("\(cat.id) — \(cat.name.resolve(language))  [\(cat.kind.rawValue), \(cat.severity.rawValue)\(cat.enabled ? "" : tr(", disabled", "，已停用"))]")
+            out(cat.paths.isEmpty ? tr("  (no paths)", "  （没有路径）") : cat.paths.map { "  " + $0 }.joined(separator: "\n"))
+            if !cat.patterns.isEmpty {
+                out(tr("  \(cat.patterns.count) file pattern(s), \(cat.owners.count) owner(s)",
+                       "  \(cat.patterns.count) 个文件模式，\(cat.owners.count) 个拥有者"))
+            }
             let prefixes = info.prefixes.filter { $0.categoryID == id }
             if !prefixes.isEmpty {
                 out(language == .zhHans ? "本机监控的前缀：" : "monitored on this machine:")
-                prefixes.forEach { out("  " + $0.path + ($0.viaSymlink ? " (via symlink)" : "")) }
+                prefixes.forEach { out("  " + $0.path + ($0.viaSymlink ? tr(" (via symlink)", "（经由符号链接）") : "")) }
             }
             return
         }
@@ -925,10 +1146,11 @@ func cmdCatalog(_ c: IPCClient) throws {
         for cat in info.catalog.categories {
             let prefixes = info.prefixes.filter { $0.categoryID == cat.id }
             let detected = info.detected[cat.id] == true ? (language == .zhHans ? "已检测到" : "detected") : (language == .zhHans ? "未检测到" : "not detected")
-            rows.append([cat.id, cat.name.resolve(language), cat.severity.rawValue, cat.enabled ? detected : "disabled",
+            rows.append([cat.id, cat.name.resolve(language), cat.severity.rawValue, cat.enabled ? detected : tr("disabled", "已停用"),
                          String(prefixes.count), String(cat.owners.count)])
         }
-        out(Format.table(rows, header: ["ID", language == .zhHans ? "名称" : "NAME", "SEVERITY", "STATE", "PREFIXES", "OWNERS"]))
+        out(Format.table(rows, header: language == .zhHans ? ["编号", "名称", "严重性", "状态", "前缀", "拥有者"]
+                                                           : ["ID", "NAME", "SEVERITY", "STATE", "PREFIXES", "OWNERS"]))
     case "add-path", "remove-path":
         let usage = "\(sub) CATEGORY PATH"
         try expect(4, usage)
@@ -938,33 +1160,27 @@ func cmdCatalog(_ c: IPCClient) throws {
         try edit { cat in
             let i = try index(cat, id)
             if cat.categories[i].kind == .projectRoots {
-                throw CLIError("\(id) takes its folders from the project roots setting: whoread settings set project-root-add PATH")
+                throw CLIError.usage("\(id) takes its folders from the project roots setting: whoread settings set project-root-add PATH")
             }
             if sub == "remove-path" {
                 guard cat.categories[i].paths.contains(path) else { throw CLIError("\(id) has no path \(path)") }
                 cat.categories[i].paths.removeAll { $0 == path }
-                return "removed \(path) from \(id)"
+                return tr("removed \(path) from \(id)", "已从 \(id) 移除 \(path)")
             }
             guard !cat.categories[i].paths.contains(path) else { throw CLIError("\(id) already has \(path)") }
             cat.categories[i].paths.append(path)
-            return "added \(path) to \(id)" + (cat.categories[i].enabled ? "" : " (category is disabled: whoread catalog enable \(id))")
+            return tr("added \(path) to \(id)", "已把 \(path) 加入 \(id)")
+                + (cat.categories[i].enabled ? "" : tr(" (category is disabled: whoread catalog enable \(id))", "（类别已停用：whoread catalog enable \(id)）"))
         }
     case "add-category":
-        let usage = "add-category ID NAME_EN NAME_ZH medium|high|critical [--path PATH]..."
-        try expect(6, usage)
-        let id = try arg(2, usage), en = try arg(3, usage), zh = try arg(4, usage)
-        let severity = try severityArg(try arg(5, usage))
-        guard id.range(of: "^[a-z0-9][a-z0-9-]*$", options: .regularExpression) != nil else {
-            throw CLIError("category id: lowercase letters, digits and -")
-        }
-        guard !en.trimmingCharacters(in: .whitespaces).isEmpty else { throw CLIError("NAME_EN must not be empty") }
-        let homes = try info().homeDirectories
-        let paths = try args.all("path").map { try catalogPath($0, homes: homes) }
+        let spec = try newCategory(homes: try info().homeDirectories)
+        let id = spec.id, paths = spec.paths
         try edit { cat in
             guard cat.category(id) == nil else { throw CLIError("category \(id) already exists") }
-            cat.categories.append(CategorySpec(id: id, name: LocalizedText(en: en, zhHans: zh), kind: .custom, group: "custom",
-                                               severity: severity, paths: paths))
-            return "added category \(id)" + (paths.isEmpty ? " (no paths yet: whoread catalog add-path \(id) PATH)" : " with \(paths.count) path(s)")
+            cat.categories.append(spec)
+            return tr("added category \(id)", "已添加类别 \(id)")
+                + (paths.isEmpty ? tr(" (no paths yet: whoread catalog add-path \(id) PATH)", "（还没有路径：whoread catalog add-path \(id) PATH）")
+                                 : tr(" with \(paths.count) path(s)", "，含 \(paths.count) 个路径"))
         }
     case "remove-category":
         try expect(3, "remove-category ID")
@@ -973,7 +1189,7 @@ func cmdCatalog(_ c: IPCClient) throws {
             let i = try index(cat, id)
             guard cat.categories[i].kind == .custom else { throw CLIError("\(id) is built in: turn it off with whoread catalog disable \(id)") }
             cat.categories.remove(at: i)
-            return "removed category \(id)"
+            return tr("removed category \(id)", "已删除类别 \(id)")
         }
     case "set-severity":
         let usage = "set-severity ID medium|high|critical"
@@ -983,7 +1199,7 @@ func cmdCatalog(_ c: IPCClient) throws {
         try edit { cat in
             let i = try index(cat, id)
             cat.categories[i].severity = severity
-            return "\(id): severity \(severity.rawValue)"
+            return tr("\(id): severity \(severity.rawValue)", "\(id)：严重性 \(severity.rawValue)")
         }
     case "enable", "disable":
         try expect(3, "\(sub) ID")
@@ -991,7 +1207,7 @@ func cmdCatalog(_ c: IPCClient) throws {
         try edit { cat in
             let i = try index(cat, id)
             cat.categories[i].enabled = sub == "enable"
-            return "\(id): \(sub)d"
+            return "\(id)" + tr(": \(sub)d", sub == "enable" ? "：已启用" : "：已停用")
         }
     case "export":
         let data = try c.catalog().catalog.encoded() + Data("\n".utf8)
@@ -1007,9 +1223,12 @@ func cmdCatalog(_ c: IPCClient) throws {
                 writer.abandon()
                 throw error
             }
-            FileHandle.standardError.write(Data("catalog written to \(path)\n".utf8))
+            note(tr("catalog written to \(path)", "catalog 已写入 \(path)"))
         } else {
-            FileHandle.standardOutput.write(data)
+            // Hidden characters (a bidi override in a path a rule added, say) as \u escapes, like
+            // --json: inert on a terminal, and the same catalog decodes from it (it imports again).
+            // A closed or broken standard output is an error, not an abort.
+            try FileHandle.standardOutput.write(contentsOf: Data(Format.terminalSafeJSON(String(decoding: data, as: UTF8.self)).utf8))
         }
     case "import":
         try expect(3, "import FILE")
@@ -1030,26 +1249,82 @@ func cmdCatalog(_ c: IPCClient) throws {
             for p in cat.paths where !current.contains(p) { _ = try catalogPath(p, homes: homes) }
         }
         _ = try c.call(.updateCatalog(catalog))
-        out("catalog imported: \(catalog.categories.count) categories")
+        out(tr("catalog imported: \(catalog.categories.count) categories", "catalog 已导入：\(catalog.categories.count) 个类别"))
     case "resolve-owners":
         #if os(macOS)
         let info = try c.catalog()
         let (resolved, report) = OwnerResolver.resolve(catalog: info.catalog, reader: CodesignCommandReader(),
                                                        exists: { FileManager.default.fileExists(atPath: $0) })
         _ = resolved
-        report.resolved.forEach { out("  resolved \($0)") }
-        out("\(report.resolved.count) resolved, \(report.missing.count) not installed, \(report.skippedGlobs) glob patterns left as is")
+        report.resolved.forEach { out(tr("  resolved ", "  已解析 ") + $0) }
+        out(tr("\(report.resolved.count) resolved, \(report.missing.count) not installed, \(report.skippedGlobs) glob patterns left as is",
+               "已解析 \(report.resolved.count) 个，\(report.missing.count) 个未安装，\(report.skippedGlobs) 个通配模式保持不变"))
         // Writing these into catalog.json would freeze the owners against later default updates; the
         // daemon resolves them in memory at every start and after catalog changes instead.
-        out("Nothing was written: the daemon applies these identities in memory at start.")
+        out(tr("Nothing was written: the daemon applies these identities in memory at start.",
+               "没有写入任何内容：daemon 每次启动时在内存中应用这些身份。"))
         #else
         throw CLIError("resolve-owners runs codesign and needs macOS")
         #endif
     case "reset":
         _ = try c.call(.resetCatalog)
-        out("catalog reset to defaults")
+        out(tr("catalog reset to defaults", "catalog 已恢复为默认"))
     case let other:
-        throw CLIError("unknown: catalog \(other)")
+        throw CLIError.usage("unknown: catalog \(other)")
+    }
+}
+
+/// `settings set KEY VALUE` as a change to the daemon's settings, checked before anything is sent: an
+/// unknown key or a value that does not parse is a usage error.
+enum SettingChange {
+    case apply((inout Settings) -> Void)
+    /// Absolute or `~/…`, checked (`projectRoot`); the daemon's homes are checked once it answers.
+    case addProjectRoot(String)
+    /// As typed, and made absolute when it is relative.
+    case removeProjectRoot(typed: String, absolute: String?)
+}
+
+func settingChange(_ key: String, _ value: String) throws -> SettingChange {
+    func bool() throws -> Bool {
+        switch value {
+        case "on", "true", "yes", "1": return true
+        case "off", "false", "no", "0": return false
+        default: throw CLIError.usage("\(key): expected on or off, not \"\(value)\"")
+        }
+    }
+    func number() throws -> Double {
+        guard let d = Double(value), d.isFinite else { throw CLIError.usage("\(key): expected a number, not \"\(value)\"") }
+        return d
+    }
+    func integer() throws -> Int {
+        guard let n = Int(value) else { throw CLIError.usage("\(key): expected a whole number, not \"\(value)\"") }
+        return n
+    }
+    switch key {
+    case "learning-days": let d = try number(); return .apply { $0.learningDays = d }
+    case "retention-days": let n = try integer(); return .apply { $0.retentionDays = n }
+    case "detail-days": let n = try integer(); return .apply { $0.detailDays = n }
+    case "coalesce-minutes": let d = try number(); return .apply { $0.coalesceMinutes = d }
+    case "readdir": let b = try bool(); return .apply { $0.readdirEnabled = b }
+    case "project-root-add": return .addProjectRoot(try projectRoot(value))
+    case "project-root-remove": return .removeProjectRoot(typed: value, absolute: fromCurrentFolder(value.trimmingCharacters(in: .whitespaces)))
+    case "notifications": let b = try bool(); return .apply { $0.notifications.enabled = b }
+    case "min-severity":
+        guard let sev = Severity(rawValue: value) else { throw CLIError.usage("min-severity: medium|high|critical") }
+        return .apply { $0.notifications.minimumSeverity = sev }
+    case "latency-p99-ms": let d = try number(); return .apply { $0.latencyP99ThresholdMs = d }
+    case "trust-apple": let b = try bool(); return .apply { $0.trustApplePrograms = b }
+    case "language":
+        // zh* means Simplified Chinese, as with --lang; an unknown value is an error, not "system".
+        switch value.lowercased() {
+        case "system": return .apply { $0.language = nil }
+        case "en": return .apply { $0.language = .en }
+        case let v where v.hasPrefix("zh"): return .apply { $0.language = .zhHans }
+        default: throw CLIError.usage("language: en|zh-Hans|system")
+        }
+    default:
+        throw CLIError.usage("unknown setting \(key) (keys: retention-days detail-days coalesce-minutes readdir project-root-add "
+                             + "project-root-remove notifications min-severity latency-p99-ms language trust-apple)")
     }
 }
 
@@ -1059,44 +1334,28 @@ func cmdSettings(_ c: IPCClient) throws {
         return outJSON(try Format.json(s))
     }
     // Exactly one VALUE: the tail of an unquoted path with a space must not be dropped.
-    guard args.positional.count == 4 else { throw CLIError("settings set KEY VALUE (quote a VALUE that has spaces)") }
-    let key = args.positional[2]
-    let value = args.positional[3]
-    func bool(_ v: String) throws -> Bool {
-        switch v { case "on", "true", "yes", "1": return true; case "off", "false", "no", "0": return false
-        default: throw CLIError("expected on/off") }
-    }
-    func number(_ v: String) throws -> Double {
-        guard let d = Double(v), d.isFinite else { throw CLIError("expected a number") }
-        return d
-    }
-    func integer(_ v: String) throws -> Int {
-        guard let n = Int(v) else { throw CLIError("expected a whole number") }
-        return n
-    }
-    switch key {
-    case "learning-days": s.learningDays = try number(value)
-    case "retention-days": s.retentionDays = try integer(value)
-    case "detail-days": s.detailDays = try integer(value)
-    case "coalesce-minutes": s.coalesceMinutes = try number(value)
-    case "readdir": s.readdirEnabled = try bool(value)
-    case "project-root-add": s.projectRoots.append(value)
-    case "project-root-remove": s.projectRoots.removeAll { $0 == value }
-    case "notifications": s.notifications.enabled = try bool(value)
-    case "min-severity":
-        guard let sev = Severity(rawValue: value) else { throw CLIError("medium|high|critical") }
-        s.notifications.minimumSeverity = sev
-    case "latency-p99-ms": s.latencyP99ThresholdMs = try number(value)
-    case "trust-apple": s.trustApplePrograms = try bool(value)
-    case "language":
-        // zh* means Simplified Chinese, as with --lang; an unknown value is an error, not "system".
-        switch value.lowercased() {
-        case "system": s.language = nil
-        case "en": s.language = .en
-        case let v where v.hasPrefix("zh"): s.language = .zhHans
-        default: throw CLIError("language: en|zh-Hans|system")
+    guard args.positional.count == 4 else { throw CLIError.usage("settings set KEY VALUE (quote a VALUE that has spaces)") }
+    switch try settingChange(args.positional[2], args.positional[3]) {
+    case .apply(let change):
+        change(&s)
+    case .addProjectRoot(let root):
+        // A home, or a folder holding one, however spelled: refused like a catalog path.
+        _ = try catalogPath(root, homes: try c.catalog().homeDirectories)
+        if let same = s.projectRoots.first(where: { projectRootKey($0) == projectRootKey(root) }) {
+            note(tr("\(root) is already a project root (\(same))", "\(root) 已经是项目根目录（\(same)）"))
+            return outJSON(try Format.json(s))
         }
-    default: throw CLIError("unknown setting \(key)")
+        s.projectRoots.append(root)
+    case .removeProjectRoot(let typed, let absolute):
+        // The spelling stored (an entry that never worked, such as ".", can still be removed), or
+        // the same folder spelled another way (a trailing /, case, relative to the current folder).
+        let keys = Set([typed, absolute].compactMap { $0 }.map(projectRootKey))
+        let kept = s.projectRoots.filter { $0 != typed && !keys.contains(projectRootKey($0)) }
+        guard kept.count < s.projectRoots.count else {
+            let list = s.projectRoots.isEmpty ? tr("none", "无") : s.projectRoots.joined(separator: ", ")
+            throw CLIError(tr("no project root \(typed) (project roots: \(list))", "没有项目根目录 \(typed)（项目根目录：\(list)）"))
+        }
+        s.projectRoots = kept
     }
     _ = try c.call(.updateSettings(s))
     outJSON(try Format.json(try c.settings()))
@@ -1105,37 +1364,76 @@ func cmdSettings(_ c: IPCClient) throws {
 func cmdBaseline(_ c: IPCClient) throws {
     if args.positional.dropFirst().first == "restart-learning" {
         _ = try c.call(.restartLearning)
-        return out("learning restarted")
+        return out(tr("learning restarted", "学习已重新开始"))
     }
     guard case .baseline(let entries) = try c.call(.baseline) else { return }
     if args.json { return outJSON(try Format.json(entries)) }
     out(Format.table(entries.map { [$0.key.responsibleKey, $0.key.categoryID, $0.key.access.rawValue, $0.source.rawValue, String($0.count), Format.time($0.lastSeen)] },
-                     header: ["RESPONSIBLE", "CATEGORY", "ACCESS", "SOURCE", "COUNT", "LAST"]))
-    if entries.count >= Baseline.replyLimit { note("note: the daemon sends the \(Baseline.replyLimit) most recently seen entries") }
+                     header: language == .zhHans ? ["应用", "类别", "访问", "来源", "次数", "最近"]
+                                                 : ["RESPONSIBLE", "CATEGORY", "ACCESS", "SOURCE", "COUNT", "LAST"]))
+    if entries.count >= Baseline.replyLimit {
+        note(tr("note: the daemon sends the \(Baseline.replyLimit) most recently seen entries",
+                "注意：daemon 只发送最近见到的 \(Baseline.replyLimit) 条"))
+    }
+}
+
+/// `whoread kill-switch [engage|release|status]`, checked (also before anything is changed).
+func killSwitchWord() throws -> String {
+    let word = args.positional.dropFirst().first ?? "status"
+    guard ["engage", "release", "status"].contains(word) else {
+        throw CLIError.usage("unknown: kill-switch \(word)\nusage: whoread kill-switch engage|release|status [--path P]")
+    }
+    return word
+}
+
+/// The errno behind a failed file operation, if there is one.
+func posixCode(_ error: Error) -> Int32? {
+    if let f = error as? SafeFile.Failure { return f.errno == 0 ? nil : f.errno }
+    let ns = error as NSError
+    if ns.domain == NSPOSIXErrorDomain { return Int32(ns.code) }
+    if let u = ns.userInfo[NSUnderlyingErrorKey] as? NSError, u.domain == NSPOSIXErrorDomain { return Int32(u.code) }
+    if ns.domain == NSCocoaErrorDomain && [NSFileWriteNoPermissionError, NSFileReadNoPermissionError].contains(ns.code) { return EACCES }
+    return nil
+}
+
+/// The kill switch could not be created or removed: "run with sudo" (77) only when permission is
+/// what failed; anything else (a missing folder, say) is reported as the system put it.
+func killSwitchFailure(_ what: String, _ error: Error) -> CLIError {
+    let code = posixCode(error)
+    guard code == EACCES || code == EPERM else { return CLIError("\(what): \(error)") }
+    return CLIError(tr("\(what) (run with sudo): \(error)", "\(what)（请用 sudo 运行）：\(error)"), exitCode: 77)
 }
 
 func cmdKillSwitch() throws {
     let path = args.value("path") ?? WhoReadPaths.killSwitchFile
-    switch args.positional.dropFirst().first ?? "status" {
+    switch try killSwitchWord() {
     case "engage":
         do { try SafeFile.replace(path, with: Data("disabled by whoread kill-switch\n".utf8), mode: 0o644) } catch {
-            throw CLIError("cannot create \(path) (run with sudo): \(error)", exitCode: 77)
+            throw killSwitchFailure(tr("cannot create \(path)", "无法创建 \(path)"), error)
         }
-        out("kill switch ENGAGED: \(path) exists; enforcement is off within ~0.2 s")
+        out(tr("kill switch ENGAGED: \(path) exists; enforcement is off within ~0.2 s", "kill switch 已启用：\(path) 已存在；拦截会在约 0.2 秒内关闭"))
     case "release":
         if FileManager.default.fileExists(atPath: path) {
-            do { try FileManager.default.removeItem(atPath: path) } catch { throw CLIError("cannot remove \(path) (run with sudo)", exitCode: 77) }
+            do { try FileManager.default.removeItem(atPath: path) } catch {
+                throw killSwitchFailure(tr("cannot remove \(path)", "无法删除 \(path)"), error)
+            }
         }
-        out("kill switch released")
-    case "status":
-        out(FileManager.default.fileExists(atPath: path) ? "kill switch ENGAGED (\(path))" : "kill switch not engaged")
-    case let other:
-        throw CLIError("unknown: kill-switch \(other)")
+        out(tr("kill switch released", "kill switch 已解除"))
+    default:
+        out(FileManager.default.fileExists(atPath: path) ? tr("kill switch ENGAGED (\(path))", "kill switch 已启用（\(path)）")
+                                                         : tr("kill switch not engaged", "kill switch 未启用"))
     }
 }
 
+/// `replay`'s `--learning-days N` (left out of the help), checked.
+func replayLearningDays() throws -> Double? {
+    guard let d = args.value("learning-days") else { return nil }
+    guard let days = Double(d), days.isFinite, days >= 0 else { throw CLIError.usage("--learning-days: a number of days, 0 or more (not \"\(d)\")") }
+    return days
+}
+
 func cmdReplay() throws {
-    guard args.positional.count >= 2 else { throw CLIError("whoread replay FILE.jsonl") }
+    guard args.positional.count == 2 else { throw CLIError.usage("usage: whoread replay FILE.jsonl [--home DIR]... [--defaults DIR] [--all] [--json]") }
     if !args.has("verbose") { Log.minimum = .warning }
     var config = DaemonConfiguration()
     config.source = .replay
@@ -1146,7 +1444,7 @@ func cmdReplay() throws {
     let homes = args.all("home")
     config.homeDirectories = homes.isEmpty ? nil : homes
     let core = try DaemonCore(config: config)
-    if let d = args.value("learning-days"), let days = Double(d) {
+    if let days = try replayLearningDays() {
         var s = core.currentSettings
         s.learningDays = days
         try core.update(settings: s, peer: .inProcess)
@@ -1156,7 +1454,8 @@ func cmdReplay() throws {
     core.writer.flush()
     let client = InProcessClient(handler: Daemon.handlerForReplay(core))
     let events = try client.events(EventQuery(includeBenign: args.has("all"), limit: 1_000_000, newestFirst: false))
-    let alerts = try client.alerts(AlertQuery())
+    // Every alert: the in-memory store has no cap of its own, and the count below is the total.
+    let alerts = try client.alerts(AlertQuery(limit: Int.max))
     if args.json {
         struct Result: Encodable { var events: [AnalyzedEvent]; var alerts: [Alert]; var parser: EsloggerParser.Stats? }
         return outJSON(try Format.json(Result(events: events, alerts: alerts, parser: replay.parserStats)))
@@ -1171,31 +1470,190 @@ func cmdReplay() throws {
     }
 }
 
+/// `fixture sanitize …`, checked (also before anything is read or written).
+struct FixtureArgs {
+    var input: String
+    var output: String
+    var home: String
+    var vault: String?
+    var sample: Int
+    var capturePID: Int32?
+}
+
+func fixtureArgs() throws -> FixtureArgs {
+    guard args.positional.count == 2, args.positional[1] == "sanitize", let input = args.value("input"), let output = args.value("output") else {
+        throw CLIError.usage("usage: whoread fixture sanitize --input RAW.jsonl|/dev/stdin --output OUT.jsonl [--home DIR] [--vault DIR] [--capture-pid PID] [--sample N]")
+    }
+    var sample = 40
+    if let n = args.value("sample") {
+        guard let v = Int(n), v >= 0 else { throw CLIError.usage("--sample: a whole number, 0 or more (not \"\(n)\")") }
+        sample = v
+    }
+    var pid: Int32?
+    if let p = args.value("capture-pid") {
+        guard let v = Int32(p), v > 1 else { throw CLIError.usage("--capture-pid: not a pid: \(p)") }
+        pid = v
+    }
+    return FixtureArgs(input: input, output: output, home: args.value("home") ?? NSHomeDirectory(), vault: args.value("vault"),
+                       sample: sample, capturePID: pid)
+}
+
 func cmdFixture() throws {
-    guard args.positional.dropFirst().first == "sanitize", let input = args.value("input"), let output = args.value("output") else {
-        throw CLIError("whoread fixture sanitize --input RAW.jsonl|/dev/stdin --output OUT.jsonl [--home DIR] [--vault DIR] [--capture-pid PID] [--sample N]")
-    }
-    let home = args.value("home") ?? NSHomeDirectory()
+    let a = try fixtureArgs()
     // A file or a pipe (capture-fixture.sh streams the root-only raw capture through `sudo cat`).
-    guard let handle = FileHandle(forReadingAtPath: input) else { throw CLIError("cannot read \(input)") }
+    guard let handle = FileHandle(forReadingAtPath: a.input) else { throw CLIError("cannot read \(a.input)") }
     let data = try handle.readToEnd() ?? Data()
-    var sanitizer = FixtureSanitizer(home: home, vault: args.value("vault"), samplePerKind: Int(args.value("sample") ?? "40") ?? 40)
-    if let pid = args.value("capture-pid") {
-        guard let p = Int32(pid), p > 1 else { throw CLIError("--capture-pid: not a pid: \(pid)") }
-        sanitizer.capturePID = p
-    }
+    var sanitizer = FixtureSanitizer(home: a.home, vault: a.vault, samplePerKind: a.sample)
+    if let pid = a.capturePID { sanitizer.capturePID = pid }
     let (kept, report) = sanitizer.sanitize(data: data)
-    try SafeFile.replace(output, with: Data((kept.joined(separator: "\n") + "\n").utf8), mode: 0o600)
+    try SafeFile.replace(a.output, with: Data((kept.joined(separator: "\n") + "\n").utf8), mode: 0o600)
     out("kept \(report.kept) of \(report.inputLines) lines: \(report.vaultEvents) vault events, \(report.lifecycle) lifecycle, \(report.samples) samples; by kind \(report.byKind); dropped \(report.foreignVaultEvents) vault events of other programs, \(report.undecodableLines) lines not UTF-8")
+}
+
+// MARK: - Arguments
+
+/// What `events`, `daily` and `export` filter by.
+let eventFilterValues: Set<String> = ["since", "until", "category", "app", "search", "agent", "limit"]
+let eventFilterSwitches: Set<String> = ["agents-only", "all", "denied"]
+
+/// What `whoread COMMAND …` takes, as typed (the subcommand decides for rules, catalog, settings,
+/// baseline). Built from the names each command's code reads; a few are left out of the help on
+/// purpose (`learning-days`, `verbose`, `baseline restart-learning`).
+func commandSpec(_ command: String) throws -> CommandSpec {
+    let sub = args.positional.dropFirst().first
+    func spec(_ usage: String, _ positionals: ClosedRange<Int> = 1...1, switches: Set<String> = [], values: Set<String> = [],
+              repeatable: Set<String> = []) -> CommandSpec {
+        CommandSpec(name: command + (positionals.lowerBound > 1 ? " " + (sub ?? "") : ""), usage: usage, positionals: positionals,
+                    switches: switches, values: values, repeatable: repeatable)
+    }
+    let filters = "[--since …] [--until …] [--category ID]... [--app TEXT] [--agent ID] [--agents-only] [--denied] [--all] [--limit N]"
+    switch command {
+    case "status", "asks", "read-all", "pause", "resume", "agents", "version": return spec(command)
+    case "help": return spec("help", 1...2)
+    case "events":
+        return spec("events " + filters + " [--search TEXT]", switches: eventFilterSwitches, values: eventFilterValues, repeatable: ["category"])
+    case "tail": return spec("tail [--all]", switches: ["all"])
+    case "alerts": return spec("alerts [--unread] [--since …] [--limit N]", switches: ["unread"], values: ["since", "limit"])
+    case "alert": return spec("alert <id> <" + alertActionWords.map(\.word).joined(separator: "|") + ">", 3...3)
+    case "ask": return spec("ask <id> allow-once|allow|deny|block|trust-apple", 3...3)
+    case "apps": return spec("apps [--since …] [--all]", switches: ["all"], values: ["since"])
+    case "files": return spec("files [--all]", switches: ["all"])
+    case "daily":
+        // A day's row names the app only: no program name or path to --search.
+        return spec("daily " + filters, switches: eventFilterSwitches, values: eventFilterValues.subtracting(["search"]), repeatable: ["category"])
+    case "export":
+        if args.has("aggregates") {
+            return spec("export --aggregates --format json|jsonl|csv [--output FILE] " + filters, switches: eventFilterSwitches.union(["aggregates"]),
+                        values: eventFilterValues.subtracting(["search"]).union(["format", "output", "o"]), repeatable: ["category"])
+        }
+        return spec("export --format json|jsonl|csv [--output FILE] " + filters + " [--search TEXT]",
+                    switches: eventFilterSwitches.union(["aggregates"]), values: eventFilterValues.union(["format", "output", "o"]),
+                    repeatable: ["category"])
+    case "enforcement": return spec("enforcement on|off|status", 1...2)
+    case "rules":
+        switch sub ?? "list" {
+        case "list": return spec("rules [list]", 1...2)
+        case "templates": return spec("rules templates", 2...2)
+        case "add": return spec("rules add --json-file RULE.json", 2...2, values: ["json-file"])
+        case "replace": return spec("rules replace --json-file RULES.json --confirm", 2...2, switches: ["confirm"], values: ["json-file"])
+        case "enable", "disable", "enforce", "dry-run", "delete": return spec("rules \(sub ?? "") ID", 3...3)
+        case let other:
+            throw CLIError.usage("unknown: rules \(other)\nusage: whoread rules [list|templates|add|replace|enable|disable|enforce|dry-run|delete] …")
+        }
+    case "catalog":
+        switch sub ?? "show" {
+        case "show": return spec("catalog [show [ID]]", 1...3)
+        case "export": return spec("catalog export [--output FILE]", 2...2, values: ["output", "o"])
+        case "resolve-owners": return spec("catalog resolve-owners", 2...2)
+        case "add-path", "remove-path": return spec("catalog \(sub ?? "") CATEGORY PATH", 4...4)
+        case "add-category":
+            return spec("catalog add-category ID NAME_EN NAME_ZH medium|high|critical [--path PATH]...", 6...6, values: ["path"], repeatable: ["path"])
+        case "remove-category", "enable", "disable": return spec("catalog \(sub ?? "") ID", 3...3)
+        case "set-severity": return spec("catalog set-severity ID medium|high|critical", 4...4)
+        case "import": return spec("catalog import FILE", 3...3)
+        case "reset": return spec("catalog reset", 2...2)
+        case let other:
+            throw CLIError.usage("unknown: catalog \(other)\nusage: whoread catalog [show [ID]|export|resolve-owners|add-path|remove-path|"
+                                 + "add-category|remove-category|set-severity|enable|disable|import|reset] …")
+        }
+    case "settings":
+        switch sub ?? "show" {
+        case "show": return spec("settings [show]", 1...2)
+        case "set": return spec("settings set KEY VALUE (quote a VALUE that has spaces)", 4...4)
+        case let other: throw CLIError.usage("unknown: settings \(other)\nusage: whoread settings [show | set KEY VALUE]")
+        }
+    case "baseline":
+        switch sub {
+        case nil: return spec("baseline")
+        case "restart-learning"?: return spec("baseline restart-learning", 2...2)
+        case let other?: throw CLIError.usage("unknown: baseline \(other)\nusage: whoread baseline")
+        }
+    case "kill-switch": return spec("kill-switch engage|release|status [--path P]", 1...2, values: ["path"])
+    case "replay":
+        return spec("replay FILE [--home DIR]... [--defaults DIR] [--all] [--json]", 2...2, switches: ["all", "verbose"],
+                    values: ["home", "defaults", "learning-days"], repeatable: ["home"])
+    case "fixture":
+        return spec("fixture sanitize --input RAW|/dev/stdin --output OUT [--home DIR] [--vault DIR] [--capture-pid PID] [--sample N]", 2...2,
+                    values: ["input", "output", "home", "vault", "sample", "capture-pid"])
+    default:
+        throw CLIError.usage("unknown command \(command)\n\n\(usage)")
+    }
+}
+
+/// Values that must parse before anything is sent or changed (the same functions the commands use).
+func checkValues(_ command: String) throws {
+    let p = args.positional
+    switch command {
+    case "events", "daily": _ = try eventQuery()
+    case "export":
+        _ = try eventQuery()
+        _ = try exportFormat()
+    case "alerts": _ = try alertQuery()
+    case "apps": _ = try args.value("since").map { try Format.parseSince($0) }
+    case "alert": _ = try alertArgs()
+    case "ask": _ = try askArgs()
+    case "enforcement": _ = try enforcementWord()
+    case "rules" where p.count > 1 && (p[1] == "add" || p[1] == "replace"): _ = try rulesFileArg()
+    case "catalog" where p.count > 1:
+        switch p[1] {
+        case "add-path": _ = try catalogPath(p[3], homes: [])
+        case "add-category": _ = try newCategory(homes: [])
+        case "set-severity": _ = try severityArg(p[3])
+        default: break
+        }
+    case "settings" where p.count == 4: _ = try settingChange(p[2], p[3])
+    case "kill-switch": _ = try killSwitchWord()
+    case "replay": _ = try replayLearningDays()
+    case "fixture": _ = try fixtureArgs()
+    default: break
+    }
+}
+
+/// Everything about the arguments that can be checked without the daemon, before connecting or
+/// changing anything. A usage error (64) is reported as such, never hidden behind "cannot reach
+/// the daemon", and a mistyped filter is never silently dropped.
+func checkArguments(_ command: String) throws {
+    do {
+        try args.check(try commandSpec(command))
+        try checkValues(command)
+    } catch var e as CLIError {
+        e.exitCode = 64
+        throw e
+    }
 }
 
 // MARK: - Dispatch
 
 do {
-    guard let command = args.positional.first, !args.has("help"), !args.has("h") else {
+    if args.has("help") || args.has("h") {
         out(usage)
-        exit(args.positional.isEmpty && !args.has("help") ? 64 : 0)
+        exit(0)
     }
+    guard let command = args.positional.first else {
+        out(usage)
+        exit(64)
+    }
+    try checkArguments(command)
     switch command {
     case "version": out("whoread \(WhoReadVersion.string)")
     case "kill-switch": try cmdKillSwitch()
@@ -1206,11 +1664,11 @@ do {
         let commands: [String: (IPCClient) throws -> Void] = [
             "status": cmdStatus, "events": cmdEvents, "tail": cmdTail, "alerts": cmdAlerts, "alert": cmdAlertAction,
             "asks": cmdAsks, "ask": cmdAsk,
-            "read-all": { c in _ = try c.call(.markAlertsRead(ids: nil)); out("all alerts marked read") },
+            "read-all": { c in _ = try c.call(.markAlertsRead(ids: nil)); out(tr("all alerts marked read", "所有告警已标为已读")) },
             "apps": cmdApps, "files": cmdFiles, "agents": cmdAgents, "daily": cmdDaily, "export": cmdExport,
             "enforcement": cmdEnforcement,
-            "pause": { c in _ = try c.call(.setPaused(true)); out("monitoring paused") },
-            "resume": { c in _ = try c.call(.setPaused(false)); out("monitoring resumed") },
+            "pause": { c in _ = try c.call(.setPaused(true)); out(tr("monitoring paused", "监控已暂停")) },
+            "resume": { c in _ = try c.call(.setPaused(false)); out(tr("monitoring resumed", "监控已恢复")) },
             "rules": cmdRules, "catalog": cmdCatalog, "settings": cmdSettings, "baseline": cmdBaseline,
         ]
         guard let run = commands[command] else { throw CLIError("unknown command \(command)\n\n\(usage)", exitCode: 64) }
