@@ -320,3 +320,170 @@ final class BoundedArgvTests: XCTestCase {
         XCTAssertEqual(ProcessTree.boundedArgv([]), [])
     }
 }
+
+// MARK: - attribution-3
+
+/// A liveness probe for tests: which process instances run, and what was asked.
+private final class FakeLiveness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var running: [Int32: Date] = [:]
+    private var unknown: Set<Int32> = []
+    private(set) var asked: [Int32] = []
+
+    func run(_ p: ProcessRecord) { lock.lock(); running[p.pid] = p.startTime; lock.unlock() }
+    func cannotTell(_ pid: Int32) { lock.lock(); unknown.insert(pid); lock.unlock() }
+    func takeAsked() -> [Int32] { lock.lock(); defer { asked = []; lock.unlock() }; return asked }
+
+    var probe: ProcessTree.LivenessProbe {
+        { [self] pid, start in
+            lock.lock(); defer { lock.unlock() }
+            asked.append(pid)
+            if unknown.contains(pid) { return nil }
+            guard let s = running[pid] else { return false }
+            return abs(s.timeIntervalSince(start)) <= ProcessTree.startTimeTolerance
+        }
+    }
+}
+
+final class MissedExitTests: XCTestCase {
+    var detector: AgentDetector!
+
+    override func setUpWithError() throws {
+        detector = AgentDetector(catalog: try defaultData().agents)
+    }
+
+    func names(_ chain: [ProcessNode]) -> [String] { chain.map(\.image.name) }
+
+    /// A pid has one live instance at a time: a later instance means the earlier one exited, though its
+    /// exit event was lost. An agent that goes so changes what is saved across restarts.
+    func testANewInstanceOfAPidRetiresTheEarlierOne() {
+        let tree = ProcessTree(detector: detector)
+        let claude = proc(700, node, ppid: 1, start: 0, argv: ["node", "/opt/homebrew/bin/claude"])
+        tree.observe(claude, at: at(0))
+        XCTAssertEqual(tree.liveCount, 2, "Claude Code and launchd")
+        XCTAssertEqual(tree.agentAncestry().map(\.pid), [700])
+        let generation = tree.agentAncestryGeneration
+        // Its exit was dropped; the pid is reused.
+        tree.observe(proc(700, "/bin/sh", ppid: 1, start: 50, platform: true), at: at(50))
+        XCTAssertEqual(tree.count, 3)
+        XCTAssertEqual(tree.liveCount, 2, "the new sh and launchd")
+        XCTAssertEqual(tree.agentAncestry(), [])
+        XCTAssertNotEqual(tree.agentAncestryGeneration, generation, "what is saved across restarts changed")
+        // A late event from a child the old instance forked still finds it (a tombstone now).
+        let child = proc(701, "/bin/cat", ppid: 700, start: 10, platform: true)
+        let chain = tree.chain(for: child, at: at(51))
+        XCTAssertEqual(names(chain), ["cat", "node", "launchd"])
+        XCTAssertEqual(chain.nearestAgent, "claude-code")
+        // A record within the start time tolerance is the same instance, not a new one.
+        var same = proc(700, "/bin/sh", ppid: 1, start: 50.001, platform: true)
+        same.pidVersion = 7000
+        tree.observe(same, at: at(52))
+        XCTAssertEqual(tree.liveCount, 3, "sh, cat and launchd")
+    }
+
+    /// Maintenance (prune) checks live nodes not seen for a while against libproc, injected here: one
+    /// whose process is gone, or whose pid another process holds now, missed its exit and becomes a
+    /// tombstone. At most `livenessChecksPerPass` per pass; a node it confirms is not asked again soon.
+    func testMaintenanceRetiresLiveNodesWhoseProcessIsGone() {
+        let tree = ProcessTree(detector: detector, tombstoneTTL: 600)
+        let live = FakeLiveness()
+        tree.livenessProbe = live.probe
+        tree.livenessChecksPerPass = 100
+        let zsh = proc(500, "/bin/zsh", ppid: 1, start: 0, platform: true)
+        tree.observe(zsh, at: at(0))
+        live.run(zsh)
+        for i in 0..<1000 {
+            let p = proc(Int32(1000 + i), "/usr/bin/true", ppid: 500, start: 1 + Double(i) * 0.001, platform: true)
+            tree.fork(parent: zsh, child: p, at: at(1 + Double(i) * 0.001))
+        }
+        // pid 1999 now belongs to another process; pid 1998 libproc cannot tell.
+        live.run(proc(1999, "/bin/sh", ppid: 1, start: 400))
+        live.cannotTell(1998)
+        // Seen recently (and zsh, which forked it): not asked.
+        let recent = proc(3000, "/usr/bin/true", ppid: 500, start: 290, platform: true)
+        tree.fork(parent: zsh, child: recent, at: at(290))
+        live.run(recent)
+        XCTAssertEqual(tree.liveCount, 1003)
+
+        tree.prune(now: at(500))
+        let firstPass = live.takeAsked()
+        XCTAssertEqual(firstPass.count, 100, "bounded")
+        XCTAssertEqual(firstPass.first, 1000, "least recently seen first")
+        XCTAssertEqual(tree.liveCount, 1003 - 100)
+        for pass in 1...20 { tree.prune(now: at(500 + Double(pass))) }
+        let later = live.takeAsked()
+        XCTAssertEqual(later.filter { $0 == 1998 }.count, 1, "not asked again in the next minutes")
+        XCTAssertFalse(later.contains(3000))
+        XCTAssertFalse(later.contains(500))
+        XCTAssertEqual(tree.liveCount, 4, "zsh, the process libproc cannot tell about, the recent one, launchd")
+        XCTAssertNil(tree.node(pid: 500)?.exitedAt)
+        XCTAssertNil(tree.node(pid: 1998)?.exitedAt)
+        XCTAssertNotNil(tree.node(pid: 1999)?.exitedAt)
+        // Tombstones go after their TTL like any other.
+        tree.prune(now: at(2000))
+        XCTAssertEqual(tree.count, 4)
+        // Without a probe (tests, replay) nothing is asked.
+        tree.livenessProbe = nil
+        XCTAssertEqual(tree.reconcileLiveness(now: at(5000)), 0)
+    }
+
+    /// The consequence for restarts: ghosts below an agent whose shell exited rank first in the saved
+    /// agent ancestry (their parent is gone, they are the oldest) and crowded out a real orphaned job.
+    func testGhostsDoNotCrowdOutTheAgentAncestryThatIsSaved() {
+        let tree = ProcessTree(detector: detector)
+        let live = FakeLiveness()
+        let claude = proc(600, node, ppid: 1, start: 0, argv: ["node", "/opt/homebrew/bin/claude"])
+        tree.observe(claude, at: at(0))
+        live.run(claude)
+        let bash = proc(601, "/bin/bash", ppid: 600, start: 1, platform: true)
+        tree.fork(parent: claude, child: bash, at: at(1))
+        for i in 0..<300 {
+            tree.fork(parent: bash, child: proc(Int32(2000 + i), "/usr/bin/cc", ppid: 601, start: 2, platform: true), at: at(2))
+        }
+        let job = proc(3000, "/usr/bin/caffeinate", ppid: 601, start: 10, platform: true)
+        tree.fork(parent: bash, child: job, at: at(10))
+        live.run(job)
+        tree.exit(bash, at: at(11))
+        XCTAssertFalse(tree.agentAncestry(limit: 100).contains { $0.pid == 3000 }, "crowded out")
+        tree.livenessProbe = live.probe
+        for pass in 0..<4 { tree.prune(now: at(400 + Double(pass))) }
+        XCTAssertEqual(Set(tree.agentAncestry(limit: 100).map(\.pid)), [600, 3000])
+    }
+
+    /// When no tombstone is left to evict, the node cap evicts the least recently seen live leaves
+    /// (processes that were never an agent first): the tree stays bounded even if every exit is lost.
+    /// A process evicted while it still runs comes back from its next event, below its parent.
+    func testTheNodeCapEvictsLiveLeavesWhenNoTombstoneIsLeft() {
+        let tree = ProcessTree(detector: detector, maxNodes: 100)
+        let zsh = proc(500, "/bin/zsh", ppid: 1, start: 0, platform: true)
+        tree.observe(zsh, at: at(0))
+        let claude = proc(600, node, ppid: 500, start: 0.5, argv: ["node", "/opt/homebrew/bin/claude"])
+        tree.fork(parent: zsh, child: claude, at: at(0.5))
+        for i in 0..<5000 {
+            let p = proc(Int32(1000 + i), "/usr/bin/true", ppid: 500, start: 1 + Double(i) * 0.001, platform: true)
+            tree.fork(parent: zsh, child: p, at: at(1 + Double(i) * 0.001))
+        }
+        XCTAssertEqual(tree.count, 5003)
+        tree.prune(now: at(10_000))
+        XCTAssertLessThanOrEqual(tree.count, 100)
+        XCTAssertNotNil(tree.node(pid: 600), "the agent goes last")
+        XCTAssertNotNil(tree.node(pid: 5999), "the most recently seen stay")
+        XCTAssertNil(tree.node(pid: 1000))
+        let back = proc(1000, "/usr/bin/true", ppid: 500, start: 1, platform: true)
+        XCTAssertEqual(names(tree.chain(for: back, at: at(10_001))), ["true", "zsh", "launchd"])
+
+        // A chain of live processes (each forked the next, every exit lost): leaves go first, then the
+        // processes that became leaves, within one pass.
+        let deep = ProcessTree(detector: detector, maxNodes: 50)
+        var parent = proc(2, "/bin/sh", ppid: 1, start: 0, platform: true)
+        deep.observe(parent, at: at(0))
+        for i in 0..<200 {
+            let child = proc(Int32(10 + i), "/bin/sh", ppid: parent.pid, start: 1 + Double(i) * 0.01, platform: true)
+            deep.fork(parent: parent, child: child, at: at(1 + Double(i) * 0.01))
+            parent = child
+        }
+        deep.prune(now: at(10_000))
+        XCTAssertEqual(deep.count, 50)
+        XCTAssertEqual(deep.chain(nodeID: deep.node(pid: 10 + 47)!.id).count, 50, "the top of the chain is what stays")
+    }
+}

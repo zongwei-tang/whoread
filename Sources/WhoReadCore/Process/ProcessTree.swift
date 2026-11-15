@@ -35,6 +35,8 @@ public struct ProcessNode: Sendable, Hashable {
     var everAgent = false
     /// pidversions this process instance was seen with (each exec gives a new one), latest last.
     var pidVersions: [UInt32] = []
+    /// When the liveness probe last checked this live node (`ProcessTree.reconcileLiveness`).
+    var checkedAt: Date?
 }
 
 /// What lies above a node, so that a chain query costs the same however deep the tree is: a process
@@ -68,7 +70,9 @@ struct Ancestry: Sendable, Hashable {
 ///
 /// Children link to parents by internal node ID, not pid, so chains survive reparenting to
 /// launchd and pid reuse. Exited processes stay as tombstones for `tombstoneTTL` (and while
-/// they still have children) so late file events and descendants still resolve their ancestry.
+/// they still have children) so late file events and descendants still resolve their ancestry. A
+/// process whose exit event was lost becomes one when its pid shows up again with a later start time,
+/// or when maintenance finds it gone (`reconcileLiveness`); the node cap evicts live leaves last.
 /// A parent is the process that forked the child (`originalPPID`); a process whose fork-time parent
 /// is unknown is left unlinked (ancestry unknown), never attached to launchd.
 ///
@@ -100,9 +104,19 @@ public final class ProcessTree: @unchecked Sendable {
     /// the rest (agents, the responsible app, the topmost process) and does not end at launchd.
     public var chainLimit: Int
     public var parentResolver: ParentResolver?
+    /// Whether a process instance (pid and start time) still runs: false when it has exited or its pid is
+    /// held by a process that started at another time, nil when it cannot tell.
+    public typealias LivenessProbe = @Sendable (_ pid: Int32, _ startTime: Date) -> Bool?
+    /// libproc in the daemon (`ProcessSnapshot.isRunning`), for exits the event source lost
+    /// (`reconcileLiveness`). nil (tests, replay): live nodes are only ended by events.
+    public var livenessProbe: LivenessProbe?
+    /// A live node neither seen nor checked for this long is checked.
+    public var livenessCheckAfter: TimeInterval = 300
+    /// Checks per reconcile (each maintenance pass, every 30 s in the daemon).
+    public var livenessChecksPerPass = 256
 
     /// Start times closer than this are considered equal (sources round differently).
-    static let startTimeTolerance: TimeInterval = 0.002
+    public static let startTimeTolerance: TimeInterval = 0.002
     /// Distinct agent ancestors (agent, team) a node records. Bounded by the agent catalog in practice.
     static let maxAgentMarks = 32
 
@@ -213,9 +227,11 @@ public final class ProcessTree: @unchecked Sendable {
         return observeLocked(normalized(process), at: time, depth: 0)
     }
 
-    /// Removes old tombstones. Returns how many nodes were dropped.
+    /// Removes old tombstones. Returns how many nodes were dropped. First, live nodes whose exit was lost
+    /// become tombstones (`reconcileLiveness`); last, the node cap.
     @discardableResult
     public func prune(now: Date) -> Int {
+        reconcileLiveness(now: now)
         lock.lock(); defer { lock.unlock() }
         var removed = 0
         func expired(_ n: ProcessNode) -> Bool {
@@ -256,7 +272,86 @@ public final class ProcessTree: @unchecked Sendable {
                 removed += 1
             }
         }
+        if nodes.count > maxNodes {
+            removed += evictLiveLeaves(nodes.count - maxNodes)
+        }
         return removed
+    }
+
+    /// Exits the event source lost (dropped under load, or while eslogger restarted; a process running as
+    /// the user can cause drops): without them a node stays live for good, and neither the TTL nor the node
+    /// cap would ever remove it. A live node neither seen nor checked for `livenessCheckAfter` is checked
+    /// with `livenessProbe` and becomes a tombstone if its process is gone. At most
+    /// `livenessChecksPerPass` nodes per call, least recently seen first; one that still runs (or that the
+    /// probe cannot tell about) is not checked again before `livenessCheckAfter` has passed. The probe
+    /// (syscalls) runs outside the lock; a node seen again in the meantime is left as it is. Returns how
+    /// many nodes became tombstones. Called by `prune`.
+    @discardableResult
+    public func reconcileLiveness(now: Date) -> Int {
+        lock.lock()
+        guard let probe = livenessProbe, livenessChecksPerPass > 0 else {
+            lock.unlock()
+            return 0
+        }
+        let due = now.addingTimeInterval(-livenessCheckAfter)
+        let limit = livenessChecksPerPass
+        var candidates: [(id: UInt64, pid: Int32, start: Date, known: Date)] = []
+        for n in nodes.values where n.exitedAt == nil && !n.image.isSystemRoot {
+            guard let start = n.image.startTime else { continue }
+            let known = ProcessTree.lastKnown(n)
+            if known < due { candidates.append((n.id, n.image.pid, start, known)) }
+        }
+        lock.unlock()
+        candidates.sort { $0.known < $1.known }
+        if candidates.count > limit { candidates.removeLast(candidates.count - limit) }
+        let answers = candidates.map { probe($0.pid, $0.start) }
+
+        lock.lock(); defer { lock.unlock() }
+        var retired = 0
+        for (c, running) in zip(candidates, answers) {
+            guard var n = nodes[c.id], n.exitedAt == nil, ProcessTree.lastKnown(n) == c.known else { continue }
+            switch running {
+            case false?:
+                n.exitedAt = now
+                retired += 1
+                if ProcessTree.hasAgents(n) { agentGeneration &+= 1 }
+            case true?:
+                if now > n.lastSeen { n.lastSeen = now }
+                n.checkedAt = now
+            case nil:
+                n.checkedAt = now
+            }
+            nodes[c.id] = n
+        }
+        return retired
+    }
+
+    /// When a live node was last seen, or checked by the liveness probe.
+    private static func lastKnown(_ n: ProcessNode) -> Date { max(n.lastSeen, n.checkedAt ?? n.lastSeen) }
+
+    /// The node cap's last resort, when no tombstone is left to evict (exits that were lost and that the
+    /// liveness check has not caught up with yet): the least recently seen live leaves, processes that
+    /// were never an AI agent first, then the processes that became leaves, in the same pass. Fail
+    /// closed: a process evicted while it still runs comes back from its next event or the parent
+    /// resolver with its ancestry looked up again (unknown where its parent is gone too), but without
+    /// an agent identity it held from an earlier image. Returns how many nodes it removed.
+    private func evictLiveLeaves(_ count: Int) -> Int {
+        func evictable(_ n: ProcessNode) -> Bool { n.exitedAt == nil && n.childCount <= 0 && !n.image.isSystemRoot }
+        var left = count
+        var layer = nodes.values.filter(evictable)
+        while left > 0 && !layer.isEmpty {
+            layer.sort { a, b in a.everAgent != b.everAgent ? !a.everAgent : a.lastSeen < b.lastSeen }
+            var next: [ProcessNode] = []
+            for v in layer {
+                if left == 0 { break }
+                guard let current = nodes[v.id], evictable(current) else { continue }
+                remove(v.id)
+                left -= 1
+                if let p = current.parentID, let parent = nodes[p], evictable(parent) { next.append(parent) }
+            }
+            layer = next
+        }
+        return count - left
     }
 
     // MARK: - Queries
@@ -666,12 +761,25 @@ public final class ProcessTree: @unchecked Sendable {
             exitedAt: nil, lastSeen: time, childCount: 0, fromSnapshot: fromSnapshot, ancestry: Ancestry(),
             everAgent: agentID != nil, pidVersions: p.pidVersion.map { [$0] } ?? [])
         guard indexed else { return id }
+        if let start = p.startTime { retireInstances(of: p.pid, startedBefore: start, at: time) }
         byPID[p.pid, default: []].append(id)
         if byPID[p.pid]!.count > 8 {
             // Keep only recent instances per pid in the index; older ones stay reachable via links.
             byPID[p.pid]!.removeFirst(byPID[p.pid]!.count - 8)
         }
         return id
+    }
+
+    /// A pid has one live instance at a time: one that started before `start` has exited, though no
+    /// exit event said so (dropped, or lost while eslogger restarted). It becomes a tombstone (what it
+    /// started still finds it). O(8): the instances `byPID` keeps.
+    private func retireInstances(of pid: Int32, startedBefore start: Date, at time: Date) {
+        for id in byPID[pid] ?? [] {
+            guard let n = nodes[id], n.exitedAt == nil, let s = n.image.startTime,
+                  start.timeIntervalSince(s) > ProcessTree.startTimeTolerance else { continue }
+            nodes[id]?.exitedAt = time
+            if ProcessTree.hasAgents(n) { agentGeneration &+= 1 }
+        }
     }
 
     /// The pid of the process that forked `p`; nil when unknown. ppid alone only says who adopted it:
