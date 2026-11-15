@@ -830,6 +830,104 @@ final class NativeHandlerWatchdog: @unchecked Sendable {
     }
 }
 
+/// The file client's AUTH subscription (setAuth): wanted exactly while enforcement is active. Client
+/// thread only. Outside the EndpointSecurity guard so it is unit-tested on any host.
+struct NativeAuthSubscription {
+    static let initialRetryDelay: TimeInterval = 5
+    static let maxRetryDelay: TimeInterval = 60
+
+    /// Wanted, but es_subscribe failed: nothing is enforced.
+    private(set) var failed = false
+
+    /// Brings the subscription from `current` to `on` with `subscribe` (es_subscribe; false when it
+    /// failed) or `unsubscribe`. Returns whether AUTH events are subscribed now, and when to try again
+    /// (nil: no retry is due).
+    mutating func set(_ on: Bool, current: Bool, subscribe: () -> Bool, unsubscribe: () -> Void)
+        -> (subscribed: Bool, retryIn: TimeInterval?) {
+        var now = on
+        if on && !current {
+            now = subscribe()
+        } else if !on && current {
+            unsubscribe()
+        }
+        return (now, nil)
+    }
+}
+
+/// What a source with connected clients shows about the parts of their setup that can fail without a
+/// reconnect: the target-path mute set (selecting nothing, it monitors nothing; the next catalog or
+/// settings change retries). Outside the EndpointSecurity guard so it is unit-tested on any host.
+enum NativeSetupProblems {
+    static let mutingError = "es_mute_path failed for every monitored prefix"
+    static let mutingHint = "File events are not monitored; the next catalog or settings change retries."
+    static let authError = "es_subscribe failed for the AUTH events: nothing is enforced"
+    static let authHint = "Accesses are recorded, but none is asked about or blocked; retrying."
+
+    /// `state` as a connected source shows it; its other fields (the deadline miss mode) are left alone.
+    static func apply(to state: inout SourceState, mutingFailed: Bool, authFailed: Bool) {
+        state.running = !mutingFailed
+        state.error = mutingFailed ? mutingError : nil
+        state.hint = mutingFailed ? mutingHint : nil
+    }
+}
+
+/// The auth-armed marker (DaemonConfiguration.authArmedMarkerPath): it exists while the file client is
+/// subscribed to AUTH events, so that a daemon that dies then (the kernel killed it for a missed
+/// deadline, a crash, a power loss) is reported as an unclean stop at the next start (DaemonCore).
+/// Outside the EndpointSecurity guard so it is unit-tested on any host.
+final class NativeAuthArmedMarker: @unchecked Sendable {
+    private let lock = NSLock()
+    /// nil: no marker (in-memory store).
+    private let path: String?
+
+    init(path: String?) { self.path = path }
+
+    /// AUTH events were subscribed.
+    func arm() {
+        lock.lock(); defer { lock.unlock() }
+        guard let path else { return }
+        do { try SafeFile.replace(path, with: Data(), mode: 0o600) } catch {
+            Log.warning("could not create the auth-armed marker: \(error)")
+        }
+    }
+
+    /// AUTH events were unsubscribed.
+    func disarm() {
+        lock.lock(); defer { lock.unlock() }
+        if let path { unlink(path) }
+    }
+
+    /// The source is stopping: a clean stop is not a death while enforcing.
+    func stop() {
+        disarm()
+    }
+}
+
+/// es_clear_cache is rate-limited (ES_CLEAR_CACHE_RESULT_ERR_THROTTLE): clearCacheSoon calls it at most
+/// once per `interval`, and a clear held back here or throttled by the kernel is tried again
+/// `retryDelay` later. Outside the EndpointSecurity guard so it is unit-tested on any host.
+struct NativeCacheClearThrottle {
+    static let interval: TimeInterval = 1
+    static let retryDelay: TimeInterval = 1.2
+
+    /// The clock, in seconds.
+    let now: () -> TimeInterval
+    /// When es_clear_cache was last called; nil before the first call.
+    private var last: TimeInterval?
+
+    init(now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }) {
+        self.now = now
+    }
+
+    /// Whether es_clear_cache may be called now; true counts as that call.
+    mutating func begin() -> Bool {
+        let t = now()
+        if let last, t - last <= NativeCacheClearThrottle.interval { return false }
+        last = t
+        return true
+    }
+}
+
 #if canImport(EndpointSecurity)
 #if canImport(Darwin)
 import Darwin
@@ -937,8 +1035,14 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     private var retryDelay = NativeESSource.initialRetryDelay
     private var lastError: String?
     private var stopped = false
-    private var lastCacheClear = Date.distantPast
+    /// The AUTH subscription's failures (NativeAuthSubscription).
+    private var authSubscription = NativeAuthSubscription()
+    /// The connected file client's mute set selects nothing (applyMuting): nothing is monitored.
+    private var mutingFailed = false
+    private var cacheClear = NativeCacheClearThrottle()
     private var cacheClearPending = false
+    /// Exists while AUTH events are subscribed (NativeAuthArmedMarker). Any thread.
+    private let authMarker: NativeAuthArmedMarker
 
     /// How long `delete` waits for the es_* calls still running on a client before giving up on it.
     static let deleteWait: TimeInterval = 1
@@ -954,7 +1058,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
     /// NOTIFY events queued for analysis. Past this, new ones are dropped (and counted) instead of
     /// growing memory without bound; ES never backs up because the handler returns at once.
     static let maxPendingNotify = 50_000
-    private static let mutingError = "es_mute_path failed for every monitored prefix"
+    private static let mutingError = NativeSetupProblems.mutingError
 
     private static let timebase: mach_timebase_info_data_t = {
         var tb = mach_timebase_info_data_t()
@@ -967,6 +1071,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         self.decider = core.enforcer
         self.readdir = core.currentSettings.readdirEnabled
         self.watchdogFloor = core.watchdogStallFloor
+        self.authMarker = NativeAuthArmedMarker(path: core.config.inMemoryStore ? nil : core.config.authArmedMarkerPath)
         NativeStallMarker.setPath(core.config.inMemoryStore ? nil : core.config.watchdogStallMarkerPath)
     }
 
@@ -1019,7 +1124,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     public func stop() {
         // A clean stop is not a death while enforcing (see DaemonCore's start-up check).
-        disarm()
+        authMarker.stop()
         // A stop that takes a while is no stall: the watchdog must not exit under it.
         lock.lock()
         let watchdog = fileWatchdog
@@ -1120,6 +1225,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         authDrops.reset()
         fileFailClosed = deadlineMode.mode == .failClosed
         lock.unlock()
+        authSubscription = NativeAuthSubscription()
+        mutingFailed = false
         askGate.lock()
         asksOpen = true
         askGate.unlock()
@@ -1144,9 +1251,8 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         retryDelay = NativeESSource.initialRetryDelay
         lastError = nil
         publish {
-            $0.running = true
-            $0.error = nil
-            $0.hint = nil
+            // The mute set selects something (above).
+            NativeSetupProblems.apply(to: &$0, mutingFailed: false, authFailed: authSubscription.failed)
             $0.deadlineMissMode = deadlineMode.name
         }
         lock.lock()
@@ -1194,7 +1300,7 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     /// Setup failed after both clients exist: delete them (on the client thread) and retry.
     private func abortSetup(_ proc: OpaquePointer, _ file: OpaquePointer, _ message: String) {
-        disarm()
+        authMarker.disarm()
         disarmWatchdog()
         closeAsks()
         NativeESSource.retire(file, gate: fileGate, activity: fileActivity, gatedOnly: false)
@@ -1534,21 +1640,20 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
 
     /// A connected client whose mute set selects nothing monitors nothing: show it in the state.
     private func reportMuting(_ ok: Bool) {
-        let current = state.error
-        if !ok && current != NativeESSource.mutingError {
-            publish {
-                $0.running = false
-                $0.error = NativeESSource.mutingError
-                $0.hint = "File events are not monitored; the next catalog or settings change retries."
-            }
-            Log.error(NativeESSource.mutingError)
-        } else if ok && current == NativeESSource.mutingError {
-            publish {
-                $0.running = true
-                $0.error = nil
-                $0.hint = nil
-            }
-        }
+        mutingFailed = !ok
+        publishSetup()
+    }
+
+    /// Shows the setup problems of the connected clients (NativeSetupProblems) when they changed, and
+    /// logs a problem when it starts to show. Client thread.
+    private func publishSetup() {
+        guard fileClient != nil else { return }
+        let shown = state
+        var next = shown
+        NativeSetupProblems.apply(to: &next, mutingFailed: mutingFailed, authFailed: authSubscription.failed)
+        guard next != shown else { return }
+        publish { NativeSetupProblems.apply(to: &$0, mutingFailed: mutingFailed, authFailed: authSubscription.failed) }
+        if let error = next.error { Log.error(error) }
     }
 
     public func updateMonitoring(prefixes: [String], ancestors: [String], readdir newReaddir: Bool) {
@@ -1580,49 +1685,28 @@ public final class NativeESSource: EventSource, @unchecked Sendable {
         lock.lock()
         let current = authSubscribed
         lock.unlock()
-        var now = on
-        if on && !current {
-            // Failed: nothing is enforced, so NOTIFY events must not be treated as `.afterAuth`.
-            now = subscribe(file, events)
-        } else if !on && current {
-            unsubscribe(file, events)
-        }
+        // Failed: nothing is enforced, so NOTIFY events must not be treated as `.afterAuth`.
+        let (now, _) = authSubscription.set(on, current: current, subscribe: { subscribe(file, events) },
+                                            unsubscribe: { unsubscribe(file, events) })
         lock.lock()
         authSubscribed = now
         lock.unlock()
-        if now && !current { arm() } else if !now && current { disarm() }
+        // The marker exists exactly while AUTH events are subscribed (NativeAuthArmedMarker).
+        if now && !current { authMarker.arm() } else if !now && current { authMarker.disarm() }
         clearCacheSoon()
-    }
-
-    /// The marker exists exactly while AUTH events are subscribed. If the daemon dies while it exists
-    /// (the kernel killed it for a missed deadline, a crash), the next start finds it and reports an
-    /// unclean stop; enforcement stays as the user set it. Client thread only (IO).
-    private func arm() {
-        guard let config = core?.config, !config.inMemoryStore else { return }
-        do { try SafeFile.replace(config.authArmedMarkerPath, with: Data(), mode: 0o600) } catch {
-            Log.warning("could not create the auth-armed marker: \(error)")
-        }
-    }
-
-    private func disarm() {
-        guard let config = core?.config, !config.inMemoryStore else { return }
-        unlink(config.authArmedMarkerPath)
     }
 
     public func policyChanged() {
         clientThread.run { self.clearCacheSoon() }
     }
 
-    /// es_clear_cache is rate-limited (ERR_THROTTLE); coalesce bursts and retry.
+    /// es_clear_cache is rate-limited (ERR_THROTTLE); coalesce bursts and retry (NativeCacheClearThrottle).
     private func clearCacheSoon() {
         guard let file = fileClient else { return }
-        if Date().timeIntervalSince(lastCacheClear) > 1 {
-            lastCacheClear = Date()
-            if es_clear_cache(file) == ES_CLEAR_CACHE_RESULT_SUCCESS { return }
-        }
+        if cacheClear.begin(), es_clear_cache(file) == ES_CLEAR_CACHE_RESULT_SUCCESS { return }
         guard !cacheClearPending else { return }
         cacheClearPending = true
-        DispatchQueue.global().asyncAfter(deadline: .now() + 1.2) { [weak self] in
+        DispatchQueue.global().asyncAfter(deadline: .now() + NativeCacheClearThrottle.retryDelay) { [weak self] in
             self?.clientThread.run {
                 self?.cacheClearPending = false
                 self?.clearCacheSoon()
