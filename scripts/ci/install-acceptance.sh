@@ -23,6 +23,18 @@ WR=/usr/local/bin/whoread
 APP=/Applications/WhoRead.app
 APPBIN="$APP/Contents/MacOS/WhoRead"
 
+echo "== runner preparation"
+# The installer refuses /usr/local folders that someone other than root could change (launchd runs
+# the daemon from there as root). Runner images give some of them to the runner account; this
+# throwaway machine gets them back to root, as on a normal Mac.
+for d in /usr/local /usr/local/bin /usr/local/libexec; do
+  [ -d "$d" ] || continue
+  if [ "$(stat -f %u "$d")" != 0 ] || [ $((8#$(stat -f %Lp "$d") & 8#022)) -ne 0 ] || ls -led "$d" | grep -q ' allow '; then
+    echo "      $d: owner uid $(stat -f %u "$d"), mode $(stat -f %Lp "$d"): giving it to root"
+    sudo chown root:wheel "$d" && sudo chmod go-w "$d" && sudo chmod -N "$d" 2>/dev/null || true
+  fi
+done
+
 echo "== install (scripts/install.sh --no-wait --no-open)"
 if "$ROOT/scripts/install.sh" --no-wait --no-open > "$T/install.log" 2>&1; then
   ok "scripts/install.sh"
@@ -43,7 +55,7 @@ if [ -L "$WR" ] && [ "$(readlink "$WR")" = "$APP/Contents/Helpers/whoread" ]; th
 else
   bad "/usr/local/bin/whoread is not the link into the app"
 fi
-if [ "$(stat -f %u "$APP")" = 0 ] && ! find "$APP" -perm -g+w -o -perm -o+w | grep -q .; then
+if [ "$(stat -f %u "$APP")" = 0 ] && ! find "$APP" \( -perm -020 -o -perm -002 \) -print | grep -q .; then
   ok "the app is owned by root and writable by no one else"
 else
   bad "the app in /Applications can be changed by others"
