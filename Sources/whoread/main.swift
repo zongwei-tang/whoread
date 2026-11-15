@@ -122,7 +122,7 @@ func makeClient() throws -> IPCClient {
         ?? ProcessInfo.processInfo.environment["WHOREAD_MACH_SERVICE"]
         ?? announcedServiceName()
         ?? WhoReadPaths.machServiceName
-    return TransportClient(transport: XPCClient(machServiceName: name))
+    return TransportClient(transport: XPCClient(machServiceName: name, queryTimeout: XPCClient.queryTimeout))
     #else
     throw CLIError("no XPC on this platform: pass --socket PATH (whoreadd --dev-socket PATH)")
     #endif
@@ -160,8 +160,24 @@ func explain(_ e: IPCError) -> CLIError {
     }
 }
 
+/// What happened to a request that got no answer, and what to check or do (`NoAnswerHelp`): a daemon
+/// that refuses this program, or one that is busy, is not reported as one that is not running.
 func explain(_ u: Unreachable) -> CLIError {
-    CLIError("cannot reach the WhoRead daemon: \(DisplayText.escaped(u.error.message))\n  Is whoreadd running? (sudo launchctl print system/com.whoread.daemon)", exitCode: 69)
+    // Refused by the transport before sending (a request too large for the dev socket, a socket path
+    // too long): said as the daemon would.
+    guard u.error.code == .unavailable else { return explain(u.error) }
+    var e = u.error
+    e.message = DisplayText.escaped(e.message)
+    return CLIError(NoAnswerHelp.lines(for: e, target: noAnswerTarget()).joined(separator: "\n"), exitCode: 69)
+}
+
+/// Where `makeClient` sent the request, for the hint: the same choice, without its note about an
+/// untrusted announced name (it was printed already).
+func noAnswerTarget() -> NoAnswerHelp.Target {
+    let env = ProcessInfo.processInfo.environment
+    if let socket = args.value("socket") ?? env["WHOREAD_SOCKET"] { return .socket(path: socket) }
+    return .xpc(service: args.value("service") ?? env["WHOREAD_MACH_SERVICE"]
+        ?? (try? TrustedFile.machServiceName(inDataDirectory: WhoReadPaths.dataDirectory)) ?? WhoReadPaths.machServiceName)
 }
 
 /// One `.hello` before the first real request, so a whoread/daemon version skew is reported as

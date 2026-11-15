@@ -49,6 +49,15 @@ public enum IPCRequest: Codable, Sendable {
     /// Answers a question: allowOnce (10 minutes), alwaysAllow, keepBlocking (deny now),
     /// blockFromNowOn (deny rule), trustApplePrograms. Allowing needs root or the signed app.
     case answerAsk(id: Int64, action: AlertAction)
+
+    /// A read of the stored history that can take long on a large store (events, alerts, per-app and
+    /// per-day totals, the baseline): a client may wait longer for it (`XPCClient.queryTimeout`).
+    public var mayTakeLong: Bool {
+        switch self {
+        case .events, .alerts, .summaries, .dailyAggregates, .baseline: return true
+        default: return false
+        }
+    }
 }
 
 public enum IPCResponse: Codable, Sendable {
@@ -78,15 +87,124 @@ public struct IPCError: Error, Codable, Sendable, CustomStringConvertible, Equat
         case versionMismatch
     }
 
+    /// Why a request got no answer, as far as the client's transport can tell (`code` is then
+    /// `.unavailable`). Set by the transports' clients only and never encoded (see `CodingKeys`): an
+    /// error the daemon replies with has none.
+    public enum NoAnswer: String, Sendable {
+        /// Nothing answers at that name or path: the daemon is not installed or not running (or this
+        /// process may not look the service up, as inside a sandbox).
+        case notFound
+        /// The daemon refused this program: XPC reported a code-signing requirement it does not meet
+        /// (as a rule only the side that set the requirement is told so), or the dev socket's
+        /// permissions do not let this user connect.
+        case refused
+        /// The connection was closed before the daemon's first answer on it: the daemon refused this
+        /// program (a code-signing requirement it does not meet reaches the client this way), or it
+        /// stopped just then.
+        case droppedBeforeAnswer
+        /// The connection was closed while waiting, after earlier answers on it: the daemon stopped,
+        /// crashed or restarted.
+        case droppedAfterAnswer
+        /// No answer in time: the daemon took the request but is busy (a large query) or stuck.
+        case timedOut
+        /// The answer is larger than this client takes.
+        case replyTooLarge
+        /// No connection, for a reason the transport cannot tell: the daemon is not running, or it
+        /// refuses this program.
+        case noConnection
+    }
+
     public var code: Code
     public var message: String
+    public var noAnswer: NoAnswer? = nil
 
-    public init(_ code: Code, _ message: String) {
+    enum CodingKeys: String, CodingKey {
+        case code, message
+    }
+
+    public init(_ code: Code, _ message: String, noAnswer: NoAnswer? = nil) {
         self.code = code
         self.message = message
+        self.noAnswer = noAnswer
     }
 
     public var description: String { "\(code.rawValue): \(message)" }
+}
+
+/// What `whoread` says when a request got no answer (`IPCError.noAnswer`): what happened, and what to
+/// check or do about it.
+public enum NoAnswerHelp {
+    /// Where the request went.
+    public enum Target: Sendable, Equatable {
+        case xpc(service: String)
+        case socket(path: String)
+    }
+
+    /// The message, one line per element: what happened (with the transport's own account, `message`),
+    /// then what to check or do. An error without a kind gets the hint for "cannot tell".
+    public static func lines(for error: IPCError, target: Target) -> [String] {
+        let detail = error.message
+        let kind = error.noAnswer ?? .noConnection
+        switch (kind, target) {
+        case (.timedOut, _):
+            return ["the WhoRead daemon did not answer in time: \(detail)",
+                    "  It has the request but is busy or stuck. A read of a large history can take long: ask for less "
+                        + "(a smaller --limit, a later --since), or use whoread export, which reads in pages."]
+        case (.replyTooLarge, _):
+            return ["the WhoRead daemon's answer is too large: \(detail)",
+                    "  Ask for less (a smaller --limit, a later --since), or use whoread export, which reads in pages."]
+        case (.refused, .xpc):
+            return ["the WhoRead daemon refused this program: \(detail)", "  " + refusal]
+        case (.droppedBeforeAnswer, .xpc(let service)):
+            return ["the WhoRead daemon closed the connection without answering: \(detail)",
+                    "  Most likely it refused this program. " + refusal,
+                    "  Or it stopped just then: check it with \(check(service))"]
+        case (.droppedAfterAnswer, .xpc(let service)):
+            return ["the connection to the WhoRead daemon broke while waiting for its answer: \(detail)",
+                    "  It had answered before, so it stopped, crashed or restarted since: try again, and check it with \(check(service))"]
+        case (.notFound, .xpc(let service)) where detail.contains("Sandbox restriction"):
+            // An AI agent's command sandbox, for one: the daemon may well be running.
+            return ["cannot reach the WhoRead daemon: \(detail)",
+                    "  A sandbox keeps this process from looking up \(service): run whoread outside it. "
+                        + "Whether the daemon runs: \(check(service))"]
+        case (.notFound, .xpc(let service)):
+            return ["cannot reach the WhoRead daemon: \(detail)",
+                    "  Nothing answers at \(service): is the daemon installed and running? Check it with \(check(service))"]
+        case (.noConnection, .xpc(let service)):
+            return ["cannot reach the WhoRead daemon: \(detail)",
+                    "  Is it running? Check it with \(check(service))",
+                    "  If it is, it may be refusing this program. " + refusal]
+        case (.refused, .socket):
+            return ["the WhoRead daemon refused this program: \(detail)",
+                    "  The dev socket lets only its owner connect (whoreadd --dev-socket-mode sets who else may): run this with sudo."]
+        case (.droppedBeforeAnswer, .socket):
+            return ["the WhoRead daemon closed the connection without answering: \(detail)",
+                    "  It was stopping, or it was already serving as many connections as it takes at once: try again."]
+        case (.droppedAfterAnswer, .socket):
+            return ["the connection to the WhoRead daemon broke while waiting for its answer: \(detail)",
+                    "  It stopped or restarted: try again."]
+        case (.notFound, .socket(let path)):
+            return ["cannot reach the WhoRead daemon: \(detail)",
+                    "  Nothing listens at \(path): is whoreadd running with --dev-socket \(path)?"]
+        case (.noConnection, .socket(let path)):
+            return ["cannot reach the WhoRead daemon: \(detail)",
+                    "  Is whoreadd running with --dev-socket \(path)?"]
+        }
+    }
+
+    /// Why a running daemon refuses a program, and what fixes it (XPC: the daemon was installed with a
+    /// code-signing requirement for its whoread and app; root may use any build).
+    static let refusal = "It takes only the whoread and WhoRead app it was installed with, so a rebuilt or re-signed "
+        + "copy is refused: run scripts/install.sh again, or use the whoread that ships with the installed WhoRead app "
+        + "(sudo whoread works with any build)."
+
+    /// How to see whether the daemon behind `service` runs: the dev LaunchDaemon has the built-in name,
+    /// the system extension its own.
+    static func check(_ service: String) -> String {
+        service == WhoReadPaths.machServiceName
+            ? "sudo launchctl print system/com.whoread.daemon"
+            : "systemextensionsctl list (the WhoRead extension should be activated and enabled)"
+    }
 }
 
 /// The catalog plus what the daemon found on this machine.
