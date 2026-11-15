@@ -143,6 +143,31 @@ public struct PollSchedule: Equatable, Sendable {
     }
 }
 
+/// The views on screen that need more than the status, the alerts and the live tail. Reading the
+/// summaries makes the daemon read every summary row (bounded only by retention), so full polls read
+/// them only while a view shows them; what was read last stays shown meanwhile.
+public struct PollViews: Equatable, Sendable {
+    public enum View: Hashable, Sendable {
+        case apps, files, agents
+        /// The rule editor: its list of apps (`AppModel.appRows`).
+        case ruleEditor
+        case alerts
+    }
+
+    public private(set) var shown: Set<View> = []
+
+    public init() {}
+
+    /// A view appeared or disappeared.
+    public mutating func set(_ view: View, shown visible: Bool) {
+        if visible { shown.insert(view) } else { shown.remove(view) }
+    }
+
+    /// Full polls read the summaries (`SnapshotFetcher.fetch`): the Apps, Files or Agents tab, or the
+    /// rule editor (its list of apps), is shown.
+    public var needsSummaries: Bool { !shown.isDisjoint(with: [.apps, .files, .agents, .ruleEditor]) }
+}
+
 /// When to drop a connection the daemon does not serve as the signed app, and open a new one.
 ///
 /// The daemon decides once per connection, when it is accepted, whether the peer is the app (a look

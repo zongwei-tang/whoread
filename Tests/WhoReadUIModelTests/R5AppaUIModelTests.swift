@@ -135,6 +135,104 @@ final class R5AppaDaemonTests: XCTestCase {
         pollLive(m)
         XCTAssertEqual(m.liveRows.count, 15)
     }
+
+    // MARK: - app-7: what the polls read
+
+    /// The signed app's connection, keeping what each poll asked for.
+    private final class Recording: IPCClient, @unchecked Sendable {
+        let inner: IPCClient
+        var requests: [IPCRequest] = []
+        init(_ inner: IPCClient) { self.inner = inner }
+        func send(_ request: IPCRequest) throws -> IPCResponse {
+            requests.append(request)
+            return try inner.send(request)
+        }
+        var alertQueries: [AlertQuery] { requests.compactMap { if case .alerts(let q) = $0 { return q } else { return nil } } }
+        var summaryReads: Int { requests.filter { if case .summaries = $0 { return true } else { return false } }.count }
+    }
+
+    func testApp7FastPollsReadOnlyTheAlertsThatChanged() throws {
+        let client = Recording(signed)
+        let m = AppModel(language: .en)
+        /// As DaemonConnection polls: fast polls (every second) from the model's cursor, full ones (10 s) whole.
+        func poll(full: Bool) {
+            m.apply(SnapshotFetcher.fetch(client, liveAfter: m.liveCursor, includeBenign: false, full: full,
+                                          alertsSince: full ? nil : m.alertsSince, summaries: false))
+        }
+        poll(full: true)
+        let whole = m.alerts
+        let newest = try XCTUnwrap(whole.map(\.updatedAt).max())
+        XCTAssertGreaterThan(whole.count, 1)
+        XCTAssertNil(client.alertQueries.last?.since, "a full poll reads the whole list")
+
+        poll(full: false)
+        let since = try XCTUnwrap(client.alertQueries.last?.since, "a fast poll reads only the alerts updated since the newest listed")
+        XCTAssertLessThanOrEqual(since, newest, "a little before it: one updated out of order is not missed")
+        XCTAssertEqual(m.alerts, whole)
+
+        // A repeat merged into the oldest alert, and a new alert: both in the next fast poll.
+        var merged = try XCTUnwrap(whole.last)
+        merged.count += 1
+        merged.updatedAt = newest.addingTimeInterval(30)
+        var fresh = merged
+        fresh.id = try core.store.maxAlertID() + 1
+        fresh.createdAt = newest.addingTimeInterval(60)
+        fresh.updatedAt = fresh.createdAt
+        fresh.count = 1
+        try core.store.upsert([merged, fresh])
+        poll(full: false)
+        XCTAssertEqual(m.alerts.map(\.id), [fresh.id, merged.id] + whole.map(\.id).dropLast(),
+                       "as the daemon lists them: most recently updated first")
+        XCTAssertEqual(m.alerts.first { $0.id == merged.id }?.count, merged.count)
+
+        // Marked read by another program (the CLI): no update time moves, so the next full poll shows it.
+        _ = try signed.call(.markAlertsRead(ids: nil))
+        poll(full: false)
+        XCTAssertTrue(m.alerts.contains { $0.status == .unread })
+        poll(full: true)
+        XCTAssertFalse(m.alerts.contains { $0.status == .unread })
+
+        // Another daemon instance: the whole list again before reading what changed.
+        var restarted = Snapshot()
+        restarted.status = try XCTUnwrap(m.status)
+        restarted.status?.pid += 1
+        m.apply(restarted)
+        XCTAssertNil(m.alertsSince)
+        poll(full: false)
+        XCTAssertNil(client.alertQueries.last?.since)
+        XCTAssertNotNil(m.alertsSince)
+    }
+
+    func testApp7SummariesAreReadOnlyWhileAViewShowsThem() throws {
+        let client = Recording(signed)
+        let m = AppModel(language: .en)
+        var views = PollViews()
+        func poll() { m.apply(SnapshotFetcher.fetch(client, liveAfter: m.liveCursor, includeBenign: false, full: true, summaries: views.needsSummaries)) }
+        // No window open, or another tab: the full poll (every 10 s) reads no summaries.
+        poll()
+        views.set(.alerts, shown: true)
+        poll()
+        XCTAssertEqual(client.summaryReads, 0)
+        XCTAssertTrue(m.appRows.isEmpty)
+        XCTAssertNil(m.unavailableNote(.summaries), "not read is not a failure")
+        // The Apps, Files or Agents tab, or the rule editor's list of apps.
+        for view in [PollViews.View.apps, .files, .agents, .ruleEditor] {
+            var v = PollViews()
+            v.set(view, shown: true)
+            XCTAssertTrue(v.needsSummaries, "\(view)")
+            v.set(view, shown: false)
+            XCTAssertFalse(v.needsSummaries, "\(view)")
+        }
+        views.set(.apps, shown: true)
+        poll()
+        XCTAssertEqual(client.summaryReads, 1)
+        XCTAssertFalse(m.appRows.isEmpty)
+        // Hidden again: what was read stays, and is not read again.
+        views.set(.apps, shown: false)
+        poll()
+        XCTAssertEqual(client.summaryReads, 1)
+        XCTAssertFalse(m.appRows.isEmpty)
+    }
 }
 
 /// Editing rules, without the daemon.

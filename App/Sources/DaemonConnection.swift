@@ -29,6 +29,8 @@ final class DaemonConnection {
     @ObservationIgnored private var askTimer: Timer?
     @ObservationIgnored private var askTimerInterval: TimeInterval = 0
     @ObservationIgnored private var schedule = PollSchedule()
+    /// The views on screen: full polls read the summaries only while one shows them.
+    @ObservationIgnored private var views = PollViews()
     @ObservationIgnored private var inFlight = false
     @ObservationIgnored private var askInFlight = false
     /// Reopen a connection the daemon did not take for the app (a wrong guess when it was accepted).
@@ -125,14 +127,26 @@ final class DaemonConnection {
         let cursor = model.liveCursor
         let benign = model.showSystemNoise
         let hello = needsHello
+        // Every second only the alerts that changed; every 10 s (and after a change) the whole list.
+        let alertsSince = full ? nil : model.alertsSince
+        let summaries = views.needsSummaries
         queue.async {
-            let snapshot = SnapshotFetcher.fetch(client, liveAfter: cursor, includeBenign: benign, full: full, hello: hello)
+            let snapshot = SnapshotFetcher.fetch(client, liveAfter: cursor, includeBenign: benign, full: full, hello: hello,
+                                                 alertsSince: alertsSince, summaries: summaries)
             Task { @MainActor in
                 self.inFlight = false
                 self.received(snapshot)
                 if self.pendingFull { self.poll(full: true) }
             }
         }
+    }
+
+    /// A view that needs more than the fast poll appeared or disappeared (`PollViews`). One that needs
+    /// the summaries is filled at once, not at the next full poll.
+    func setShown(_ view: PollViews.View, _ shown: Bool) {
+        let before = views
+        views.set(view, shown: shown)
+        if views.needsSummaries && !before.needsSummaries { poll(full: true) }
     }
 
     /// The open questions, on their own connection: answered ones disappear and their banners are
@@ -236,9 +250,11 @@ final class DaemonConnection {
         guard snapshot.error == nil else { return }
         if let status = model.status { planNotices(status) }
         if let settings = model.settings {
-            // Only alerts read by this poll (nil when refused or failed): the first read seeds.
-            for n in planner.plan(snapshot.alerts, settings: settings.notifications, formatter: model.formatter,
-                                  agentName: model.agentName) {
+            // Only when this poll read the alerts (nil when refused or failed): the first read seeds. The
+            // whole list as listed now, not only what changed since the last fast poll: the planner
+            // forgets alerts the list no longer has.
+            for n in planner.plan(snapshot.alerts == nil ? nil : model.alerts, settings: settings.notifications,
+                                  formatter: model.formatter, agentName: model.agentName) {
                 NotificationManager.shared.post(n)
             }
         }

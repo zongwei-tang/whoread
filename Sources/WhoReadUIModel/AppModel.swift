@@ -37,6 +37,8 @@ public struct Snapshot: Sendable {
     public var status: DaemonStatus?
     /// nil: not read in this poll (refused, failed, or not part of it).
     public var alerts: [Alert]?
+    /// `alerts` holds only the alerts updated since then (nil: the whole list).
+    public var alertsSince: Date?
     /// Live events after `liveAfter` (the cursor this poll was fetched with); nil when not read.
     public var newLive: [AnalyzedEvent]?
     public var liveAfter: Int64?
@@ -84,10 +86,18 @@ public enum AskPoll: Equatable, Sendable {
 public enum SnapshotFetcher {
     /// The most live events one poll reads: the newest after the cursor.
     public static let liveLimit = 500
+    /// The alerts listed: the most recently updated.
+    public static let alertLimit = 300
 
     /// Fast poll (every second): status, alerts, live tail. Full poll (every ~10 s, or after a change)
     /// adds settings, the catalog, agents, summaries and rules. `hello` starts with the version
     /// handshake, so a mismatched daemon is reported as such rather than as decoding errors.
+    ///
+    /// A fast poll reads only the alerts updated since `alertsSince` (`AppModel.alertsSince`; nil: the
+    /// whole list), so an idle app does not have the daemon read, decode and send 300 alerts every
+    /// second. A full poll always reads the whole list: marking alerts read or answering one does not
+    /// move their update time, so only a whole list shows such a change made by another program.
+    /// `summaries`: a full poll reads them only while a view shows them (`PollViews.needsSummaries`).
     ///
     /// Only the handshake and the status decide whether the daemon can be read at all. Every other
     /// read is tried on its own: the daemon refuses history to an app it does not recognise as the
@@ -95,7 +105,8 @@ public enum SnapshotFetcher {
     /// and that must not cost the settings, the catalog or anything else that is open to the user.
     /// A read that gets no answer at all (timed out, connection lost) ends the poll there: the reads
     /// after it would wait as long, and the next poll tries again. The questions are not read here.
-    public static func fetch(_ client: IPCClient, liveAfter: Int64?, includeBenign: Bool, full: Bool, hello: Bool = false) -> Snapshot {
+    public static func fetch(_ client: IPCClient, liveAfter: Int64?, includeBenign: Bool, full: Bool, hello: Bool = false,
+                             alertsSince: Date? = nil, summaries: Bool = true) -> Snapshot {
         var s = Snapshot()
         s.liveAfter = liveAfter
         s.liveIncludesBenign = includeBenign
@@ -131,7 +142,9 @@ public enum SnapshotFetcher {
             s.catalog = read(.catalog) { try client.catalog() }
             s.agents = read(.agents) { try client.agents() }
         }
-        s.alerts = read(.alerts) { try client.alerts(AlertQuery(limit: 300)) }
+        let since = full ? nil : alertsSince
+        s.alertsSince = since
+        s.alerts = read(.alerts) { try client.alerts(AlertQuery(since: since, limit: alertLimit)) }
         s.newLive = read(.live) { () throws -> [AnalyzedEvent] in
             guard case .events(let e) = try client.call(.live(afterID: liveAfter, limit: liveLimit, includeBenign: includeBenign)) else {
                 throw IPCError(.internalError, "unexpected response")
@@ -139,7 +152,7 @@ public enum SnapshotFetcher {
             return e
         }
         if full {
-            s.summaries = read(.summaries) { try client.summaries(since: nil) }
+            if summaries { s.summaries = read(.summaries) { try client.summaries(since: nil) } }
             s.rules = read(.rules) { try client.rules() }
         }
         s.failures = failures
@@ -363,6 +376,8 @@ public final class AppModel {
         if let e = s.error {
             lastError = e
             connected = e.code != .unavailable
+            // The next daemon to answer may be another instance: its whole list first.
+            alertsListedWhole = false
             // The questions are not touched: they come from their own connection (`apply(asks:)`).
             // The handshake's message (just set) reads better than a decoder dump.
             if e.code == .versionMismatch, versionProblem == nil { versionProblem = DisplayText.escaped(e.message, limit: 1000) }
@@ -374,7 +389,14 @@ public final class AppModel {
         for part in SnapshotPart.allCases where s.read(part) { failures[part] = nil }
         failures.merge(s.failures) { $1 }
         // A refused or failed read keeps what was last read (shown with `unavailableNote`).
-        if let v = s.alerts { alerts = v }
+        if let v = s.alerts {
+            if s.alertsSince != nil {
+                alerts = AppModel.merging(v, into: alerts)
+            } else {
+                alerts = v
+                alertsListedWhole = true
+            }
+        }
         if !feedPaused, let v = s.newLive { applyLive(v, after: s.liveAfter, includesBenign: s.liveIncludesBenign) }
         if let v = s.summaries { summaries = v }
         if let v = s.rules { rules = v }
@@ -428,6 +450,8 @@ public final class AppModel {
             // A new daemon instance may reuse event ids this feed has already shown (events it
             // served live but never flushed). Start over; the next poll gets its whole ring.
             live = LiveFeed()
+            // And alert ids (its alert table emptied by retention): its whole list before what changed.
+            alertsListedWhole = false
             daemonRestarts += 1
         }
         status = new
@@ -452,6 +476,29 @@ public final class AppModel {
         }
         if let s = settings { d.trustApplePrograms = s.trustApplePrograms }
         return d
+    }
+
+    /// Where the next fast poll's read of the alerts starts (`AlertQuery.since`): `alertsOverlap` before
+    /// the newest update listed, so an alert updated out of order (by an earlier event handled later)
+    /// is not missed; a full poll reads the whole list anyway. nil (the whole list) until a whole list
+    /// was read from this daemon instance.
+    public var alertsSince: Date? {
+        guard alertsListedWhole, let newest = alerts.map(\.updatedAt).max() else { return nil }
+        return newest.addingTimeInterval(-AppModel.alertsOverlap)
+    }
+
+    static let alertsOverlap: TimeInterval = 10
+
+    /// A whole list of alerts was read from the daemon instance that answers now.
+    private var alertsListedWhole = false
+
+    /// `alerts` after a read of the alerts updated since: their new copies replace the old ones, new
+    /// alerts are added, most recently updated first (as the daemon lists them), as many as it lists.
+    static func merging(_ changed: [Alert], into listed: [Alert]) -> [Alert] {
+        var byID: [Int64: Alert] = [:]
+        for a in listed { byID[a.id] = a }
+        for a in changed { byID[a.id] = a }
+        return Array(byID.values.sorted { ($0.updatedAt, $0.id) > ($1.updatedAt, $1.id) }.prefix(SnapshotFetcher.alertLimit))
     }
 
     /// Where the next live poll should start: from the newest end once the folded system activity is

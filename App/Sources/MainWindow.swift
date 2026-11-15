@@ -234,6 +234,22 @@ struct AlertRow: View {
     }
 }
 
+/// While shown, full polls read the summaries this view shows (`PollViews`); hidden, they are not read.
+private struct ReadsWhileShown: ViewModifier {
+    @Environment(DaemonConnection.self) private var connection
+    let view: PollViews.View
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { connection.setShown(view, true) }
+            .onDisappear { connection.setShown(view, false) }
+    }
+}
+
+extension View {
+    func readsWhileShown(_ view: PollViews.View) -> some View { modifier(ReadsWhileShown(view: view)) }
+}
+
 struct AppsView: View {
     @Environment(AppModel.self) private var model
     var body: some View {
@@ -256,6 +272,7 @@ struct AppsView: View {
                 }
             }
         }
+        .readsWhileShown(.apps)
     }
 }
 
@@ -276,6 +293,7 @@ struct FilesView: View {
                 TableColumn(L10n.t(.colCount)) { r in Text("\(r.count)").monospacedDigit() }.width(min: 50, ideal: 60)
             }
         }
+        .readsWhileShown(.files)
     }
 }
 
@@ -301,5 +319,6 @@ struct AgentsView: View {
                 }
             }
         }
+        .readsWhileShown(.agents)
     }
 }

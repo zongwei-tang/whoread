@@ -217,5 +217,7 @@ struct RuleEditor: View {
         .padding()
         // Only this sheet's saves are shown in it.
         .onAppear { connection.lastActionError = nil }
+        // Its list of apps comes from the summaries: read while the sheet is open.
+        .readsWhileShown(.ruleEditor)
     }
 }
