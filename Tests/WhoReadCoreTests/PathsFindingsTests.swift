@@ -727,9 +727,10 @@ final class PrefilterFindingsTests: XCTestCase {
         // The parsed line is an event at that ancestor.
         guard case .event(.file(let f)) = EsloggerParser().parse(line: create(#"\/Users\/alice\/.config"#)) else { return XCTFail() }
         XCTAssertEqual(h.analyzer.handle(.file(f)).events.map(\.categoryID).sorted(), ["gcloud", "gh", "git-credentials"])
-        // A non-ASCII ancestor cannot be matched exactly: every create is parsed then.
+        // A non-ASCII ancestor is matched exactly too (only one with letters that have case is not).
         let cjk = LinePrefilter(prefixes: ["/Users/alice/项目/app"], ancestors: ["/Users", "/Users/alice", "/Users/alice/项目"])
-        XCTAssertEqual(cjk.verdict(create("/Users/bob/x")), .parse)
+        XCTAssertEqual(cjk.verdict(create("/Users/bob/x")), .drop)
+        XCTAssertEqual(cjk.verdict(create("/Users/alice/项目")), .parse)
         XCTAssertEqual(cjk.verdict(open("/Users/bob/x")), .drop)
     }
 
