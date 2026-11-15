@@ -66,7 +66,12 @@ stage app-bundle "^FAIL|failure|error" scripts/dev/sc-app-test.sh
 # Monitor-only facts the runner can show without Full Disk Access (listing events needs no root).
 stage eslogger-events "." eslogger --list-events
 # Last: installs WhoRead system-wide with scripts/install.sh (passwordless sudo), checks it, removes it.
-stage install-acceptance "^(PASS|FAIL|SKIP|INCOMPLETE)|passed,|^      " bash scripts/ci/install-acceptance.sh
+# Only on CI (or with WHOREAD_CI_INSTALL=1): elsewhere it would replace and remove the Mac's own WhoRead.
+if [ "${CI:-}" = true ] || [ "${WHOREAD_CI_INSTALL:-}" = 1 ]; then
+  stage install-acceptance "^(PASS|FAIL|SKIP|INCOMPLETE)|passed,|^      " bash scripts/ci/install-acceptance.sh
+else
+  printf '## install-acceptance: SKIP (not on CI: it installs and removes WhoRead system-wide; WHOREAD_CI_INSTALL=1 runs it)\n\n' >> "$REPORT"
+fi
 
 {
   echo "OVERALL: $([ $FAILED -eq 0 ] && echo PASS || echo FAIL)"

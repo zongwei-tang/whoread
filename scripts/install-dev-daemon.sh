@@ -278,6 +278,12 @@ require_trusted_dirs 0 "check it, then move it aside (sudo mv it to a new name) 
 # launchd runs whoreadd from /usr/local/libexec as root: whoever could rename entries in /usr/local
 # could put their own program there.
 require_trusted_dirs 0 "check it, then sudo chown root:wheel it, sudo chmod go-w it and remove its ACL entries (sudo chmod -N)" /usr/local
+# whoreadd goes into /usr/local/libexec (launchd runs it from there as root) and the CLI's link into
+# /usr/local/bin (what sudo whoread runs). One that someone else could change is refused, before anything
+# changes: install -d below would quietly give it to root, which breaks whatever else installs there
+# as its owner (an Intel Homebrew's /usr/local/bin). Missing ones are created.
+require_trusted_dirs 0 "check it, then sudo chown root:wheel it, sudo chmod go-w it and remove its ACL entries (sudo chmod -N); whatever installs into it as you (an Intel Homebrew) then needs sudo" \
+  /usr/local/libexec /usr/local/bin
 # The log's folder (private_log checks it again): refused here, the running daemon is left alone.
 require_private_parent "$(dirname "$LOGS")" 0
 
@@ -286,6 +292,7 @@ launchctl bootout system "$PLIST" 2>/dev/null || true
 # still there fails (the VM's provisioning reinstalls over a running daemon).
 for _ in $(seq 60); do launchctl print system/com.whoread.daemon >/dev/null 2>&1 || break; sleep 0.5; done
 install -d -m 755 -o root -g wheel /usr/local/libexec /usr/local/bin "$DATA" "$DATA/defaults"
+# Created just now: an ACL entry inherited from /usr/local (checked above) is not expected, but checked.
 require_trusted_dirs 0 "check it, then remove its ACL entries (sudo chmod -N)" /usr/local/libexec /usr/local/bin
 # The log carries alert headlines and process chains of every user: root only. A link or another
 # user's file there is moved aside, never followed, and so is an earlier install's 0644 log (others

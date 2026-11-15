@@ -111,6 +111,11 @@ else
 fi
 
 echo "== uninstall (scripts/uninstall.sh --purge)"
+# What install.sh's live check leaves in the test vault (it is skipped above, --no-wait): --purge
+# removes it, and only it.
+VAULT="$HOME/WhoReadTestVault"
+mkdir -p "$VAULT/notes" && echo "WhoRead install check: not a secret" > "$VAULT/notes/install-check.txt"
+kept=""; [ -f "$VAULT/notes/todo.txt" ] && kept="$VAULT/notes/todo.txt"
 # What scripts/uninstall.sh runs first: the app takes back its login item and exits at once.
 "$APPBIN" --unregister-login-item > "$T/unregister.log" 2>&1 &
 pid=$!
@@ -130,6 +135,10 @@ for p in "$APP" "$WR" /usr/local/libexec/whoreadd "/Library/Application Support/
          /Library/LaunchDaemons/com.whoread.daemon.plist /Library/Logs/WhoRead; do
   if [ -e "$p" ] || [ -L "$p" ]; then bad "left behind: $p"; else ok "removed: $p"; fi
 done
+if [ -e "$VAULT/notes/install-check.txt" ]; then bad "left behind: the live check's file in the test vault"; else ok "removed: the live check's file in the test vault"; fi
+if [ -n "$kept" ]; then
+  [ -f "$kept" ] && ok "the acceptance scripts' fake files in the test vault are kept" || bad "--purge removed $kept"
+fi
 rm -rf "$T"
 echo "$PASS passed, $FAIL failed, $SKIP skipped"
 [ "$FAIL" -eq 0 ]

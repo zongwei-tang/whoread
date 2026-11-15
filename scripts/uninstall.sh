@@ -30,5 +30,20 @@ if [ -x "$APPBIN" ]; then
   wait "$pid" 2>/dev/null || true
 fi
 sudo "$ROOT/scripts/uninstall-dev-daemon.sh" "$@"
+# --purge: also the fake file scripts/install.sh's live check wrote, and the test vault's folders when
+# that leaves them empty. Links are not followed; other files there (scripts/create-test-vault.sh's fake
+# secrets for the acceptance scripts) are left alone.
+if [ "${1:-}" = --purge ]; then
+  vault="$HOME/WhoReadTestVault"
+  check="$vault/notes/install-check.txt"
+  if [ ! -L "$vault" ] && [ ! -L "$vault/notes" ] && [ ! -L "$check" ] && [ -f "$check" ]; then
+    rm -f "$check"
+    rmdir "$vault/notes" "$vault" 2>/dev/null || true
+  fi
+  if [ -e "$vault" ] || [ -L "$vault" ]; then
+    say "$vault is left: it holds fake test files (not secrets). Remove it when you no longer need it: rm -r ~/WhoReadTestVault" \
+      "$vault 还在：里面是测试用的假文件，不是真的密钥。不需要的话可以删掉：rm -r ~/WhoReadTestVault"
+  fi
+fi
 say "WhoRead is removed. You can also remove whoreadd from System Settings > Privacy & Security > Full Disk Access (select it, click -)." \
   "WhoRead 已经卸载。你还可以在「系统设置 > 隐私与安全性 > 完全磁盘访问权限」里选中 whoreadd，点 - 把它移除。"
