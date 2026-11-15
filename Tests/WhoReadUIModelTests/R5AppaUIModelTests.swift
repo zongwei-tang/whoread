@@ -501,6 +501,20 @@ final class R5AppaListTests: XCTestCase {
         XCTAssertEqual(m.visibleAlerts.first?.id, 150, "newest first")
         XCTAssertNil(m.alertsCappedText, "every unread alert is listed")
         XCTAssertEqual(m.alerts.count, SnapshotFetcher.alertLimit, "notifications still see alerts of every status")
+        // A list below the daemon's limit has them all, and one that cannot be read says so on its own.
+        let few = Self.model(Self.status(alerts: 3, unread: 3))
+        var some = Snapshot()
+        some.status = Self.status(alerts: 4, unread: 4)
+        some.alerts = Array(all.prefix(3))
+        few.apply(some)
+        XCTAssertNil(few.alertsCappedText, "not cut at the limit: one more alert raised since the status was read")
+        var refused = Snapshot()
+        refused.status = status
+        refused.failures[.alerts] = IPCError(.notPermitted, "the signed app only")
+        let limited = AppModel(language: .en)
+        limited.apply(refused)
+        XCTAssertNil(limited.alertsCappedText)
+        XCTAssertEqual(limited.unreadCount, 150)
         // Not read on their own while the tab is not shown, nor with the switch off.
         XCTAssertTrue(views.needsUnreadAlerts(unreadOnly: true))
         XCTAssertFalse(views.needsUnreadAlerts(unreadOnly: false))

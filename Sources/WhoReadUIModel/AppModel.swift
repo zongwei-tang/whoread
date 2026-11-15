@@ -912,9 +912,11 @@ public final class AppModel {
     static let allUnreadAlertsCommand = "sudo whoread alerts --unread --limit 10000"
 
     /// Under the Alerts tab's list while it leaves alerts out: how many it lists, of how many (as the
-    /// status counts them), and the command that lists them all.
+    /// status counts them), and the command that lists them all. Only for a list the daemon cut at its
+    /// limit (below it, it lists them all); not while the list cannot be read (`unavailableNote` says so).
     public var alertsCappedText: String? {
-        guard let s = liveStatus else { return nil }
+        guard failures[.alerts] == nil, let s = liveStatus else { return nil }
+        guard (alertsUnreadOnly ? unreadAlertList ?? alerts : alerts).count >= SnapshotFetcher.alertLimit else { return nil }
         let listed = alertsUnreadOnly ? unreadListed.count : alerts.count
         let total = alertsUnreadOnly ? s.unreadAlerts : s.counts.alerts
         guard total > listed else { return nil }
