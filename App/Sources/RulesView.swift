@@ -186,6 +186,10 @@ struct RuleEditor: View {
                     Text(L10n.t(.actionAllow)).tag(RuleAction.allow)
                 }
                 Toggle(L10n.t(.ruleEnabled), isOn: $draft.enabled)
+                // An answer's chain scope, kept while it stays an allow (a block or an alert covers every chain).
+                if let scope = model.chainScope(draft.build()) {
+                    Text(scope).font(.caption).foregroundStyle(.secondary)
+                }
                 if draft.action == .deny {
                     Toggle(L10n.t(.ruleEnforce), isOn: $draft.enforce)
                     // Saved either way, but nothing blocks right now (eslogger cannot): say so here too.

@@ -483,17 +483,23 @@ public struct RuleDraft: Equatable, Sendable {
         case .anyNonOwner: subject = .anyNonOwner
         case .agentChain: subject = .agentAncestor(agentIDs: agentIDs.isEmpty ? nil : agentIDs, exceptOwners: exceptOwners)
         }
-        // Editing keeps expiry, use count and creation time; a template only lends its provenance.
-        // The chain scope (not shown in the editor) is kept: an answer that allowed an app without an
-        // AI agent must not become an allow for that app driven by any agent once edited. So is whether
-        // it also covers chains whose starter is unknown.
+        // Editing keeps creation time; a template only lends its provenance. An allow keeps its chain
+        // scope (not shown in the editor): an answer that allowed an app without an AI agent must not
+        // become an allow for that app driven by any agent once edited. So is whether it also covers
+        // chains whose starter is unknown. A block or an alert made from an allow covers every chain
+        // (a scope would leave out exactly the chains with an AI agent), and is no longer an answer:
+        // expiry and use count go with the action, so a block made from "allow once" does not end, and
+        // is not deleted as an expired answer, 10 minutes later.
         let edited = id != nil && original?.id == id ? original : nil
+        let staysAllow = action == .allow && original?.action == .allow
+        let sameAction = edited?.action == action
+        let template = original?.template == RuleTemplates.askAnswer && !staysAllow ? nil : original?.template
         return Rule(id: id ?? UUID().uuidString, name: name.isEmpty ? nil : name, enabled: enabled, enforce: enforce,
                     target: target, subject: subject, access: access, action: action,
-                    includePlatformBinaries: includePlatformBinaries, expiresAt: edited?.expiresAt,
-                    remainingUses: edited?.remainingUses, createdAt: edited?.createdAt ?? now, template: original?.template,
-                    exceptions: exceptions, chainAgents: original?.chainAgents,
-                    coversUnknownAncestry: original?.coversUnknownAncestry ?? false)
+                    includePlatformBinaries: includePlatformBinaries, expiresAt: sameAction ? edited?.expiresAt : nil,
+                    remainingUses: sameAction ? edited?.remainingUses : nil, createdAt: edited?.createdAt ?? now, template: template,
+                    exceptions: exceptions, chainAgents: staysAllow ? original?.chainAgents : nil,
+                    coversUnknownAncestry: staysAllow && (original?.coversUnknownAncestry ?? false))
     }
 }
 
@@ -518,13 +524,16 @@ extension Rule {
     /// This rule as edited in the app, with what the daemon changes on its own taken from its
     /// current copy: exceptions (a used "allow once", an "always allow" from a banner), use count
     /// and expiry. The editor shows none of them, and the app's copy can be up to 10 s old.
-    /// Without a current copy (a new rule) it is saved as built.
+    /// Use count and expiry only while the action is the same: a block made from an "allow once"
+    /// answer does not end with it. Without a current copy (a new rule) it is saved as built.
     public func keepingDaemonState(of current: Rule?) -> Rule {
         guard let current else { return self }
         var r = self
         r.exceptions = current.exceptions
-        r.remainingUses = current.remainingUses
-        r.expiresAt = current.expiresAt
+        if current.action == action {
+            r.remainingUses = current.remainingUses
+            r.expiresAt = current.expiresAt
+        }
         return r
     }
 }
