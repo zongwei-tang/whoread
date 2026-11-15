@@ -22,9 +22,14 @@ public enum IPCRequest: Codable, Sendable {
     case alertAction(alertID: Int64, action: AlertAction)
     /// nil marks every alert read.
     case markAlertsRead(ids: [Int64]?)
-    case summaries(since: Date?)
-    /// Rolled-up per-day activity (details older than the detail window).
-    case dailyAggregates(since: Date?)
+    /// Per app × category × agent: the most recently active rows, at most `limit`
+    /// (`UsageSummary.replyLimit` when nil, never more). With `since`: activity since then, FIRST
+    /// and the counts covering only that window (a day rolled up past the detail window counts whole).
+    case summaries(since: Date?, limit: Int? = nil)
+    /// Rolled-up per-day activity (details older than the detail window), newest day first: at most
+    /// `limit` rows (`DailyAggregate.replyLimit` when nil, never more), after `after` (the key of the
+    /// last row of the previous page).
+    case dailyAggregates(since: Date?, limit: Int? = nil, after: DailyAggregate.Key? = nil)
     case rules
     case upsertRule(Rule)
     case deleteRule(id: String)
@@ -368,13 +373,15 @@ extension IPCClient {
         return a
     }
 
-    public func summaries(since: Date?) throws -> [UsageSummary] {
-        guard case .summaries(let s) = try call(.summaries(since: since)) else { throw IPCError(.internalError, "unexpected response") }
+    public func summaries(since: Date?, limit: Int? = nil) throws -> [UsageSummary] {
+        guard case .summaries(let s) = try call(.summaries(since: since, limit: limit)) else { throw IPCError(.internalError, "unexpected response") }
         return s
     }
 
-    public func dailyAggregates(since: Date?) throws -> [DailyAggregate] {
-        guard case .dailyAggregates(let d) = try call(.dailyAggregates(since: since)) else { throw IPCError(.internalError, "unexpected response") }
+    public func dailyAggregates(since: Date?, limit: Int? = nil, after: DailyAggregate.Key? = nil) throws -> [DailyAggregate] {
+        guard case .dailyAggregates(let d) = try call(.dailyAggregates(since: since, limit: limit, after: after)) else {
+            throw IPCError(.internalError, "unexpected response")
+        }
         return d
     }
 
