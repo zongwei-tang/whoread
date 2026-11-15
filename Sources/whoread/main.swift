@@ -451,7 +451,8 @@ func cmdAsks(_ c: IPCClient) throws {
     out("")
     for r in asks {
         let coverage = ctx.formatter.allowCoverage(r.responsible, categoryID: r.key.categoryID, access: r.key.access,
-                                                   chainAgents: r.key.chainAgents, agentName: { ctx.agentName($0, agents) })
+                                                   chainAgents: r.key.chainAgents, ancestryKnown: r.key.ancestryKnown,
+                                                   agentName: { ctx.agentName($0, agents) })
         out(zh ? "#\(r.id) 允许（allow-once、allow）适用于：\(coverage)" : "#\(r.id) allow-once / allow cover: \(coverage)")
     }
     out(zh ? "\n回答：whoread ask 编号 allow-once|allow|deny|block|trust-apple（允许需要 sudo）"

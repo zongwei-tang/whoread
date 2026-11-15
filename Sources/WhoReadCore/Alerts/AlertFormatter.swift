@@ -26,8 +26,12 @@ public struct AlertFormatter: Sendable {
         let app = DisplayText.name(alert.responsible.displayName)
         let path = DisplayText.path(abbreviate(alert.firstPath))
         let category = DisplayText.name(categoryName(alert.categoryID)?.resolve(language) ?? alert.categoryID)
-        let both = alert.accesses.contains(.read) && alert.accesses.contains(.write)
-        let writeOnly = alert.accesses.contains(.write) && !alert.accesses.contains(.read)
+        // The verb is what was done to the file named (daemon-8); the window's other accesses are said
+        // apart. An older alert (nil) names the window's.
+        let shown = alert.firstPathAccess.flatMap { $0.isEmpty ? nil : $0 } ?? alert.accesses
+        let others = alert.accesses.subtracting(shown)
+        let both = shown.contains(.read) && shown.contains(.write)
+        let writeOnly = shown.contains(.write) && !shown.contains(.read)
         let verbZH = both ? "读写" : writeOnly ? "写入" : "读取"
         let verbEN = both ? "read and modified" : writeOnly ? "wrote" : "read"
         let verbENBase = both ? "read and modify" : writeOnly ? "write" : "read"
@@ -63,15 +67,40 @@ public struct AlertFormatter: Sendable {
         case (.en, .ask):
             text = "\(app) wants to \(verbENBase) \(path): not allowed until you decide"
         }
+        if !others.isEmpty { text += otherAccesses(others, kind: alert.kind, app: app, category: category) }
         if alert.ancestryKnown == false {
             // The chain does not reach launchd: whoever started the program was not seen, so "no AI agent
-            // in the chain" cannot be told (an answer here covers only such chains).
+            // in the chain" cannot be told (an answer here covers such chains too: Rule.coversUnknownAncestry).
             text += language == .zhHans ? "（不知道是谁启动的，可能是 AI agent）" : " (started by an unknown process, possibly an AI agent)"
         }
         if alert.count > 1 {
             text += language == .zhHans ? "（\(alert.count) 次）" : " (×\(alert.count))"
         }
         return text
+    }
+
+    /// "; also read files in SSH keys": accesses of the window that the headline's file did not get, in
+    /// the alert's own terms (a block "tried to", a question "wants to").
+    private func otherAccesses(_ others: AccessSet, kind: AlertKind, app: String, category: String) -> String {
+        let both = others.contains(.read) && others.contains(.write)
+        let write = others.contains(.write)
+        if language == .zhHans {
+            let verb = both ? "读写" : write ? "写入" : "读取"
+            switch kind {
+            case .blocked: return "；还试图\(verb) \(category) 中的文件"
+            case .ask: return "；还想要\(verb) \(category) 中的文件"
+            case .wouldBlock: return "；\(app) 还\(verb)了 \(category) 中的文件"
+            default: return "；还\(verb)了 \(category) 中的文件"
+            }
+        }
+        let past = both ? "read and modified" : write ? "wrote" : "read"
+        let base = both ? "read and modify" : write ? "write" : "read"
+        switch kind {
+        case .blocked: return "; also tried to \(base) files in \(category)"
+        case .ask: return "; also wants to \(base) files in \(category)"
+        case .wouldBlock: return "; \(app) also \(past) files in \(category)"
+        default: return "; also \(past) files in \(category)"
+        }
     }
 
     public func chainLine(_ chain: [ChainLink]) -> String {

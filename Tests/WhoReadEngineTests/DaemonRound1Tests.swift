@@ -625,7 +625,8 @@ final class EnforcementRound1Tests: XCTestCase {
         }
         let (core, _) = try r1Core(dir)
         XCTAssertTrue(core.baseline.isApproved(BaselineKey(responsibleKey: r1TerminalKey, categoryID: "ssh", access: .read)))
-        XCTAssertTrue(core.baseline.isApproved(BaselineKey(responsibleKey: r1TerminalKey, categoryID: "ssh", access: .write)))
+        // Adjusted in round 5 (daemon-1): the alert was about a read, so only the read is approved.
+        XCTAssertFalse(core.baseline.isApproved(BaselineKey(responsibleKey: r1TerminalKey, categoryID: "ssh", access: .write)))
     }
 
     // critic-4. Adjusted in the second review: the lock is now taken when the Daemon is built (before its

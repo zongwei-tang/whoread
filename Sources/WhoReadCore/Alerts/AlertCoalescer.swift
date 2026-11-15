@@ -83,28 +83,48 @@ public final class AlertCoalescer: @unchecked Sendable {
             if event.severity > alert.severity { alert.severity = event.severity }
             var change = AlertUpdate.Change.merged
             if let kind, kind.priority > alert.kind.priority || addsAccess {
-                if kind.priority > alert.kind.priority {
+                let raises = kind.priority > alert.kind.priority
+                if raises {
                     alert.kind = kind
                     alert.ruleID = event.ruleID ?? alert.ruleID
                 }
-                alert.firstTime = firstTime
-                alert.appleProgram = appleProgram
-                // The event that made it worse is the one the headline and "allow once" are about.
-                alert.firstPath = event.path
+                if raises || kind == alert.kind {
+                    // A new access of the same kind (another rule's, for a rule's alert): firstPath and ruleID
+                    // describe the same access (daemon-8).
+                    if !raises { alert.ruleID = event.ruleID ?? alert.ruleID }
+                    alert.firstTime = firstTime
+                    alert.appleProgram = appleProgram
+                    // The event that made it worse is the one the headline and "allow once" are about. Accesses
+                    // seen of that file before count too, except for a rule's alert it just became: the
+                    // headline then says what the rule matched.
+                    let sameFile = event.path == alert.firstPath && !(raises && AlertCoalescer.namesARule(kind))
+                    alert.firstPathAccess = sameFile ? alert.firstPathAccess.map { $0.union(event.access) } : event.access
+                    alert.firstPath = event.path
+                    alert.chain = event.chain
+                    alert.chainAgents = event.chainAgents
+                    alert.ancestryKnown = event.ancestryKnown
+                    alert.agentID = event.agentID ?? alert.agentID
+                    alert.paths.removeAll { $0 == event.path }
+                    alert.paths.insert(event.path, at: 0)
+                    if alert.paths.count > maxPaths { alert.paths.removeLast(alert.paths.count - maxPaths) }
+                } else if alert.paths.count < maxPaths && !alert.paths.contains(event.path) {
+                    // A new access of a lower kind (a first write next to a rule's would-block): news, but the
+                    // headline keeps naming the access that gave the alert its kind, and says this one apart.
+                    alert.paths.append(event.path)
+                }
+                // Every escalation moves it (clients notify again on it; an action on the alert holds only
+                // while it has not moved), a merged repeat never does.
                 alert.firstEventID = event.id
-                alert.chain = event.chain
-                alert.chainAgents = event.chainAgents
-                alert.ancestryKnown = event.ancestryKnown
-                alert.agentID = event.agentID ?? alert.agentID
-                alert.paths.removeAll { $0 == event.path }
-                alert.paths.insert(event.path, at: 0)
-                if alert.paths.count > maxPaths { alert.paths.removeLast(alert.paths.count - maxPaths) }
                 // Got worse: surface it again even if the user had dismissed it.
                 alert.status = .unread
                 alert.resolution = nil
                 change = .escalated
-            } else if alert.paths.count < maxPaths && !alert.paths.contains(event.path) {
-                alert.paths.append(event.path)
+            } else {
+                // A repeat of the file it names, of an access no rule is named for: the headline says it too.
+                if event.path == alert.firstPath && (kind == alert.kind || (kind == nil && !AlertCoalescer.namesARule(alert.kind))) {
+                    alert.firstPathAccess = alert.firstPathAccess.map { $0.union(event.access) }
+                }
+                if alert.paths.count < maxPaths && !alert.paths.contains(event.path) { alert.paths.append(event.path) }
             }
             open[key] = alert
             return AlertUpdate(alert: alert, change: change)
@@ -120,10 +140,45 @@ public final class AlertCoalescer: @unchecked Sendable {
             categoryID: event.categoryID, severity: event.severity, count: 1, accesses: event.access,
             firstPath: event.path, firstEventID: event.id, lastEventID: event.id, paths: [event.path],
             chain: event.chain, agentID: event.agentID, ruleID: event.ruleID, firstTime: firstTime, appleProgram: appleProgram,
-            chainAgents: event.chainAgents, ancestryKnown: event.ancestryKnown)
+            chainAgents: event.chainAgents, ancestryKnown: event.ancestryKnown, firstPathAccess: event.access)
         nextID += 1
         open[key] = alert
         return AlertUpdate(alert: alert, change: .created)
+    }
+
+    /// Kinds whose headline is about what a rule matched (its block, would-block or alert): only an access
+    /// of that kind changes what the headline names.
+    static func namesARule(_ kind: AlertKind) -> Bool { kind == .wouldBlock || kind == .blocked || kind == .ruleAlert }
+
+    /// What became of a status change on an open alert (`setStatus`).
+    public enum StatusChange: Equatable, Sendable {
+        /// Open and unchanged since the copy acted on (merged repeats aside): the open copy, which now has
+        /// the new status.
+        case changed(Alert)
+        /// It escalated since that copy (a new kind, a new access, a worse file the user has not seen):
+        /// left as it is, unread.
+        case escalated(Alert)
+        /// Not open here (its window closed): nothing changed.
+        case notOpen
+    }
+
+    /// Sets the status of the open alerts the user acted on, each only if it did not escalate since the
+    /// copy acted on: compare-and-set on `firstEventID`, which every escalation moves (a new kind with
+    /// it) and a merged repeat never does, so an escalation that lands while an action is applied is
+    /// never marked handled (daemon-3). One result per copy.
+    public func setStatus(of acted: [Alert], to status: AlertStatus, resolution: AlertAction?) -> [StatusChange] {
+        lock.lock(); defer { lock.unlock() }
+        guard !acted.isEmpty else { return [] }
+        var keys: [Int64: Key] = [:]
+        for (k, a) in open { keys[a.id] = k }
+        return acted.map { seen in
+            guard let k = keys[seen.id], var a = open[k] else { return .notOpen }
+            guard a.firstEventID == seen.firstEventID else { return .escalated(a) }
+            a.status = status
+            a.resolution = resolution
+            open[k] = a
+            return .changed(a)
+        }
     }
 
     /// Keeps the in-memory copy in sync when the user acts on an alert.

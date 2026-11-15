@@ -60,7 +60,8 @@ extension AskRequest {
     /// question (banner, menu bar, Alerts tab) next to the program that asked.
     public func allowCoverageLine(_ f: AlertFormatter, agentName: (String) -> String = { $0 }) -> String {
         L10n.f(.askCoversFormat, f.allowCoverage(responsible, categoryID: key.categoryID, access: key.access,
-                                                 chainAgents: key.chainAgents, agentName: agentName), language: f.language)
+                                                 chainAgents: key.chainAgents, ancestryKnown: key.ancestryKnown, agentName: agentName),
+               language: f.language)
     }
 
     /// The daemon left out the file path (and the command lines): it does not serve this connection
@@ -87,9 +88,11 @@ extension Alert {
     /// that file, once (DaemonCore.apply). nil otherwise.
     public func allowCoverageLine(_ f: AlertFormatter, agentName: (String) -> String = { $0 }) -> String? {
         guard status != .resolved, availableActions.contains(.alwaysAllow) else { return nil }
-        // The AI agents the answer is scoped to, as the daemon takes them from an alert.
-        let agents = chain.compactMap(\.agentID)
-        let coverage = f.allowCoverage(responsible, categoryID: categoryID, access: accesses, chainAgents: agents, agentName: agentName)
+        // The AI agents the answer is scoped to, as the daemon takes them from an alert: the whole chain's,
+        // not only those of the 64 links it stores (app-10).
+        let agents = scopeAgents
+        let coverage = f.allowCoverage(responsible, categoryID: categoryID, access: accesses, chainAgents: agents,
+                                       ancestryKnown: ancestryKnown ?? true, agentName: agentName)
         let allowOnceIsAppWide = kind == .ask || (kind == .blocked && ruleID == nil)
         return L10n.f(allowOnceIsAppWide ? .askCoversFormat : .alertCoversFormat, coverage, language: f.language)
     }

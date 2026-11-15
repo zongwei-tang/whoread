@@ -13,6 +13,19 @@ public struct BaselineKey: Hashable, Codable, Sendable {
     }
 }
 
+extension ResponsibleEntity {
+    /// What the baseline knows this app, AI agent or program by: `key`, and for an AI agent with a Team ID
+    /// that team too ("agent:claude-code@TEAMID"). An agent is recognised by signals any process can copy
+    /// (argv0, an executable or .app folder name): what was seen of, or approved for, the team-signed
+    /// agent must not count for a process that only looks like it (attribution-2), as its answer rules
+    /// are pinned to the team. An agent without a team (an npm install running on node) cannot be told
+    /// apart from such a process this way (docs/THREAT_MODEL.md).
+    public var baselineKey: String {
+        guard kind == .agent, let team = teamID, !team.isEmpty else { return key }
+        return key + "@" + team
+    }
+}
+
 public struct BaselineEntry: Codable, Hashable, Sendable {
     public enum Source: String, Codable, Sendable {
         /// Seen during a learning period (none by default since ask mode).
@@ -75,9 +88,11 @@ public final class Baseline: @unchecked Sendable {
         prune()
     }
 
+    /// Only inside a learning period that exists (`learningDuration` > 0): an event stamped before its
+    /// start (a pipe backlog when learning restarts, a clock stepped back) is not learned (daemon-7).
     public func isLearning(at now: Date) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return now.timeIntervalSince(learningStartedAt) < learningDuration
+        return learningDuration > 0 && now >= learningStartedAt && now.timeIntervalSince(learningStartedAt) < learningDuration
     }
 
     public func learningEndsAt() -> Date {
@@ -130,16 +145,16 @@ public final class Baseline: @unchecked Sendable {
         return true
     }
 
-    /// "Always allow" for an app on a category (both accesses unless one is given).
-    public func approve(responsibleKey: String, categoryID: String, access: AccessKind? = nil, at now: Date) {
+    /// "Always allow" for an app on a category, for one access kind: the caller approves the kinds that
+    /// were answered and no others (a read approval does not answer a write, daemon-1). No default: both
+    /// kinds are approved only kind by kind.
+    public func approve(responsibleKey: String, categoryID: String, access: AccessKind, at now: Date) {
         lock.lock(); defer { lock.unlock() }
-        for kind in access.map({ [$0] }) ?? AccessKind.allCases {
-            let key = BaselineKey(responsibleKey: responsibleKey, categoryID: categoryID, access: kind)
-            var e = entries[key] ?? BaselineEntry(key: key, firstSeen: now, lastSeen: now, count: 0, source: .approved)
-            e.source = .approved
-            entries[key] = e
-            dirty.insert(key)
-        }
+        let key = BaselineKey(responsibleKey: responsibleKey, categoryID: categoryID, access: access)
+        var e = entries[key] ?? BaselineEntry(key: key, firstSeen: now, lastSeen: now, count: 0, source: .approved)
+        e.source = .approved
+        entries[key] = e
+        dirty.insert(key)
     }
 
     public func remove(responsibleKey: String, categoryID: String? = nil) {

@@ -213,6 +213,13 @@ public final class EventPipeline: EventSink, @unchecked Sendable {
         onSourceState?(state)
     }
 
+    /// Runs `body` while no file event is analysed or queued (the lock `receive` holds across both): an
+    /// action on alerts changes them in the coalescer and queues them with no merge in between (daemon-3).
+    public func whileIngestionHeld<T>(_ body: () throws -> T) rethrows -> T {
+        orderLock.lock(); defer { orderLock.unlock() }
+        return try body()
+    }
+
     public var stats: (processed: UInt64, lastEventAt: Date?, source: SourceState) {
         lock.lock(); defer { lock.unlock() }
         return (processed, lastEvent, sourceState)

@@ -401,7 +401,7 @@ public final class Analyzer: @unchecked Sendable {
                 benignServiceID: benignID, decision: eventDecision, ruleID: decision.ruleID,
                 chainAgents: chainAgents, ancestryKnown: ancestryKnown, note: note)
 
-            let keys = access.kinds.map { BaselineKey(responsibleKey: responsible.key, categoryID: group.category.id, access: $0) }
+            let keys = access.kinds.map { BaselineKey(responsibleKey: responsible.baselineKey, categoryID: group.category.id, access: $0) }
             let firstTime = !learning && benignID == nil && keys.contains { !baseline.contains($0) }
             let kind = alertKind(for: event, decision: decision, learning: learning, trustedApple: trustApple && appleProgram)
             if benignID == nil && eventDecision != .denied {
@@ -440,14 +440,19 @@ public final class Analyzer: @unchecked Sendable {
         if event.isOwner && event.agentID == nil && ancestryKnown { return nil }
         if trustedApple { return nil }
         let keys = event.access.kinds.map {
-            BaselineKey(responsibleKey: event.responsible.key, categoryID: event.categoryID, access: $0)
+            BaselineKey(responsibleKey: event.responsible.baselineKey, categoryID: event.categoryID, access: $0)
         }
         if keys.isEmpty { return nil }
         // Approvals are keyed by the responsible app only. An AI agent running a program charged to an
         // app (a tool inside its bundle, such as Xcode's git) is not what the user approved for that app.
         // Nor is a program whose starter is unknown: the chain stops there, so it is charged to itself.
         let agentDriven = (event.agentID != nil || !ancestryKnown) && event.responsible.kind != .agent
-        if event.severity == .critical && (agentDriven || !keys.allSatisfy(baseline.isApproved)) {
+        // An AI agent's own critical access is quiet only through its "always allow" answer rule, which is
+        // scoped to its team and to the agents in the chain (its match suppressed the alert above). A
+        // baseline approval knows neither (attribution-2): Codex driving an approved Claude Code alerts,
+        // as ask mode asks.
+        let agent = event.responsible.kind == .agent
+        if event.severity == .critical && (agentDriven || agent || !keys.allSatisfy(baseline.isApproved)) {
             return .criticalNonOwner
         }
         if !learning && keys.contains(where: { !baseline.contains($0) }) {
