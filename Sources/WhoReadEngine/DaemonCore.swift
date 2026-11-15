@@ -1346,6 +1346,11 @@ public final class DaemonCore: @unchecked Sendable {
     public func update(settings new: Settings, peer: IPCPeer, reenable: Bool = false) throws {
         mutation.lock(); defer { mutation.unlock() }
         let s = new.validated()
+        // Before anything is applied, the project roots this update adds (cli-1). Only those: roots stored
+        // before must neither block a kill switch or a pause (they come through here too) nor their removal.
+        for root in Set(s.projectRoots).subtracting(currentSettings.projectRoots).sorted() {
+            try checkProjectRoot(root)
+        }
         lock.lock()
         let old = settings
         settings = s
@@ -1384,6 +1389,24 @@ public final class DaemonCore: @unchecked Sendable {
             Log.error("settings applied but not saved: \(error)")
             throw IPCError(.internalError, "settings applied but not saved: \(error)")
         }
+    }
+
+    /// A project root the classifier can monitor (absolute or `~/…`, see PathNormalizer.expand), spelled
+    /// without control characters, `.` or `..`, and not a whole disk, home or folder of homes (which
+    /// would make every .env, .pem and .key there "project secrets"). Refused as invalid, never dropped:
+    /// a root that monitors nothing must not look stored (cli-1).
+    func checkProjectRoot(_ p: String) throws {
+        guard DaemonCore.isCleanPath(p) else {
+            throw IPCError(.invalid, "project root \(p.debugDescription) contains control characters")
+        }
+        let components = PathNormalizer.components(p)
+        guard !components.contains("."), !components.contains("..") else {
+            throw IPCError(.invalid, "project root \(p) must not contain . or .. components")
+        }
+        guard !normalizer.expand(p).isEmpty else {
+            throw IPCError(.invalid, "project root \(p): use an absolute path or ~/…")
+        }
+        if let reason = tooBroad(p) { throw IPCError(.invalid, "project root \(p) is \(reason)") }
     }
 
     /// Read-modify-write of the settings under the mutation lock (two clients toggling different
