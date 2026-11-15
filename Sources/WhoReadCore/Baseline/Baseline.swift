@@ -75,9 +75,11 @@ public final class Baseline: @unchecked Sendable {
         prune()
     }
 
+    /// Only inside a learning period that exists (`learningDuration` > 0): an event stamped before its
+    /// start (a pipe backlog when learning restarts, a clock stepped back) is not learned (daemon-7).
     public func isLearning(at now: Date) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return now.timeIntervalSince(learningStartedAt) < learningDuration
+        return learningDuration > 0 && now >= learningStartedAt && now.timeIntervalSince(learningStartedAt) < learningDuration
     }
 
     public func learningEndsAt() -> Date {
