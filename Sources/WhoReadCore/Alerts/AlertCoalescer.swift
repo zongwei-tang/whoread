@@ -83,28 +83,45 @@ public final class AlertCoalescer: @unchecked Sendable {
             if event.severity > alert.severity { alert.severity = event.severity }
             var change = AlertUpdate.Change.merged
             if let kind, kind.priority > alert.kind.priority || addsAccess {
-                if kind.priority > alert.kind.priority {
+                let raises = kind.priority > alert.kind.priority
+                if raises {
                     alert.kind = kind
                     alert.ruleID = event.ruleID ?? alert.ruleID
                 }
-                alert.firstTime = firstTime
-                alert.appleProgram = appleProgram
-                // The event that made it worse is the one the headline and "allow once" are about.
-                alert.firstPath = event.path
+                if raises || kind == alert.kind {
+                    // A new access of the same kind (another rule's, for a rule's alert): firstPath and ruleID
+                    // describe the same access (daemon-8).
+                    if !raises { alert.ruleID = event.ruleID ?? alert.ruleID }
+                    alert.firstTime = firstTime
+                    alert.appleProgram = appleProgram
+                    // The event that made it worse is the one the headline and "allow once" are about.
+                    alert.firstPathAccess = event.path == alert.firstPath ? alert.firstPathAccess.map { $0.union(event.access) } : event.access
+                    alert.firstPath = event.path
+                    alert.chain = event.chain
+                    alert.chainAgents = event.chainAgents
+                    alert.ancestryKnown = event.ancestryKnown
+                    alert.agentID = event.agentID ?? alert.agentID
+                    alert.paths.removeAll { $0 == event.path }
+                    alert.paths.insert(event.path, at: 0)
+                    if alert.paths.count > maxPaths { alert.paths.removeLast(alert.paths.count - maxPaths) }
+                } else if alert.paths.count < maxPaths && !alert.paths.contains(event.path) {
+                    // A new access of a lower kind (a first write next to a rule's would-block): news, but the
+                    // headline keeps naming the access that gave the alert its kind, and says this one apart.
+                    alert.paths.append(event.path)
+                }
+                // Every escalation moves it (clients notify again on it; an action on the alert holds only
+                // while it has not moved), a merged repeat never does.
                 alert.firstEventID = event.id
-                alert.chain = event.chain
-                alert.chainAgents = event.chainAgents
-                alert.ancestryKnown = event.ancestryKnown
-                alert.agentID = event.agentID ?? alert.agentID
-                alert.paths.removeAll { $0 == event.path }
-                alert.paths.insert(event.path, at: 0)
-                if alert.paths.count > maxPaths { alert.paths.removeLast(alert.paths.count - maxPaths) }
                 // Got worse: surface it again even if the user had dismissed it.
                 alert.status = .unread
                 alert.resolution = nil
                 change = .escalated
-            } else if alert.paths.count < maxPaths && !alert.paths.contains(event.path) {
-                alert.paths.append(event.path)
+            } else {
+                // A repeat of the file it names, of an access no rule is named for: the headline says it too.
+                if event.path == alert.firstPath && (kind == alert.kind || (kind == nil && !AlertCoalescer.namesARule(alert.kind))) {
+                    alert.firstPathAccess = alert.firstPathAccess.map { $0.union(event.access) }
+                }
+                if alert.paths.count < maxPaths && !alert.paths.contains(event.path) { alert.paths.append(event.path) }
             }
             open[key] = alert
             return AlertUpdate(alert: alert, change: change)
@@ -120,11 +137,15 @@ public final class AlertCoalescer: @unchecked Sendable {
             categoryID: event.categoryID, severity: event.severity, count: 1, accesses: event.access,
             firstPath: event.path, firstEventID: event.id, lastEventID: event.id, paths: [event.path],
             chain: event.chain, agentID: event.agentID, ruleID: event.ruleID, firstTime: firstTime, appleProgram: appleProgram,
-            chainAgents: event.chainAgents, ancestryKnown: event.ancestryKnown)
+            chainAgents: event.chainAgents, ancestryKnown: event.ancestryKnown, firstPathAccess: event.access)
         nextID += 1
         open[key] = alert
         return AlertUpdate(alert: alert, change: .created)
     }
+
+    /// Kinds whose headline is about what a rule matched (its block, would-block or alert): only an access
+    /// of that kind changes what the headline names.
+    static func namesARule(_ kind: AlertKind) -> Bool { kind == .wouldBlock || kind == .blocked || kind == .ruleAlert }
 
     /// Keeps the in-memory copy in sync when the user acts on an alert.
     public func updateStatus(alertID: Int64, status: AlertStatus, resolution: AlertAction?) {
