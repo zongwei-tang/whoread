@@ -1,4 +1,3 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
 import SwiftUI
 import WhoReadCore
 import WhoReadUIModel
@@ -189,6 +188,10 @@ struct RuleEditor: View {
                 Toggle(L10n.t(.ruleEnabled), isOn: $draft.enabled)
                 if draft.action == .deny {
                     Toggle(L10n.t(.ruleEnforce), isOn: $draft.enforce)
+                    // Saved either way, but nothing blocks right now (eslogger cannot): say so here too.
+                    if let caveat = model.enforcementCaveat {
+                        Text(caveat).font(.caption).foregroundStyle(.orange)
+                    }
                 }
             }
             HStack {

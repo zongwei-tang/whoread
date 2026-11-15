@@ -1,4 +1,3 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
 import SwiftUI
 import WhoReadCore
 import WhoReadIPC
@@ -26,10 +25,10 @@ struct MenuBarView: View {
                 Divider()
             }
             if model.connected, let status = model.liveStatus {
-                // Not recognised as the signed app: what is missing, and that questions still work.
-                if let limited = model.limitedViewText {
-                    Text(limited).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
+                // Not recognised by the background service: what is missing and how to fix it, for as
+                // long as it lasts (through the extension: what only the signed app sees).
+                if let notice = model.accessNotice {
+                    NoticeText(text: notice).font(.callout)
                 }
                 quickToggles(status)
                 Divider()
@@ -47,7 +46,9 @@ struct MenuBarView: View {
                     Text(err).font(.caption).foregroundStyle(.red)
                 }
             } else {
-                Text(L10n.t(.errUnavailable)).foregroundStyle(.secondary)
+                // The dev daemon may be refusing this very app (a rebuilt one): the text says so.
+                Text(model.unreachableText ?? L10n.t(.errUnavailable)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 Button(L10n.t(.openSetup)) {
                     NavigationState.shared.showOnboarding = true
                     open(.live)
@@ -85,10 +86,14 @@ struct MenuBarView: View {
                 get: { status.monitoringPaused },
                 set: { connection.setPaused($0) }))
             // Shows what is in effect: off after the kill-switch file. Never switched off automatically.
+            // Monitor-only: cannot be turned on, and says why (turning it off always works).
             Toggle(L10n.t(.enforcement), isOn: Binding(
                 get: { model.enforcementSwitchOn },
                 set: { connection.setEnforcement($0) }))
-            if let inactive = model.enforcementInactiveText {
+                .disabled(!model.enforcementSwitchUsable)
+            if let unavailable = model.blockingUnavailableText {
+                Text(unavailable).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if let inactive = model.enforcementInactiveText {
                 Text(inactive).font(.caption).foregroundStyle(.orange)
             }
             if let slow = model.slowResponsesText {

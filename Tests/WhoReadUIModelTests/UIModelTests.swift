@@ -357,9 +357,12 @@ final class AppModelTests: XCTestCase {
 
         // Step 1 is detected from the connection, not only from this session's request.
         status.source = .eslogger
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .pending)
+        // The dev daemon with eslogger is monitor-only: there is no extension to install
+        // (InstallUIModelTests).
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .notAvailable)
         XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: true), .done)
         XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: true), .pending)
+        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: false), .pending, "not known yet")
         status.source = .native
         XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .done)
         XCTAssertEqual(OnboardingModel(extensionState: .needsRestart).extensionStepState(nil, connected: false, viaExtension: false), .needsRestart)

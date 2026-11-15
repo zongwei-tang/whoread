@@ -271,6 +271,10 @@ public final class NotificationPlanner: @unchecked Sendable {
 
 /// Onboarding: Full Disk Access, system extension approval, daemon running — each detected live
 /// from daemon status (FDA problems surface as the source failing with NOT_PERMITTED).
+///
+/// Monitor-only mode (`isMonitorOnly`): the dev LaunchDaemon runs Apple's eslogger. There is no
+/// extension to install (a build without a team cannot install one), Full Disk Access goes to the
+/// daemon's executable rather than to the app, and onboarding completes without the extension.
 public struct OnboardingModel: Equatable, Sendable {
     public enum StepState: Equatable, Sendable {
         case pending
@@ -279,6 +283,8 @@ public struct OnboardingModel: Equatable, Sendable {
         /// The extension activates after the next restart (`.willCompleteAfterReboot`).
         case needsRestart
         case failed(String)
+        /// Cannot be done with this installation: the system extension in monitor-only mode.
+        case notAvailable
     }
 
     /// macOS 13+ first, then the pre-13 form (see docs/RESEARCH.md #1).
@@ -288,6 +294,10 @@ public struct OnboardingModel: Equatable, Sendable {
     ]
     public static let loginItemsExtensionsURL = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
 
+    /// The dev LaunchDaemon's executable, as installed (packaging/com.whoread.daemon.plist). In
+    /// monitor-only mode Full Disk Access belongs to it: it starts eslogger, which needs it.
+    public static let daemonExecutablePath = "/usr/local/libexec/whoreadd"
+
     /// What this app session saw of its own activation request.
     public var extensionState: StepState = .pending
 
@@ -295,11 +305,36 @@ public struct OnboardingModel: Equatable, Sendable {
         self.extensionState = extensionState
     }
 
+    /// Monitor-only mode: the app talks to the dev LaunchDaemon (not through the system extension's
+    /// service), which monitors with Apple's eslogger. eslogger cannot block, and this build cannot
+    /// install the extension that could: WhoRead records and alerts, without blocking or questions.
+    public static func isMonitorOnly(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool) -> Bool {
+        connected && !viaExtension && status?.source == .eslogger
+    }
+
     /// Done once the daemon answers through the extension's Mach service (or runs the native
-    /// Endpoint Security source), even if the extension was approved before this launch.
+    /// Endpoint Security source), even if the extension was approved before this launch. Not
+    /// available in monitor-only mode: nothing to install, monitoring runs without it.
     public func extensionStepState(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool) -> StepState {
         if connected, let s = status, viaExtension || s.source == .native { return .done }
+        if OnboardingModel.isMonitorOnly(status, connected: connected, viaExtension: viaExtension) { return .notAvailable }
         return extensionState
+    }
+
+    /// The extension step's text: in monitor-only mode, why it is not available.
+    public static func extensionBody(monitorOnly: Bool, _ language: Language = L10n.current) -> String {
+        L10n.t(monitorOnly ? .onbExtNotAvailableBody : .onbExtBody, language)
+    }
+
+    /// The Full Disk Access step's text: in monitor-only mode it names the daemon's executable, which
+    /// needs it, not this app.
+    public static func fullDiskAccessBody(monitorOnly: Bool, _ language: Language = L10n.current) -> String {
+        monitorOnly ? L10n.f(.onbFDABodyDaemonFormat, daemonExecutablePath, language: language) : L10n.t(.onbFDABody, language)
+    }
+
+    /// The last step's text: in monitor-only mode, that nothing is blocked.
+    public static func daemonBody(monitorOnly: Bool, _ language: Language = L10n.current) -> String {
+        L10n.t(monitorOnly ? .onbDaemonBodyMonitorOnly : .onbDaemonBody, language)
     }
 
     public func fullDiskAccessState(_ status: DaemonStatus?, connected: Bool) -> StepState {
@@ -317,6 +352,8 @@ public struct OnboardingModel: Equatable, Sendable {
         return s.sourceRunning ? .done : .waiting
     }
 
+    /// Full Disk Access granted and monitoring running. The extension step is not part of it: monitor-only
+    /// mode has none, and an approved extension shows as monitoring running.
     public func isComplete(_ status: DaemonStatus?, connected: Bool) -> Bool {
         fullDiskAccessState(status, connected: connected) == .done && daemonState(status, connected: connected) == .done
     }
