@@ -74,7 +74,8 @@ public final class XPCServer: NSObject, NSXPCListenerDelegate, @unchecked Sendab
             return false
         }
         // Before resume, and only once (a second call is an XPC error). The system checks every message
-        // on the connection against it and invalidates the connection on the first one that fails.
+        // on the connection against it and invalidates the connection on the first one that fails (what
+        // the client is told then, and for a refusal above: `XPCClient.noAnswerError`).
         if let requirement { connection.setCodeSigningRequirement(requirement) }
         connection.exportedInterface = NSXPCInterface(with: WhoReadXPCProtocol.self)
         connection.exportedObject = ExportedService(handler: handler, peer: peer)

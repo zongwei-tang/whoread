@@ -304,10 +304,12 @@ public final class UnixSocketClient: IPCClient, @unchecked Sendable {
     /// What a failed connect() says about the daemon.
     static func noAnswer(connectErrno e: Int32) -> IPCError.NoAnswer {
         switch e {
-        // No socket file, or one nothing listens at any more (a daemon that stopped).
-        case ENOENT, ENOTDIR, ECONNREFUSED: return .notFound
+        // No socket file.
+        case ENOENT, ENOTDIR: return .notFound
         // The socket's mode (owner only by default: whoreadd --dev-socket-mode).
         case EACCES, EPERM: return .refused
+        // ECONNREFUSED: a socket file nothing listens at any more (a daemon that stopped), or a full
+        // listen backlog (Darwin refuses connects then, see UnixSocketServer.start).
         default: return .noConnection
         }
     }

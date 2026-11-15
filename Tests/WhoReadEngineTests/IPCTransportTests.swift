@@ -324,7 +324,8 @@ final class NoAnswerTests: XCTestCase {
     func testAFailedConnectToTheDevSocketSaysWhy() throws {
         XCTAssertEqual(UnixSocketClient.noAnswer(connectErrno: ENOENT), .notFound)
         XCTAssertEqual(UnixSocketClient.noAnswer(connectErrno: ENOTDIR), .notFound)
-        XCTAssertEqual(UnixSocketClient.noAnswer(connectErrno: ECONNREFUSED), .notFound, "a socket file nothing listens at")
+        XCTAssertEqual(UnixSocketClient.noAnswer(connectErrno: ECONNREFUSED), .noConnection,
+                       "a socket file nothing listens at, or a full listen backlog")
         XCTAssertEqual(UnixSocketClient.noAnswer(connectErrno: EACCES), .refused, "the socket's mode (0600 by default)")
         XCTAssertEqual(UnixSocketClient.noAnswer(connectErrno: EIO), .noConnection)
         let dir = TempDir()
