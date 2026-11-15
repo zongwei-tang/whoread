@@ -511,7 +511,7 @@ public final class ProcessTree: @unchecked Sendable {
     /// Elements always kept, however long the command line: as many as anything shows
     /// (`ArgvRedactor.redact` shows 8).
     public static let minArgvElements = 8
-    /// Bytes of argv a node keeps beyond its first `minArgvElements` elements.
+    /// Bytes of argv a node keeps in all; its first `minArgvElements` elements are kept even past it.
     public static let maxArgvBytes = 16 * 1024
     /// Bytes one element keeps at most: 1024 characters of up to 4 bytes (`ArgvRedactor.maxElementLength`),
     /// fewer only where characters are made of several scalars.
