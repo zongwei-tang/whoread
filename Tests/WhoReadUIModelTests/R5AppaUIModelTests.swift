@@ -7,7 +7,7 @@ import WhoReadIPC
 // Round-5 fixes in the app's alert and question lists, its polling and its notifications (group appa):
 // app-1 to app-8. Tests that need the daemon use the replay fixture and in-process clients (no socket).
 
-/// Against the real daemon (replayed fixture), as the signed app and as an unrecognised build.
+/// Against the real daemon (replayed fixture), as the signed app.
 final class R5AppaDaemonTests: XCTestCase {
     var dir: URL!
     var core: DaemonCore!
@@ -585,6 +585,7 @@ final class R5AppaListTests: XCTestCase {
 final class R5AppaPollPaceTests: XCTestCase {
     private final class Box<T>: @unchecked Sendable { var value: T? }
 
+    #if canImport(Darwin)
     func testApp3PollTimersFireWhileTheRunLoopTracksAMenu() {
         // AppKit runs the main run loop in its event-tracking mode while a menu (a picker, the Templates
         // menu) is open or a window is resized, and registers that mode as a common mode. A mode of our
@@ -599,6 +600,7 @@ final class R5AppaPollPaceTests: XCTestCase {
         while Date() < end { _ = RunLoop.main.run(mode: tracking, before: end) }
         XCTAssertGreaterThanOrEqual(fired.value ?? 0, 3, "the questions are read while a menu is open")
     }
+    #endif
 
     func testApp3TheAdministratorDialogDoesNotHoldUpTheMainThread() throws {
         // Stands in for osascript: the password takes a while, then the user cancels.
