@@ -274,7 +274,7 @@ final class DaemonConnection {
     }
 
     /// Runs a request off the main thread, applies the daemon's answer, then refreshes.
-    /// `failed` describes a refusal (default: `L10n.message(for:)`) and may act on it. `questions`: on
+    /// `failed` describes a refusal (default: `AppModel.actionError`) and may act on it. `questions`: on
     /// the questions' connection (an answer), never queued behind a history read.
     private func run(_ work: @escaping @Sendable (XPCClient) throws -> IPCResponse, questions: Bool = false,
                      failed: ((IPCError) -> String)? = nil, then: (() -> Void)? = nil) {
@@ -294,7 +294,7 @@ final class DaemonConnection {
             }
             Task { @MainActor in
                 if let failure {
-                    self.lastActionError = failed?(failure) ?? L10n.message(for: failure)
+                    self.lastActionError = failed?(failure) ?? self.model.actionError(failure)
                 } else {
                     self.lastActionError = nil
                     if let response { self.model.apply(response: response) }
@@ -317,7 +317,7 @@ final class DaemonConnection {
         let kind = model.alerts.first { $0.id == alert }?.kind
         run({ try $0.call(.alertAction(alertID: alert, action: action)) }, questions: kind == .ask, failed: { e in
             // The rule limit, an answer applied but not saved, no reply: said as such, not "refused".
-            let text = L10n.alertActionError(e, alertID: alert, action: action, kind: kind)
+            let text = self.model.alertActionError(e, alertID: alert, action: action, kind: kind)
             if fromNotification {
                 NotificationManager.shared.post(SystemNotice(identifier: "whoread.alert-failed-\(alert)",
                                                              title: L10n.t(.notifAskFailedTitle), body: text), tab: .alerts)
@@ -342,7 +342,7 @@ final class DaemonConnection {
             do { response = try client.call(.answerAsk(id: id, action: action)) } catch { failure = SnapshotFetcher.ipcError(error) }
             Task { @MainActor in
                 if let failure {
-                    let text = L10n.answerError(failure, askID: id, action: action)
+                    let text = self.model.answerError(failure, askID: id, action: action)
                     self.lastActionError = text
                     // Allowing refused: this connection may not have been taken for the app.
                     if failure.code == .notPermitted, AskAnswers.isAllow(action),

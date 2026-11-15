@@ -275,6 +275,8 @@ public final class NotificationPlanner: @unchecked Sendable {
 /// Monitor-only mode (`isMonitorOnly`): the dev LaunchDaemon runs Apple's eslogger. There is no
 /// extension to install (a build without a team cannot install one), Full Disk Access goes to the
 /// daemon's executable rather than to the app, and onboarding completes without the extension.
+/// Which steps onboarding shows is decided by the build first (`showsMonitorOnly`): one that cannot
+/// install the extension shows those steps whether or not the daemon answers right now.
 public struct OnboardingModel: Equatable, Sendable {
     public enum StepState: Equatable, Sendable {
         case pending
@@ -312,10 +314,35 @@ public struct OnboardingModel: Equatable, Sendable {
         connected && !viaExtension && status?.source == .eslogger
     }
 
+    /// Onboarding shows the monitor-only steps (`extensionBody`, `fullDiskAccessBody`, `daemonBody`).
+    /// Decided by the build first. One that cannot install the system extension (`canInstallExtension`
+    /// false: it names no extension service, `DaemonConnection.extensionServiceName`, as the ad hoc build
+    /// scripts/install.sh makes) only ever uses the dev LaunchDaemon, so its steps stay the same while that
+    /// daemon is not running, restarting, or refusing this app: all three look like no answer to the app.
+    /// `status` is the last one read (kept while the daemon does not answer): only the native source (the
+    /// dev daemon in a VM with SIP disabled) can block, and then the usual steps apply. A build that can
+    /// install the extension: monitor-only while the daemon answers as the dev LaunchDaemon with eslogger.
+    public static func showsMonitorOnly(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool, canInstallExtension: Bool) -> Bool {
+        guard canInstallExtension else { return status?.source != .native }
+        return isMonitorOnly(status, connected: connected, viaExtension: viaExtension)
+    }
+
+    /// The Full Disk Access step names the daemon's executable (`fullDiskAccessBody(monitorOnly: true)`, with
+    /// a button that copies its path), not this app: always for a build that cannot install the extension,
+    /// which only uses the dev LaunchDaemon (whoreadd needs Full Disk Access with the native source too),
+    /// otherwise in monitor-only mode.
+    public static func fullDiskAccessGoesToDaemon(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool,
+                                                  canInstallExtension: Bool) -> Bool {
+        !canInstallExtension || isMonitorOnly(status, connected: connected, viaExtension: viaExtension)
+    }
+
     /// Done once the daemon answers through the extension's Mach service (or runs the native
     /// Endpoint Security source), even if the extension was approved before this launch. Not
-    /// available in monitor-only mode: nothing to install, monitoring runs without it.
-    public func extensionStepState(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool) -> StepState {
+    /// available in monitor-only mode: nothing to install, monitoring runs without it. Never offered by
+    /// a build that cannot install it (`showsMonitorOnly`), whatever this session's request did and
+    /// whether or not the daemon answers now; for such a build the native source last seen does its job.
+    public func extensionStepState(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool, canInstallExtension: Bool) -> StepState {
+        guard canInstallExtension else { return status?.source == .native ? .done : .notAvailable }
         if connected, let s = status, viaExtension || s.source == .native { return .done }
         if OnboardingModel.isMonitorOnly(status, connected: connected, viaExtension: viaExtension) { return .notAvailable }
         return extensionState
@@ -327,7 +354,7 @@ public struct OnboardingModel: Equatable, Sendable {
     }
 
     /// The Full Disk Access step's text: in monitor-only mode it names the daemon's executable, which
-    /// needs it, not this app.
+    /// needs it, not this app (onboarding passes `fullDiskAccessGoesToDaemon`).
     public static func fullDiskAccessBody(monitorOnly: Bool, _ language: Language = L10n.current) -> String {
         monitorOnly ? L10n.f(.onbFDABodyDaemonFormat, daemonExecutablePath, language: language) : L10n.t(.onbFDABody, language)
     }

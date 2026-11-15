@@ -13,7 +13,10 @@ final class InstallUIModelTests: XCTestCase {
     var dir: URL!
     var core: DaemonCore!
     var handler: ServiceHandler!
-    /// The app as the daemon sees one it does not recognise (rebuilt or replaced after installing).
+    /// The app as a dev daemon sees it when it accepts the connection but does not take it for the app: one
+    /// installed without pinned requirements, or a wrong guess when the connection was accepted. (A rebuilt or
+    /// replaced app is refused by the requirements scripts/install.sh pins: XPC drops its connections, which
+    /// looks like no answer; `SetupUIModelTests.testSelfCheckOfAProgramTheDevDaemonMayBeRefusingSaysSo`.)
     var unrecognised: IPCClient!
     /// The app the installer pinned.
     var recognised: IPCClient!
@@ -177,9 +180,12 @@ final class InstallUIModelTests: XCTestCase {
             XCTAssertEqual(r.lines, [line], file: file, line: lineNumber)
             XCTAssertEqual(r.exitStatus, 1, file: file, line: lineNumber)
         }
+        // No answer to the handshake from the dev daemon: it may be refusing this program (a rebuilt app).
+        let refusing = "; if com.whoread.daemon is running, it may be refusing this program: run scripts/install.sh again, "
+            + "which is needed when the app was rebuilt or replaced after installing"
         check(FixedClient { _ in throw IPCError(.unavailable, "XPC: Couldn't communicate with a helper application.") },
-              "daemon: unreachable (XPC: Couldn't communicate with a helper application.)")
-        check(FixedClient { _ in throw IPCError(.unavailable, "no\nanswer") }, "daemon: unreachable (no\\u{a}answer)")
+              "daemon: unreachable (XPC: Couldn't communicate with a helper application.\(refusing))")
+        check(FixedClient { _ in throw IPCError(.unavailable, "no\nanswer") }, "daemon: unreachable (no\\u{a}answer\(refusing))")
         check(FixedClient { _ in .error(IPCError(.versionMismatch, "client speaks protocol 3, daemon 4")) },
               "daemon: unreachable (protocol mismatch: client speaks protocol 3, daemon 4)")
         check(FixedClient { _ in .hello(serverVersion: whoReadIPCVersion + 1) },
@@ -220,8 +226,9 @@ final class InstallUIModelTests: XCTestCase {
         XCTAssertFalse(OnboardingModel.isMonitorOnly(nil, connected: true, viaExtension: false))
 
         // Not offered: it cannot work in this build, whatever this session tried.
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .notAvailable)
-        XCTAssertEqual(OnboardingModel(extensionState: .failed("x")).extensionStepState(status, connected: true, viaExtension: false),
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false, canInstallExtension: true), .notAvailable)
+        XCTAssertEqual(OnboardingModel(extensionState: .failed("x")).extensionStepState(status, connected: true, viaExtension: false,
+                                                                                        canInstallExtension: true),
                        .notAvailable)
         // Onboarding completes without it.
         XCTAssertEqual(o.fullDiskAccessState(status, connected: true), .done)
@@ -240,7 +247,7 @@ final class InstallUIModelTests: XCTestCase {
         XCTAssertEqual(OnboardingModel.fullDiskAccessBody(monitorOnly: false, .en), L10n.t(.onbFDABody, .en))
         XCTAssertEqual(OnboardingModel.extensionBody(monitorOnly: false, .zhHans), L10n.t(.onbExtBody, .zhHans))
         status.source = .replay
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .pending)
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false, canInstallExtension: true), .pending)
 
         // The app's model agrees, from the connection it reports.
         let m = AppModel(language: .en)

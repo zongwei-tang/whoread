@@ -571,12 +571,15 @@ public final class AppModel {
     private var notRecognisedByDevDaemon: Bool { notRecognised && !viaExtension }
 
     /// The notice at the top of the menu bar window and the main window while the dev LaunchDaemon does
-    /// not recognise this app: what cannot be shown, and that scripts/install.sh fixes it. It stays as
-    /// long as the refusals do. Through the system extension, `limitedViewText` says it instead.
+    /// not recognise this app: what cannot be shown, and that scripts/install.sh fixes it. With the native
+    /// source (a VM with SIP disabled, which scripts/install.sh does not set up): installing that daemon
+    /// again with this app. It stays as long as the refusals do. Through the system extension,
+    /// `limitedViewText` says it instead.
     public var notRecognisedText: String? {
         guard notRecognisedByDevDaemon else { return nil }
         let missing = refusedParts.filter(\.isRecorded).map { L10n.partName($0, language) }
-        let text = L10n.f(.notRecognisedFormat, L10n.alternatives(missing, language), language: language)
+        let format: L = liveStatus?.source == .native ? .notRecognisedNativeFormat : .notRecognisedFormat
+        let text = L10n.f(format, L10n.alternatives(missing, language), language: language)
         // Questions need a source that can hold an access: they still arrive, and can be denied here.
         guard liveStatus?.sourceCanEnforce == true else { return text }
         return text + (language == .zhHans ? "" : " ") + L10n.t(.notRecognisedAsks, language)
@@ -585,6 +588,28 @@ public final class AppModel {
     /// The one notice about what the daemon withholds from this app (`notRecognisedText`, else
     /// `limitedViewText`): never both.
     public var accessNotice: String? { notRecognisedText ?? limitedViewText }
+
+    // A refused change (`DaemonConnection.run`), alert action (`act`) or answer to a question (`answer`),
+    // worded for this installation. While the dev LaunchDaemon does not recognise this app, a refusal for
+    // lack of privilege points at the notice that says why and how to fix it (`notRecognisedText`), not at
+    // "the signed WhoRead app", which a dev install does not have. Refusals for another reason (another
+    // user at the screen, the daemon's own reason for a change that strengthens protection) keep their
+    // words, and so does everything through the system extension (`limitedViewText` there).
+
+    /// A refused change (`DaemonConnection.run`).
+    public func actionError(_ e: IPCError) -> String {
+        L10n.message(for: e, notRecognised: notRecognisedByDevDaemon, language)
+    }
+
+    /// A refused alert action (`DaemonConnection.act`).
+    public func alertActionError(_ e: IPCError, alertID: Int64, action: AlertAction, kind: AlertKind?) -> String {
+        L10n.alertActionError(e, alertID: alertID, action: action, kind: kind, notRecognised: notRecognisedByDevDaemon, language)
+    }
+
+    /// A refused answer to a question (`DaemonConnection.answer`).
+    public func answerError(_ e: IPCError, askID: Int64, action: AlertAction) -> String {
+        L10n.answerError(e, askID: askID, action: action, notRecognised: notRecognisedByDevDaemon, language)
+    }
 
     /// Once a poll found the daemon unreachable: why nothing can be read. With the dev LaunchDaemon, also
     /// that it may be refusing this very app: when the client code requirement the installer pinned
@@ -672,8 +697,9 @@ public final class AppModel {
 
     // MARK: - Rules
 
-    /// Display name: built-in template names and "Block <app> from <category>" rules created by
-    /// alert actions (stored in English) are shown in the UI language.
+    /// Display name: built-in template names, "Block <app> from <category>" rules created by alert
+    /// actions, and the "Allow <app> to read <category> (10 minutes)" rules answers save (all stored in
+    /// English) are shown in the UI language. Any other name (one the user gave) is shown as it is.
     public func ruleName(_ r: Rule) -> String {
         if let t = r.template, let localized = L10n.templateName(t, language),
            r.name == nil || r.name == RuleTemplates.all.first(where: { $0.template == t })?.name {
@@ -686,6 +712,25 @@ public final class AppModel {
                 // The app part is the name the app gave itself when the rule was made.
                 let app = DisplayText.name(String(name.dropFirst(prefix.count).dropLast(suffix.count)))
                 return L10n.f(.ruleBlockAppFormat, app, DisplayText.name(category.resolve(language)), language: language)
+            }
+        }
+        // "Allow once" and "always allow" (also on an alert): named as DaemonCore.answerRuleEdit names them,
+        // the verb by the access the rule allows, "(10 minutes)" for allow once.
+        if let name = r.name, r.template == RuleTemplates.askAnswer, r.action == .allow, case .responsible = r.subject,
+           case .category(let id) = r.target, let category = catalog?.catalog.category(id)?.name {
+            let (verb, format): (String, L) = {
+                switch r.access {
+                case .read: return ("read", .ruleAllowReadFormat)
+                case .write: return ("write", .ruleAllowWriteFormat)
+                case .any: return ("use", .ruleAllowUseFormat)
+                }
+            }()
+            let prefix = "Allow ", suffix = " to \(verb) " + category.en
+            for (end, localizedEnd) in [(suffix + " (10 minutes)", L10n.t(.ruleAllowOnceSuffix, language)), (suffix, "")]
+            where name.hasPrefix(prefix) && name.hasSuffix(end) && name.count > prefix.count + end.count {
+                // The app part is the name the app gave itself when the rule was made.
+                let app = DisplayText.name(String(name.dropFirst(prefix.count).dropLast(end.count)))
+                return L10n.f(format, app, DisplayText.name(category.resolve(language)), language: language) + localizedEnd
             }
         }
         return DisplayText.escaped(r.name ?? r.id, limit: 2 * DisplayText.nameLimit + 40)
