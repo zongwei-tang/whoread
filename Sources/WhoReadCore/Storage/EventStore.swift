@@ -105,8 +105,11 @@ public struct EventQuery: Codable, Hashable, Sendable {
     public var until: Date?
     public var categoryIDs: [String]?
     public var responsibleKey: String?
-    /// Case-insensitive substring of the responsible display name or process name.
+    /// Case-insensitive substring of the responsible display name, the process name or the file path.
     public var text: String?
+    /// Case-insensitive substring of the responsible display name or the process name only
+    /// (`whoread events --app`).
+    public var appName: String?
     public var agentID: String?
     /// Only events with an agent anywhere in the chain.
     public var agentsOnly: Bool
@@ -120,7 +123,9 @@ public struct EventQuery: Codable, Hashable, Sendable {
 
     public init(since: Date? = nil, until: Date? = nil, categoryIDs: [String]? = nil, responsibleKey: String? = nil,
                 text: String? = nil, agentID: String? = nil, agentsOnly: Bool = false, includeBenign: Bool = false,
-                decisions: [EventDecision]? = nil, afterID: Int64? = nil, limit: Int = 500, newestFirst: Bool = true) {
+                decisions: [EventDecision]? = nil, afterID: Int64? = nil, limit: Int = 500, newestFirst: Bool = true,
+                appName: String? = nil) {
+        self.appName = appName
         self.since = since
         self.until = until
         self.categoryIDs = categoryIDs
@@ -151,6 +156,10 @@ public struct EventQuery: Codable, Hashable, Sendable {
                 && !e.path.lowercased().contains(t) {
                 return false
             }
+        }
+        if let appName, !appName.isEmpty {
+            let t = appName.lowercased()
+            if !e.responsible.displayName.lowercased().contains(t) && !e.process.name.lowercased().contains(t) { return false }
         }
         return true
     }
@@ -355,7 +364,7 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
             .filter { a in
                 (query.since.map { a.updatedAt >= $0 } ?? true) && (query.statuses.map { $0.contains(a.status) } ?? true)
             }
-            .sorted { $0.updatedAt > $1.updatedAt }
+            .sorted { ($0.updatedAt, $0.id) > ($1.updatedAt, $1.id) }
             .prefix(query.limit)
             .map { $0 }
     }
