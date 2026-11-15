@@ -215,6 +215,54 @@ public struct UsageSummary: Codable, Hashable, Sendable {
     }
 }
 
+extension UsageSummary {
+    /// Rows in one `.summaries` reply at most, the most recently active (daemon-6, ipc-1): every
+    /// distinct unsigned program path is an app of its own, so the table can hold far more than a reply
+    /// should carry. Also the default when a request names no limit, as the app's does.
+    public static let replyLimit = 10_000
+
+    /// The rows a reply carries for a requested limit: the cap when none is named, never more.
+    public static func replyCount(_ requested: Int?) -> Int { min(max(0, requested ?? replyLimit), replyLimit) }
+
+    /// Adds the accesses of `other`, a row with the same key: FIRST the earlier, LAST the later, the
+    /// app as it was last seen.
+    public mutating func merge(_ other: UsageSummary) {
+        if other.lastSeen > lastSeen { responsible = other.responsible }
+        count += other.count
+        reads += other.reads
+        writes += other.writes
+        denied += other.denied
+        firstSeen = min(firstSeen, other.firstSeen)
+        lastSeen = max(lastSeen, other.lastSeen)
+    }
+
+    /// Reply order: the most recently active first (equal times by key, descending).
+    public static func newestFirst(_ a: UsageSummary, _ b: UsageSummary) -> Bool {
+        if a.lastSeen != b.lastSeen { return a.lastSeen > b.lastSeen }
+        return b.rowKey.utf8.lexicographicallyPrecedes(a.rowKey.utf8)
+    }
+
+    /// Eviction order: the least recently seen first.
+    static func oldestFirst(_ a: UsageSummary, _ b: UsageSummary) -> Bool { newestFirst(b, a) }
+
+    /// Per-row activity of `events` and rolled-up `days` (the rows behind `EventStore.activity`).
+    static func activity(events: [AnalyzedEvent], days: [DailyAggregate], limit: Int) -> [UsageSummary] {
+        var rows: [String: UsageSummary] = [:]
+        func add(_ s: UsageSummary) {
+            if var row = rows[s.rowKey] {
+                row.merge(s)
+                rows[s.rowKey] = row
+            } else {
+                rows[s.rowKey] = s
+            }
+        }
+        events.forEach { add(.from($0)) }
+        // A day's row is benign only if every access that day was: it adds to that row.
+        days.forEach { add($0.summary) }
+        return Array(rows.values.sorted(by: newestFirst).prefix(max(0, limit)))
+    }
+}
+
 /// One day of rolled-up activity (details older than `detailDays` live only here). Benign and
 /// non-benign accesses of the same app/category/agent share a row; `summary.benign` is true only
 /// if every access that day was benign.
@@ -227,6 +275,67 @@ public struct DailyAggregate: Codable, Hashable, Sendable {
         self.day = day
         self.summary = summary
     }
+
+    /// Rows in one `.dailyAggregates` reply at most (the default when a request names no limit);
+    /// `export --aggregates` pages past it with `Key`.
+    public static let replyLimit = 10_000
+
+    public static func replyCount(_ requested: Int?) -> Int { min(max(0, requested ?? replyLimit), replyLimit) }
+
+    /// A row's identity, and the paging cursor: replies come newest day first, then by app, category
+    /// and agent, each descending, compared byte for byte as SQLite compares text.
+    public struct Key: Codable, Hashable, Sendable, Comparable {
+        public var day: String
+        public var responsibleKey: String
+        public var categoryID: String
+        /// "" when no AI agent was in the chain.
+        public var agentID: String
+
+        public init(day: String, responsibleKey: String, categoryID: String, agentID: String) {
+            self.day = day
+            self.responsibleKey = responsibleKey
+            self.categoryID = categoryID
+            self.agentID = agentID
+        }
+
+        public static func < (a: Key, b: Key) -> Bool {
+            for (x, y) in [(a.day, b.day), (a.responsibleKey, b.responsibleKey), (a.categoryID, b.categoryID), (a.agentID, b.agentID)] {
+                // UTF-8 byte order (SQLite's BINARY collation), not String's normalizing order.
+                if x.utf8.elementsEqual(y.utf8) { continue }
+                return x.utf8.lexicographicallyPrecedes(y.utf8)
+            }
+            return false
+        }
+
+        public static func == (a: Key, b: Key) -> Bool {
+            a.day.utf8.elementsEqual(b.day.utf8) && a.responsibleKey.utf8.elementsEqual(b.responsibleKey.utf8)
+                && a.categoryID.utf8.elementsEqual(b.categoryID.utf8) && a.agentID.utf8.elementsEqual(b.agentID.utf8)
+        }
+
+        public func hash(into hasher: inout Hasher) {
+            for s in [day, responsibleKey, categoryID, agentID] { hasher.combine(Array(s.utf8)) }
+        }
+    }
+
+    public var key: Key {
+        Key(day: day, responsibleKey: summary.responsible.key, categoryID: summary.categoryID, agentID: summary.agentID ?? "")
+    }
+}
+
+/// How many summary and daily rows a store keeps (dos-1, daemon-6: every distinct unsigned program
+/// path is an app of its own, so a process can mint rows at will). Past a limit, retention evicts the
+/// least recently seen rows down to a tenth below it, as the baseline does.
+public struct StoreLimits: Hashable, Sendable {
+    public var summaryRows: Int
+    public var dailyRows: Int
+
+    public init(summaryRows: Int = 100_000, dailyRows: Int = 100_000) {
+        self.summaryRows = summaryRows
+        self.dailyRows = dailyRows
+    }
+
+    /// What eviction keeps of a table over `limit`.
+    public static func lowWaterMark(_ limit: Int) -> Int { max(0, limit - max(1, limit / 10)) }
 }
 
 /// Storage interface. The daemon uses the SQLite implementation; tests use `InMemoryEventStore`.
@@ -241,6 +350,15 @@ public protocol EventStore: AnyObject, Sendable {
     func summaries(since: Date?) throws -> [UsageSummary]
     /// Daily aggregates of rolled-up details, newest day first.
     func dailyAggregates(since: Date?) throws -> [DailyAggregate]
+    /// The `limit` most recently active summary rows (all-time totals), newest first.
+    func summaries(limit: Int) throws -> [UsageSummary]
+    /// Activity since `since` per summary row (`whoread apps --since`): FIRST, LAST and the counts cover
+    /// only accesses at or after it, exactly within the detail window; a day rolled up past it counts
+    /// whole. The most recently active first, at most `limit` rows.
+    func activity(since: Date, limit: Int) throws -> [UsageSummary]
+    /// At most `limit` daily rows last seen at or after `since`, in reply order (`DailyAggregate.Key`:
+    /// newest day first), after the row `after` when given.
+    func dailyAggregates(since: Date?, after: DailyAggregate.Key?, limit: Int) throws -> [DailyAggregate]
     func maxEventID() throws -> Int64
     func maxAlertID() throws -> Int64
 
@@ -289,6 +407,23 @@ extension EventStore {
     public func setDate(_ date: Date, forKey key: String) throws {
         try setValue(Data(String(date.timeIntervalSince1970).utf8), forKey: key)
     }
+
+    // Generic versions of the bounded reads, for stores that do not implement them (test doubles).
+    // Both stores here implement them without reading everything first.
+
+    public func summaries(limit: Int) throws -> [UsageSummary] {
+        Array(try summaries(since: nil).sorted(by: UsageSummary.newestFirst).prefix(max(0, limit)))
+    }
+
+    public func activity(since: Date, limit: Int) throws -> [UsageSummary] {
+        UsageSummary.activity(events: try events(EventQuery(since: since, includeBenign: true, limit: .max, newestFirst: false)),
+                              days: try dailyAggregates(since: since), limit: limit)
+    }
+
+    public func dailyAggregates(since: Date?, after: DailyAggregate.Key?, limit: Int) throws -> [DailyAggregate] {
+        Array(try dailyAggregates(since: since).sorted { $0.key > $1.key }
+            .lazy.filter { row in after.map { row.key < $0 } ?? true }.prefix(max(0, limit)))
+    }
 }
 
 /// Thread-safe in-memory store with the same semantics as the SQLite store.
@@ -305,8 +440,11 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
     /// High-water marks: ids keep counting after retention removes rows.
     private var highestEventID: Int64 = 0
     private var highestAlertID: Int64 = 0
+    public let limits: StoreLimits
 
-    public init() {}
+    public init(limits: StoreLimits = StoreLimits()) {
+        self.limits = limits
+    }
 
     public func insert(_ events: [AnalyzedEvent]) throws {
         lock.lock(); defer { lock.unlock() }
@@ -368,7 +506,18 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
     public func summaries(since: Date?) throws -> [UsageSummary] {
         lock.lock(); defer { lock.unlock() }
         return summaryRows.values.filter { s in since.map { s.lastSeen >= $0 } ?? true }
-            .sorted { $0.lastSeen > $1.lastSeen }
+            .sorted(by: UsageSummary.newestFirst)
+    }
+
+    public func summaries(limit: Int) throws -> [UsageSummary] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(summaryRows.values.sorted(by: UsageSummary.newestFirst).prefix(max(0, limit)))
+    }
+
+    public func activity(since: Date, limit: Int) throws -> [UsageSummary] {
+        lock.lock(); defer { lock.unlock() }
+        return UsageSummary.activity(events: eventsByID.values.filter { $0.time >= since },
+                                     days: dailyRows.values.filter { $0.summary.lastSeen >= since }, limit: limit)
     }
 
     public func maxEventID() throws -> Int64 {
@@ -432,6 +581,20 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
         summaryRows = summaryRows.filter { $0.value.lastSeen >= retentionCutoff }
         dailyRows = dailyRows.filter { $0.value.summary.lastSeen >= retentionCutoff }
         alertsByID = alertsByID.filter { $0.value.updatedAt >= retentionCutoff }
+        // Bounded by count too (daemon-6): the least recently seen rows go first.
+        if summaryRows.count > limits.summaryRows {
+            let excess = summaryRows.count - StoreLimits.lowWaterMark(limits.summaryRows)
+            for (key, _) in summaryRows.sorted(by: { UsageSummary.oldestFirst($0.value, $1.value) }).prefix(excess) {
+                summaryRows[key] = nil
+            }
+        }
+        if dailyRows.count > limits.dailyRows {
+            let excess = dailyRows.count - StoreLimits.lowWaterMark(limits.dailyRows)
+            let order: ((String, DailyAggregate), (String, DailyAggregate)) -> Bool = { a, b in
+                a.1.summary.lastSeen != b.1.summary.lastSeen ? a.1.summary.lastSeen < b.1.summary.lastSeen : a.1.key < b.1.key
+            }
+            for (key, _) in dailyRows.sorted(by: order).prefix(excess) { dailyRows[key] = nil }
+        }
         return removed
     }
 
@@ -442,9 +605,14 @@ public final class InMemoryEventStore: EventStore, @unchecked Sendable {
     }
 
     public func dailyAggregates(since: Date?) throws -> [DailyAggregate] {
+        try dailyAggregates(since: since, after: nil, limit: .max)
+    }
+
+    public func dailyAggregates(since: Date?, after: DailyAggregate.Key?, limit: Int) throws -> [DailyAggregate] {
         lock.lock(); defer { lock.unlock() }
-        return dailyRows.values.filter { a in since.map { a.summary.lastSeen >= $0 } ?? true }
-            .sorted { ($0.day, $0.summary.lastSeen) > ($1.day, $1.summary.lastSeen) }
+        return Array(dailyRows.values
+            .filter { a in (since.map { a.summary.lastSeen >= $0 } ?? true) && (after.map { a.key < $0 } ?? true) }
+            .sorted { $0.key > $1.key }.prefix(max(0, limit)))
     }
 
     /// Local calendar day, like SQLite's `strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime')`.

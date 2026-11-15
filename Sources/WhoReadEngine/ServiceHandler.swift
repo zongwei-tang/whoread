@@ -168,12 +168,19 @@ public final class ServiceHandler: IPCHandler, @unchecked Sendable {
         case .markAlertsRead(let ids):
             try d.markRead(ids, peer: peer)
             return .ok
-        case .summaries(let since):
+        case .summaries(let since, let limit):
             d.writer.flush()
-            return .summaries(try d.store.summaries(since: since))
-        case .dailyAggregates(let since):
+            // The most recently active rows only, also for a client that names no limit (the app):
+            // minted apps can fill the table far past what one reply should carry (daemon-6, ipc-1).
+            let count = UsageSummary.replyCount(limit)
+            // With `since` (`whoread apps --since`): FIRST and the counts of that window, not all-time
+            // totals (cli-6).
+            if let since { return .summaries(try d.store.activity(since: since, limit: count)) }
+            return .summaries(try d.store.summaries(limit: count))
+        case .dailyAggregates(let since, let limit, let after):
             d.writer.flush()
-            return .dailyAggregates(try d.store.dailyAggregates(since: since))
+            // Capped like summaries; `export --aggregates` pages on with `after`.
+            return .dailyAggregates(try d.store.dailyAggregates(since: since, after: after, limit: DailyAggregate.replyCount(limit)))
         case .rules:
             return .rules(d.rules.rules)
         case .upsertRule(let rule):
