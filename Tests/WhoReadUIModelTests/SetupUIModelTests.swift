@@ -171,4 +171,37 @@ final class SetupUIModelTests: XCTestCase {
                            "it can block: not \"This build does not block\"")
         }
     }
+
+    // MARK: - selfcheck-rebuilt-app-unreachable
+
+    func testSelfCheckOfAProgramTheDevDaemonMayBeRefusingSaysSo() {
+        // The installer pins the app's code identity in the daemon's client requirement: XPC drops each
+        // connection of a rebuilt or replaced app, which reaches the app as no answer at the handshake.
+        let refused = FixedClient { _ in throw IPCError(.unavailable, "XPC: Couldn't communicate with a helper application.") }
+        let r = SelfCheck.run(refused, asRoot: false)
+        XCTAssertEqual(r.lines, ["daemon: unreachable (XPC: Couldn't communicate with a helper application.; if com.whoread.daemon is "
+                                 + "running, it may be refusing this program: run scripts/install.sh again, which is needed when the app "
+                                 + "was rebuilt or replaced after installing)"])
+        XCTAssertEqual(r.outcome, .unreachable)
+        XCTAssertEqual(r.exitStatus, 1)
+        // Through the system extension: scripts/install.sh does not set that up.
+        XCTAssertEqual(SelfCheck.run(refused, viaExtension: true, asRoot: false).lines,
+                       ["daemon: unreachable (XPC: Couldn't communicate with a helper application.)"])
+
+        // Not when the daemon answered the handshake: another user at the screen, another protocol, or no
+        // answer after the handshake (the daemon took this program's messages).
+        handler.consoleUID = { geteuid() &+ 1 }
+        XCTAssertEqual(SelfCheck.run(unrecognised, asRoot: false).lines,
+                       ["daemon: unreachable (only root or the console user may talk to the WhoRead daemon)"])
+        handler.consoleUID = { geteuid() }
+        XCTAssertEqual(SelfCheck.run(FixedClient { _ in .error(IPCError(.versionMismatch, "client speaks protocol 3, daemon 4")) },
+                                     asRoot: false).lines,
+                       ["daemon: unreachable (protocol mismatch: client speaks protocol 3, daemon 4)"])
+        let silent = FixedClient { request in
+            if case .status = request { throw IPCError(.unavailable, "daemon did not answer within 10 s (com.whoread.daemon.xpc)") }
+            return try self.recognised.send(request)
+        }
+        XCTAssertEqual(SelfCheck.run(silent, asRoot: false).lines,
+                       ["daemon: unreachable (daemon did not answer within 10 s (com.whoread.daemon.xpc))"])
+    }
 }
