@@ -116,6 +116,32 @@ printf '%s\n' "$check" | sed 's/^/  /'
 [ "$rc" -eq 0 ] || die "The menu bar app could not use the background service (see above). Run scripts/install.sh again." \
   "菜单栏 App 无法使用后台服务（见上面的信息）。请再运行一次 scripts/install.sh。"
 
+# Live check: a read of a fake file in WhoRead's test vault (a built-in category for fake secrets,
+# ~/WhoReadTestVault) must show up in the recorded history within a few seconds.
+if running && [ "$WAIT" = 1 ]; then
+  vault="$HOME/WhoReadTestVault"
+  probe="$vault/notes/install-check.txt"
+  if [ ! -L "$vault" ] && [ ! -L "$vault/notes" ] && [ ! -L "$probe" ] && mkdir -p "$vault/notes" 2>/dev/null \
+     && echo "WhoRead install check: not a secret" > "$probe" 2>/dev/null; then
+    sleep 1
+    /bin/cat "$probe" > /dev/null
+    found=0
+    for _ in $(seq 20); do
+      if sudo "$WR" events --since 2m --category test-vault --json 2>/dev/null | grep -q 'install-check\.txt'; then
+        found=1; break
+      fi
+      sleep 0.5
+    done
+    if [ "$found" = 1 ]; then
+      say "Live check passed: reading a fake test file was recorded, with the program that did it." \
+        "实时检查通过：读取一个假的测试文件已经被记录下来，包括是哪个程序读的。"
+    else
+      say "Live check: reading a fake test file was not recorded within 10 seconds. Run whoread status to see why." \
+        "实时检查：10 秒内没有记录到对假测试文件的读取。请运行 whoread status 查看原因。"
+    fi
+  fi
+fi
+
 [ "$OPEN" = 0 ] || open /Applications/WhoRead.app || true
 echo
 if running; then
