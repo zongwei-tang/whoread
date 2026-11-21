@@ -94,14 +94,20 @@ final class DisplayTextTests: XCTestCase {
         for kept in ["I \u{2764}\u{FE0F} cats", "\u{2764}\u{FE0F} \u{2764}\u{FE0F}", "1\u{FE0F}\u{20E3} 2", "Cafe\u{301} Bar", "\u{231A}\u{FE0E} x"] {
             XCTAssertEqual(DisplayText.name(kept), kept)
         }
-        // A hidden mark after a space is still escaped: it shows instead of going away.
+        // A mark at the start of a name belongs to no letter either: the name is put after a space
+        // (" → " in a chain, a table's column gap, "Always allow %@").
+        XCTAssertEqual(DisplayText.name("\u{FE0F}\u{301}\u{FE0E}Terminal"), "Terminal")
+        // A hidden mark after a space or at the start is still escaped: it shows instead of going away.
         XCTAssertEqual(DisplayText.name("a \u{FE00} b"), "a \\u{fe00} b")
+        XCTAssertEqual(DisplayText.name("\u{FE00}x"), "\\u{fe00}x")
         // Paths are evidence: kept as they are.
         XCTAssertEqual(DisplayText.path("~/x/a \u{FE0F} b"), "~/x/a \u{FE0F} b")
-        for s in [vs16, "a \u{FE00} b", " \u{FE0F}", "\u{3000}\u{FE0E}\u{3000}", " \u{301}\u{FE0F}x \u{FE00}\u{301}y"] {
+        for s in [vs16, "a \u{FE00} b", " \u{FE0F}", "\u{3000}\u{FE0E}\u{3000}", " \u{301}\u{FE0F}x \u{FE00}\u{301}y", "\u{FE0F}\u{FE0F}x",
+                  "\u{FE00}\u{301}x"] {
             let shown = DisplayText.name(s)
             XCTAssertEqual(DisplayText.name(shown), shown)
-            let scalars = Array(shown.unicodeScalars)
+            // Put after a space, as the callers do.
+            let scalars = Array((" " + shown).unicodeScalars)
             for (a, b) in zip(scalars, scalars.dropFirst()) where a.properties.generalCategory == .spaceSeparator {
                 XCTAssertFalse(isMark(b), "a raw mark after a space in \(shown.debugDescription)")
             }

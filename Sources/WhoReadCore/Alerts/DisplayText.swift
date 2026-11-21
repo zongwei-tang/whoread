@@ -14,10 +14,10 @@ import Foundation
 /// renders as the Apple logo on macOS), and the other default-ignorable characters, which render as
 /// nothing or as blank space (Hangul fillers such as U+3164, the combining grapheme joiner, variation
 /// selectors; the emoji presentation selectors U+FE0E/U+FE0F only pick a glyph and stay, except
-/// right after a space in a name, see `name`), and the few symbols that render as blank space
-/// without being any of those (`blankSymbols`: U+2800 BRAILLE PATTERN BLANK, U+1D159 MUSICAL
-/// SYMBOL NULL NOTEHEAD, U+FFFC OBJECT REPLACEMENT CHARACTER). Everything else, Chinese and Braille
-/// with dots included, is kept.
+/// where a name has no letter before them, see `name`), and the few symbols that render as
+/// blank space without being any of those (`blankSymbols`: U+2800 BRAILLE PATTERN BLANK, U+1D159
+/// MUSICAL SYMBOL NULL NOTEHEAD, U+FFFC OBJECT REPLACEMENT CHARACTER). Everything else, Chinese
+/// and Braille with dots included, is kept.
 public enum DisplayText {
     /// Longest app, process, agent or category name shown. A long lookalike name cannot fill a
     /// banner by itself.
@@ -93,11 +93,11 @@ public enum DisplayText {
     /// An app, process, agent or category name. Runs of spaces (U+0020, no-break, ideographic and
     /// the other space separators) are shown as one space: within the cap, a name could otherwise
     /// push the rest of a banner line out of view with blanks (an ideographic space is two columns
-    /// wide), or fake the columns of a CLI table ("Terminal  SSH keys  read"). A mark right after a
-    /// space (a combining character: the emoji presentation selectors, invisible stackers such as
-    /// U+17D2, accents) belongs to no letter and is dropped with the run; kept, it ended the run,
-    /// and `" \u{FE0F}"` repeated showed as that many blanks (emoji-wide ones in the app). A hidden
-    /// mark stays, escaped.
+    /// wide), or fake the columns of a CLI table ("Terminal  SSH keys  read"). A mark with no letter
+    /// to sit on (a combining character at the start of the name or right after a space: the emoji
+    /// presentation selectors, invisible stackers such as U+17D2, accents) is dropped: kept, it
+    /// ended a run, and `" \u{FE0F}"` repeated showed as that many blanks (emoji-wide ones in the
+    /// app); at the start, it follows the space the name is put after. A hidden mark stays, escaped.
     public static func name(_ s: String) -> String { escaped(collapsingSpaces(s), limit: nameLimit) }
 
     static func collapsingSpaces(_ s: String) -> String {
@@ -105,7 +105,7 @@ public enum DisplayText {
         var changed = false
         var afterSpace = false
         for u in s.unicodeScalars {
-            if afterSpace, isMark(u), !isHidden(u) {
+            if afterSpace || out.isEmpty, isMark(u), !isHidden(u) {
                 changed = true
                 continue
             }
