@@ -104,4 +104,50 @@ final class AppNameQueryStoreTests: XCTestCase {
         try db.prepare("SELECT search FROM events WHERE id = 3").query { search = $0.text(0) ?? "" }
         XCTAssertEqual(search, "odd\u{1}\u{1}exfil\u{1}/users/alice/whoreadtestvault/notes/key.txt", "an unreadable body is left alone")
     }
+
+    /// store-2, again: `replacingOccurrences` without `.literal` takes a \u{1} and the combining mark, variation
+    /// selector, emoji modifier or joiner after it for one character, which is not \u{1}, so it left that \u{1}
+    /// in the name and the cut came early again: a bundle named "Helper", \u{1}, U+0301 hid its program from
+    /// `--app`. Each \u{1} is replaced on its own, in the app's name and in the program's.
+    func testASeparatorBeforeACombiningMarkIsReplacedToo() throws {
+        let tails = ["\u{301}", "\u{FE0F}", "\u{20DD}", "\u{1F3FB}", "\u{E0100}", "\u{200C}", "\u{1}\u{301}", ""]
+        let key = "/Users/alice/WhoReadTestVault/notes/key.txt"
+        let helpers = tails.enumerated().map { i, tail in event(Int64(i + 1), app: "Helper\u{1}" + tail, program: "exfil", path: key) }
+        let events = helpers + [event(Int64(tails.count + 1), app: "Terminal", program: "ex\u{1}\u{301}fil", path: key)]
+        for e in events {
+            XCTAssertEqual(SQLiteEventStore.searchText(e).unicodeScalars.filter { $0 == "\u{1}" }.count, 2,
+                           "only the two separators: \(e.responsible.displayName.debugDescription), \(e.process.name.debugDescription)")
+        }
+        let stores: [(String, EventStore)] = [("sqlite", try SQLiteEventStore(path: dir.appendingPathComponent("db.sqlite").path)),
+                                              ("memory", InMemoryEventStore())]
+        for (name, store) in stores {
+            try store.insert(events)
+            XCTAssertEqual(try store.events(EventQuery(text: "exfil", appName: "exfil")).map(\.id), Array(helpers.map(\.id).reversed()), name)
+            XCTAssertEqual(try store.events(EventQuery(appName: "helper")).map(\.id), Array(helpers.map(\.id).reversed()), name)
+            XCTAssertEqual(try store.events(EventQuery(appName: "fil")).map(\.id), Array(events.map(\.id).reversed()), name)
+        }
+    }
+
+    /// The earlier builds wrote such a row with that \u{1} left in, the one that marked the store "2" among
+    /// them (its rebuild wrote the same again). A store not marked as this build writes `search` is rebuilt.
+    func testRowsTheFirstRebuildLeftAreRebuilt() throws {
+        let e = event(1, app: "Helper\u{1}\u{301}", program: "exfil", path: "/Users/alice/WhoReadTestVault/notes/key.txt")
+        for mark in [nil, "2"] as [String?] {
+            let path = dir.appendingPathComponent("db-\(mark ?? "none").sqlite").path
+            do {
+                let store = try SQLiteEventStore(path: path)
+                try store.insert([e])
+                // As those builds left it: the \u{1} before the combining mark in the name, and their mark.
+                let db = try SQLiteDatabase(path: path)
+                try db.prepare("UPDATE events SET search = ? WHERE id = 1")
+                    .run([.text("helper\u{1}\u{301}\u{1}exfil\u{1}/users/alice/whoreadtestvault/notes/key.txt")])
+                try store.setValue(mark.map { Data($0.utf8) }, forKey: SQLiteEventStore.searchFormatKey)
+            }
+            let store = try SQLiteEventStore(path: path)
+            XCTAssertEqual(try store.events(EventQuery(text: "exfil", appName: "exfil")).map(\.id), [1], "marked \(mark ?? "none")")
+            XCTAssertEqual(try store.events(EventQuery(appName: "helper")).map(\.id), [1], "marked \(mark ?? "none")")
+            XCTAssertEqual(try store.value(forKey: SQLiteEventStore.searchFormatKey).map { String(decoding: $0, as: UTF8.self) }, "3",
+                           "marked \(mark ?? "none")")
+        }
+    }
 }

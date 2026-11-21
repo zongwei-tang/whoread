@@ -125,13 +125,16 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         try? rebuildOlderSearchText()
     }
 
-    /// Set in meta once every row's `search` is as `searchText` writes it.
+    /// Set in meta to `searchFormat` once every row's `search` is as `searchText` writes it.
     static let searchFormatKey = "search_format"
+    /// "2" was written by a build whose `searchable` left a \u{1} followed by a combining mark (store-2):
+    /// a store marked other than this is rebuilt.
+    static let searchFormat = "3"
 
     /// Rows an older build wrote hold the names in `search` as they were: those with a \u{1} past the two
-    /// separators get theirs again from their body, once (store-2). A body this build cannot read is left.
+    /// separators get theirs again from their body, once per format (store-2). A body this build cannot read is left.
     private func rebuildOlderSearchText() throws {
-        guard try valueLocked(SQLiteEventStore.searchFormatKey) == nil else { return }
+        guard try valueLocked(SQLiteEventStore.searchFormatKey) != Data(SQLiteEventStore.searchFormat.utf8) else { return }
         try db.transaction {
             var rebuilt: [(id: Int64, search: String)] = []
             try db.prepare("SELECT id, search, body FROM events WHERE length(search) - length(replace(search, char(1), '')) > 2")
@@ -142,7 +145,7 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
                 }
             let update = try db.prepare("UPDATE events SET search = ? WHERE id = ?")
             for row in rebuilt { try update.run([.text(row.search), .int(row.id)]) }
-            try setValueLocked(Data("2".utf8), forKey: SQLiteEventStore.searchFormatKey)
+            try setValueLocked(Data(SQLiteEventStore.searchFormat.utf8), forKey: SQLiteEventStore.searchFormatKey)
         }
     }
 
@@ -155,8 +158,10 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
 
     /// A field of `search`, or a needle looked for in it: lowercased, a \u{1} (the separator) made \u{2}. So
     /// a needle with a \u{1} in it matches within one field, as in the other store, never across two.
+    /// `.literal`: without it a \u{1} and the combining mark, variation selector or joiner after it are one
+    /// character, which is not \u{1}, and that \u{1} was left in (store-2).
     static func searchable(_ s: String) -> String {
-        (s.utf8.contains(1) ? s.replacingOccurrences(of: "\u{1}", with: "\u{2}") : s).lowercased()
+        (s.utf8.contains(1) ? s.replacingOccurrences(of: "\u{1}", with: "\u{2}", options: .literal) : s).lowercased()
     }
 
     private func locked<T>(_ body: () throws -> T) throws -> T {
