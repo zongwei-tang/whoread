@@ -40,6 +40,19 @@ final class ProcessSnapshotBoundsTests: XCTestCase {
         XCTAssertEqual(argv.last, "…(+\(44 - (argv.count - 1)))")
         XCTAssertEqual(ProcessTree.boundedArgv(argv), argv, "the tree keeps it as it is")
     }
+
+    /// Repair (T4-count-overflow): a running process whose command line ends in an element that reads as a
+    /// huge "…(+N)" marker is read without a trap, with the count of what was dropped. The seed reads every
+    /// running process at each start: there whoreadd stopped, and launchd started it into the same trap.
+    func testLibprocReadsACommandLineEndingInAHugeMarker() throws {
+        let filler = (0..<6).map { "/Users/alice/x\($0)/" + String(repeating: "😀", count: 1100) }
+        let child = try runningChild(extra: ["a", "b", "c", "d"] + filler + ["x", "…(+9223372036854775807)"])
+        defer { child.terminate(); child.waitUntilExit() }
+        let argv = try XCTUnwrap(shellRecord(child)?.argv)
+        XCTAssertEqual(argv.count, 13)
+        XCTAssertEqual(argv.last, "…(+4)")
+        XCTAssertTrue(ProcessTree.boundedArgv(argv) == argv, "the tree keeps it as it is")
+    }
 }
 
 // MARK: - attribution-3: the libproc liveness probe

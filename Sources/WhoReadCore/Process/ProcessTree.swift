@@ -542,6 +542,10 @@ public final class ProcessTree: @unchecked Sendable {
     /// A last element this short is kept rather than replaced by a marker as long (so bounding twice
     /// changes nothing).
     static let maxMarkerBytes = 32
+    /// Elements a marker counts at most: no argv has more (ARG_MAX is 1 MiB, and each element takes at least
+    /// its NUL). A last element that reads as a marker for more is the process's own text, not a count: taken
+    /// for one, a huge count overflowed the sums that add it up (a trap, in the daemon).
+    static let maxDroppedElements = 1 << 20
 
     /// What a node keeps of an argv: argv can be ARG_MAX (1 MiB) long, every process of the user can have
     /// one, and nodes stay (as tombstones too) for minutes in a daemon that runs as root. Display and
@@ -561,7 +565,8 @@ public final class ProcessTree: @unchecked Sendable {
     /// and counts every element dropped, before and after.
     ///
     /// Bounding twice changes nothing (libproc records are bounded where they are read, then by the tree):
-    /// the marker an argv already ends in counts the elements it stands for.
+    /// the marker an argv already ends in counts the elements it stands for. The count written stays within
+    /// `maxDroppedElements`, so bounding again reads it back.
     public static func boundedArgv(_ argv: [String], executableName: String? = nil) -> [String] {
         var out: [String] = []
         var bytes = 0
@@ -571,7 +576,7 @@ public final class ProcessTree: @unchecked Sendable {
             if i >= minArgvElements && bytes + size > maxArgvBytes
                 && !(i == argv.count - 1 && size <= maxMarkerBytes) {
                 let earlier = droppedElements(argv).dropped
-                var dropped = argv.count - i + max(0, earlier - 1)
+                var dropped = min(argv.count - i + max(0, earlier - 1), maxDroppedElements)
                 if let executableName, case .script(_, let at) = AgentMatchClause.scriptPosition(executableName: executableName, argv: argv),
                    at >= i, !(earlier > 0 && at == argv.count - 1) {
                     let from = at > i && argv[at - 1] == "-m" ? at - 1 : at
@@ -598,10 +603,11 @@ public final class ProcessTree: @unchecked Sendable {
     }
 
     /// A node's argv without the marker `boundedArgv` ended it with, and how many elements that marker
-    /// says were dropped (the display counts them, ArgvRedactor.redact).
+    /// says were dropped (the display counts them, ArgvRedactor.redact). One that says more than
+    /// `maxDroppedElements` is no marker: an element.
     public static func droppedElements(_ argv: [String]) -> (kept: ArraySlice<String>, dropped: Int) {
         guard let last = argv.last, last.hasPrefix("…(+"), last.hasSuffix(")"),
-              let n = Int(last.dropFirst(3).dropLast()), n > 0 else { return (argv[...], 0) }
+              let n = Int(last.dropFirst(3).dropLast()), n > 0, n <= maxDroppedElements else { return (argv[...], 0) }
         return (argv.dropLast(), n)
     }
 

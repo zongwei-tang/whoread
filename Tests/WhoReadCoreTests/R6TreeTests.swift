@@ -190,3 +190,84 @@ final class R6BoundedArgvTests: XCTestCase {
         }
     }
 }
+
+/// Repair (T4-count-overflow): a last element "…(+N)" is the marker of elements the tree dropped only while N
+/// is at most what an argv can hold (ARG_MAX is 1 MiB, and each element takes at least its NUL). Past that it
+/// is the process's own text, an element like any other. Taken for a count, a huge N overflowed the tree's
+/// sum (an argv bounded twice keeps its count) and the display's: a trap, in the daemon's reading thread on
+/// such an exec, and at every start while such a process ran (the seed reads it), so whoreadd restarted
+/// into the same trap and monitored nothing.
+final class R6MarkerBoundTests: XCTestCase {
+    var h: Harness!
+
+    override func setUpWithError() throws {
+        h = try Harness(learningDays: 0)
+    }
+
+    /// No argv has more elements.
+    let bound = 1 << 20
+    /// A count that was kept and shown as it was, then one that overflowed the sums.
+    let huge = ["9223372036854775000", "9223372036854775807"]
+
+    /// An element of 4 KB once bounded (1024 characters, most of them four bytes long).
+    func filler(_ k: Int) -> String { "/Users/alice/x\(k)/" + String(repeating: "😀", count: 1100) }
+
+    /// `sh -c …`, 4 more short elements, 6 fillers of which 4 fit the budget, "x" and `last`: bounded, the
+    /// first 12 elements and a marker for the other 4.
+    func longArgv(endingIn last: String) -> [String] {
+        ["/bin/sh", "-c", "sleep 1e9; :", "sh", "a", "b", "c", "d"] + (0..<6).map(filler) + ["x", last]
+    }
+
+    func testAMarkerForMoreElementsThanAnArgvHoldsIsNotACount() {
+        for n in huge + ["\(bound + 1)"] {
+            let kept = ProcessTree.boundedArgv(longArgv(endingIn: "…(+\(n))"), executableName: "sh")
+            XCTAssertEqual(kept.count, 13, n)
+            XCTAssertEqual(kept.last, "…(+4)", n)
+            XCTAssertTrue(ProcessTree.boundedArgv(kept, executableName: "sh") == kept, n)
+            XCTAssertEqual(ArgvRedactor.redact(kept)?.last, "…(+8)", n)
+        }
+        XCTAssertEqual(ProcessTree.droppedElements(["cat", "…(+\(bound + 1))"]).dropped, 0)
+    }
+
+    /// At the bound it is a count, and the count the tree writes stays within the bound: bounding again reads
+    /// it back, so bounding twice still changes nothing.
+    func testAMarkerAtTheBoundIsACountAndTheTreeWritesNoMore() {
+        XCTAssertEqual(ProcessTree.droppedElements(["cat", "…(+\(bound))"]).dropped, bound)
+        let kept = ProcessTree.boundedArgv(longArgv(endingIn: "…(+\(bound))"), executableName: "sh")
+        XCTAssertEqual(kept.count, 13)
+        XCTAssertEqual(kept.last, "…(+\(bound))")
+        XCTAssertTrue(ProcessTree.boundedArgv(kept, executableName: "sh") == kept)
+    }
+
+    /// eslogger's exec (Analyzer.handle, then the tree), then an event of that process: no trap, and the event
+    /// and its chain count the elements they do not show, not the process's own text.
+    func testAnExecEndingInAHugeMarkerKeepsTheTreesCount() throws {
+        for (k, n) in huge.enumerated() {
+            let pid = Int32(700 + k)
+            let zsh = h.spawn(P.terminal, P.zsh(pid, parent: 100))
+            var sh = proc(pid, "/bin/sh", ppid: 100, platform: true, argv: longArgv(endingIn: "…(+\(n))"))
+            sh.pidVersion = UInt32(pid) * 10 + 1
+            h.exec(zsh, sh, 1)
+            XCTAssertEqual(h.tree.node(pid: pid)?.image.argv?.last, "…(+4)", n)
+            let event = try XCTUnwrap(h.open(sh, vaultKey, 2).events.first, n)
+            XCTAssertEqual(event.process.argv?.last, "…(+8)", n)
+            XCTAssertEqual(event.chain.last?.argv?.last, "…(+10)", n)
+        }
+    }
+
+    /// libproc's records seed the tree at every start: no trap, the tree's count.
+    func testASeedEndingInAHugeMarkerKeepsTheTreesCount() {
+        for (k, n) in huge.enumerated() {
+            let pid = Int32(710 + k)
+            h.tree.seed([proc(pid, "/bin/sh", start: -5, platform: true, argv: longArgv(endingIn: "…(+\(n))"))], at: at(0))
+            XCTAssertEqual(h.tree.node(pid: pid)?.image.argv?.last, "…(+4)", n)
+            XCTAssertEqual(ArgvRedactor.redact(h.tree.node(pid: pid)?.image.argv)?.last, "…(+8)", n)
+        }
+    }
+
+    /// The display of a short argv whose last element reads as a huge marker (an event's chain, an alert): no
+    /// trap, and that element is shown as the process wrote it, not counted.
+    func testTheDisplayOfAShortArgvEndingInAHugeMarker() {
+        XCTAssertEqual(ArgvRedactor.redact(["cat", vaultKey, "…(+9223372036854775807)"]), ["cat", vaultKey, "…(+9223372036854775807)"])
+    }
+}
