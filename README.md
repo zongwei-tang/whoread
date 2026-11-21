@@ -1,11 +1,12 @@
 # WhoRead
 
-**See which app or AI agent reads your secrets on your Mac, and stop it.**
+**See which app or AI agent reads your secrets on your Mac.**
 
 WhoRead watches the files that hold your credentials and private data: SSH keys, cloud and
 developer tokens, browser cookies, password managers, chat histories and more. For every access it
-tells you which program it was, which app or AI agent started it, and when. It can ask you before
-a program touches those files for the first time, and block it if you say no.
+tells you which program it was, which app or AI agent started it, and when. A signed release will also be able to ask you before a program touches those files for the
+first time, and block it if you say no; signed releases are not published yet, so for now WhoRead
+records and alerts, but does not ask or block.
 
 Everything stays on your Mac. WhoRead never reads file contents and never uses the network.
 
@@ -34,11 +35,13 @@ starts.
   files in the project folders you add. You can add your own paths and categories.
 - **Knows AI agents.** Claude Code, Codex CLI, Gemini CLI, opencode, aider, Cursor and the Claude
   and ChatGPT desktop apps are recognised, including everything they start.
-- **Asks first.** With blocking on, the first time a program touches a protected file and no rule
+- **Asks first** (signed releases only). With blocking on, the first time a program touches a protected file and no rule
   covers it, the access waits and you get a notification: *Allow once*, *Always allow*, *Deny* or
   *Always deny*. Your answer becomes a rule. No answer in time means denied.
 - **Expected owners are left alone.** `ssh` reading your SSH keys or Chrome reading its own cookies
-  is normal and raises no question, unless an AI agent started it. System services such as
+  is normal and raises no question, unless an AI agent started it or WhoRead did not see what started
+  it: programs already open when WhoRead's background service started count as started by an
+  unknown process until you reopen them (in Terminal a new tab is enough). System services such as
   Spotlight, Time Machine and iCloud are never asked about.
 - **Rules** allow, deny or alert on a category, a severity or a path, for one program, one app,
   anything that is not an expected owner, or **anything started by an AI agent**.
@@ -71,7 +74,9 @@ copies the path for you), checks that the pieces talk to each other, and starts 
 Allow notifications when the app asks.
 
 To update: `git pull`, then run `scripts/install.sh` again. A rebuilt WhoRead is a different program
-to macOS, so Full Disk Access may have to be switched on again; the script tells you when.
+to macOS: in Full Disk Access, remove the old `whoreadd` entry (select it, click -) and add
+`/usr/local/libexec/whoreadd` again with +. If monitoring still does not start, add `/usr/bin/eslogger`
+the same way. The script shows these steps when they are needed.
 
 ## Usage
 
