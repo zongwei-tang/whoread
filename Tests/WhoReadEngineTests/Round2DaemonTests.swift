@@ -258,7 +258,7 @@ final class PathRuleRound2Tests: XCTestCase {
         XCTAssertNil(DaemonCore.resolveExisting(home + "/dangling/x", resolver: resolver))
 
         let dir = TempDir()
-        let core = try r2Core(dir) { $0.homeDirectories = [home] }
+        let core = try r2Core(dir) { $0.homeDirectories = [home]; $0.homeOf = { _ in home } }
         let handler = r2Handler(core)
         let before = core.data.catalog
         for (i, p) in ["~/link", "~/link/none", "~/self", "~/dangling", "/usr/lib"].enumerated() {
@@ -288,7 +288,7 @@ final class PathRuleRound2Tests: XCTestCase {
         try fm.createSymbolicLink(atPath: home + "/up", withDestinationPath: root.path + "/real")
 
         let dir = TempDir()
-        let core = try r2Core(dir) { $0.homeDirectories = [home] }
+        let core = try r2Core(dir) { $0.homeDirectories = [home]; $0.homeOf = { _ in home } }
         let handler = r2Handler(core)
         for (i, p) in ["~/a", "~/a/x", "~/f", "~/up", "~/up/x"].enumerated() {
             XCTAssertEqual(r2Error(handler.handle(.upsertRule(r2Rule("sys\(i)", .pathPrefix(p))), peer: r2AgentPeer))?.code,

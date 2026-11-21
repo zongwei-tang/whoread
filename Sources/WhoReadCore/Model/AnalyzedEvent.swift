@@ -32,18 +32,29 @@ public struct AnalyzedEvent: Codable, Hashable, Sendable, Identifiable {
     public var responsible: ResponsibleEntity
     /// Nearest AI agent in the chain (the process itself included).
     public var agentID: String?
+    /// Every AI agent in the whole chain, sorted (`chain` keeps only the nearest 64 links). nil in records
+    /// from before it was kept.
+    public var chainAgents: [String]?
+    /// The chain reaches launchd: every ancestor is known. false: ancestry was lost (a parent never seen,
+    /// a process whose parent was gone before it was seen, a chain cut short), so an AI agent may be
+    /// hidden above it. nil in records from before it was kept.
+    public var ancestryKnown: Bool?
     public var isOwner: Bool
     /// Non-nil when a benign system service did this; such events are folded in the UI.
     public var benignServiceID: String?
     public var decision: EventDecision
     public var ruleID: String?
     public var alertID: Int64?
+    /// What the decision and the access alone do not tell (`EventNote`); nil for most events. A string,
+    /// so that a reader that does not know a value still decodes the event.
+    public var note: String?
 
     public init(
         id: Int64, time: Date, operation: FileOperation, access: AccessSet, path: String, secondaryPath: String?,
         viaAncestor: Bool = false, categoryID: String, severity: Severity, process: ProcessRecord, chain: [ChainLink],
         responsible: ResponsibleEntity, agentID: String?, isOwner: Bool, benignServiceID: String?,
-        decision: EventDecision, ruleID: String?, alertID: Int64? = nil
+        decision: EventDecision, ruleID: String?, alertID: Int64? = nil, chainAgents: [String]? = nil, ancestryKnown: Bool? = nil,
+        note: String? = nil
     ) {
         self.id = id
         self.time = time
@@ -58,17 +69,46 @@ public struct AnalyzedEvent: Codable, Hashable, Sendable, Identifiable {
         self.chain = chain
         self.responsible = responsible
         self.agentID = agentID
+        self.chainAgents = chainAgents
+        self.ancestryKnown = ancestryKnown
         self.isOwner = isOwner
         self.benignServiceID = benignServiceID
         self.decision = decision
         self.ruleID = ruleID
         self.alertID = alertID
+        self.note = note
     }
 
     public var isBenign: Bool { benignServiceID != nil }
 
     /// "launchd → zoom.us → cat"
     public var chainDisplay: String { chain.map(\.name).joined(separator: " → ") }
+}
+
+/// Values of `AnalyzedEvent.note` (and `FileActivity.note`).
+public enum EventNote {
+    /// Denied by the kernel, not by WhoRead: the daemon allowed the access, but its answer reached the
+    /// kernel at or after the AUTH deadline (or es_respond did not deliver it) while the native client's
+    /// deadline miss mode was fail-closed (macOS 27). No rule denied it.
+    public static let deadlineMissed = "deadline-missed"
+    /// A close that reports no write call, of a file the process had opened for writing and that was
+    /// mapped writable during the file's life (Endpoint Security's was_mapped_writable): possibly modified
+    /// through the mapping. Nothing tells whether the mapping was written to.
+    public static let mappedWritable = "mapped-writable"
+
+    /// How `whoread events` and the app name a note. One they do not know (from a newer daemon) is shown
+    /// as it is, escaped.
+    public static func describe(_ note: String, language: Language) -> String {
+        let zh = language == .zhHans
+        switch note {
+        case deadlineMissed:
+            return zh ? "内核拒绝：放行回答晚于 AUTH 时限" : "denied by the kernel: allowed after the AUTH deadline"
+        case mappedWritable:
+            return zh ? "可能经可写内存映射修改" : "possibly modified through a writable mapping"
+        default:
+            return DisplayText.escaped(note, limit: DisplayText.nameLimit)
+        }
+    }
 }
 
 public enum AlertKind: String, Codable, Sendable, CaseIterable {
@@ -138,12 +178,21 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
     public var accesses: AccessSet
     /// First event's details, for the headline.
     public var firstPath: String
+    /// What was done to `firstPath` (the headline's verb); `accesses` is the whole window's, which an
+    /// answer covers. nil in alerts from before it was kept (daemon-8).
+    public var firstPathAccess: AccessSet?
+    /// The event that made the alert or last escalated it: every escalation moves it (clients notify
+    /// again on it), a merged repeat never does.
     public var firstEventID: Int64
     public var lastEventID: Int64
     /// Distinct paths seen (capped).
     public var paths: [String]
     public var chain: [ChainLink]
     public var agentID: String?
+    /// As `AnalyzedEvent.chainAgents` and `.ancestryKnown`, for the event `chain` comes from (an answer
+    /// given on this alert is scoped by them). nil in alerts from before they were kept.
+    public var chainAgents: [String]?
+    public var ancestryKnown: Bool?
     public var ruleID: String?
     public var status: AlertStatus
     public var resolution: AlertAction?
@@ -158,7 +207,8 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
                 responsible: ResponsibleEntity, categoryID: String, severity: Severity, count: Int, accesses: AccessSet,
                 firstPath: String, firstEventID: Int64, lastEventID: Int64, paths: [String], chain: [ChainLink],
                 agentID: String?, ruleID: String?, status: AlertStatus = .unread, resolution: AlertAction? = nil,
-                firstTime: Bool = false, appleProgram: Bool = false) {
+                firstTime: Bool = false, appleProgram: Bool = false, chainAgents: [String]? = nil, ancestryKnown: Bool? = nil,
+                firstPathAccess: AccessSet? = nil) {
         self.id = id
         self.kind = kind
         self.createdAt = createdAt
@@ -170,11 +220,14 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
         self.count = count
         self.accesses = accesses
         self.firstPath = firstPath
+        self.firstPathAccess = firstPathAccess
         self.firstEventID = firstEventID
         self.lastEventID = lastEventID
         self.paths = paths
         self.chain = chain
         self.agentID = agentID
+        self.chainAgents = chainAgents
+        self.ancestryKnown = ancestryKnown
         self.ruleID = ruleID
         self.status = status
         self.resolution = resolution
@@ -185,6 +238,7 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, kind, createdAt, updatedAt, windowEndsAt, responsible, categoryID, severity, count, accesses, firstPath
         case firstEventID, lastEventID, paths, chain, agentID, ruleID, status, resolution, firstTime, appleProgram
+        case chainAgents, ancestryKnown, firstPathAccess
     }
 
     public init(from decoder: Decoder) throws {
@@ -210,7 +264,14 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
         resolution = try c.decodeIfPresent(AlertAction.self, forKey: .resolution)
         firstTime = try c.decodeIfPresent(Bool.self, forKey: .firstTime) ?? false
         appleProgram = try c.decodeIfPresent(Bool.self, forKey: .appleProgram) ?? false
+        chainAgents = try c.decodeIfPresent([String].self, forKey: .chainAgents)
+        ancestryKnown = try c.decodeIfPresent(Bool.self, forKey: .ancestryKnown)
+        firstPathAccess = try c.decodeIfPresent(AccessSet.self, forKey: .firstPathAccess)
     }
+
+    /// The AI agents of the chain an answer on this alert is scoped to: the full chain's when known,
+    /// else (an older alert) those of the stored, capped chain.
+    public var scopeAgents: [String] { chainAgents ?? Set(chain.compactMap(\.agentID)).sorted() }
 
     /// Actions offered for this alert, in display order.
     public var availableActions: [AlertAction] {

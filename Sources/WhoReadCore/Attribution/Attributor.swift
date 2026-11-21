@@ -100,13 +100,14 @@ public struct Attributor: Sendable {
                     agentID: agentID)
             }
             if let agentID = node.agentID {
+                // The team of the image that made it the agent (it may have exec'd another program since).
                 return ResponsibleEntity(
                     kind: .agent,
                     key: "agent:" + agentID,
                     displayName: agents.displayName(agentID),
                     path: node.image.executablePath,
                     signingID: node.image.signingID,
-                    teamID: node.image.teamID,
+                    teamID: node.agentTeamID,
                     agentID: agentID)
             }
         }

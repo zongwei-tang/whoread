@@ -73,13 +73,18 @@ public struct FileActivity: Sendable {
     public var operation: FileOperation
     public var process: ProcessRecord
     public var targets: [FileTarget]
+    /// Carried into the recorded events (`AnalyzedEvent.note`): what the operation and targets alone do
+    /// not tell, such as a close that is only possibly a write (`EventNote.mappedWritable`).
+    public var note: String?
 
-    public init(time: Date, sequence: UInt64? = nil, operation: FileOperation, process: ProcessRecord, targets: [FileTarget]) {
+    public init(time: Date, sequence: UInt64? = nil, operation: FileOperation, process: ProcessRecord, targets: [FileTarget],
+                note: String? = nil) {
         self.time = time
         self.sequence = sequence
         self.operation = operation
         self.process = process
         self.targets = targets
+        self.note = note
     }
 }
 

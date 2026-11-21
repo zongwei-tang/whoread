@@ -1,4 +1,3 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
 import SwiftUI
 import WhoReadCore
 import WhoReadUIModel
@@ -51,6 +50,37 @@ final class NavigationState {
         self.tab = tab
         openMainWindow?()
         NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+/// Why a tab's data is missing or not current (`AppModel.unavailableNote`): refused to this app,
+/// or not answered. Nothing while the data is current.
+struct UnavailableNote: View {
+    @Environment(AppModel.self) private var model
+    let part: SnapshotPart
+
+    var body: some View {
+        if let note = model.unavailableNote(part) {
+            Text(note).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// A notice that stays as long as its cause (the background service does not recognise this app):
+/// an icon, and text that can be selected, so the command in it can be copied.
+struct NoticeText: View {
+    let text: String
+
+    var body: some View {
+        Label {
+            Text(text).fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: "exclamationmark.shield")
+        }
+        .foregroundStyle(.orange)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

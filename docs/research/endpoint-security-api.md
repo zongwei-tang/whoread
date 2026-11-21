@@ -10,6 +10,7 @@
 | **[WWDC20]** | Apple WWDC20 session 10159 "Build an Endpoint Security app" (transcript) | https://developer.apple.com/videos/play/wwdc2020/10159/ |
 | **[WWDC22]** | Apple WWDC22 session 110345 "What's new in Endpoint Security" (transcript) | https://developer.apple.com/videos/play/wwdc2022/110345/ |
 | **[SANTA]** | northpolesec/santa @ `af35da14240571fac9a6dca545b01bfc2aa1c014` (2026-10-02) | `https://github.com/northpolesec/santa/blob/af35da14240571fac9a6dca545b01bfc2aa1c014/<path>#L<n>` |
+| **[SDK27]** | The installed **macOS 27.0 SDK** (Xcode 27.0, 27A266a) on macOS 27.0.1 (26A434), checked on 2026-10-10. Cited as `ESClient.h:<n>` etc. without a URL. What changed against the 26.5 text is in §15. | `usr/include/EndpointSecurity/` in the SDK; the relevant text is recorded in [`sdk-verification-27.0.1.txt`](sdk-verification-27.0.1.txt) (`scripts/verify-sdk.sh`) |
 
 Short URL prefixes used below (always expand them literally):
 - `DOC:` = `https://developer.apple.com/documentation/endpointsecurity/`
@@ -69,13 +70,14 @@ Short URL prefixes used below (always expand them literally):
 - C: `extern es_return_t es_delete_client(es_client_t *client);`
 - DOC return value: "A value indicating whether deletion succeeded. `ES_RETURN_ERROR` indicates that shutdown encountered an error, which results in a resource leak."
 - HDR (HC:#L676-L679): "ES_RETURN_SUCCESS indicates all resources were freed. ES_RETURN_ERROR indicates an error occurred during shutdown and resources were leaked." **"@note Must be called from the same thread that originally called `es_new_client`."** This note is only in the header, not on DOC.
+- [SDK27] (ESClient.h:948-957) **replaces that note**: "@note Not safe to call concurrently with any other es_* function (including itself). Can be called from any thread as long as that thread has exclusive access to the client." / "@note Passing NULL is a safe no-op and returns ES_RETURN_SUCCESS." / "@note Using a client pointer after it has been deleted is undefined behavior." The es_new_client comment gains a "Thread Safety" discussion (ESClient.h:777-790), quoted in §15. Creating and deleting a client on the same thread satisfies both versions.
 
 ### es_client_t — DOC:es_client_t
 - C: `typedef struct es_client_s es_client_t;` (Swift sees `OpaquePointer`)
 
-### New in macOS 27 (DOC only; not in the 26.5 header)
-- `es_new_descendants_client` — DOC:es_new_descendants_client(_:_:). **macOS 27.0**. Swift: `func es_new_descendants_client(_ client: UnsafeMutablePointer<OpaquePointer?>, _ handler: @escaping es_handler_block_t) -> es_new_client_result_t`. DOC: "The returned client receives notify events for the calling process and auth+notify events for its descendant processes ... Requires the com.apple.developer.endpoint-security.client entitlement. / Does NOT require root privilege. / Does NOT require TCC approval." Also: "Path muting and target-path muting work normally."
-- `es_sync_client` — DOC:es_sync_client(_:_:). **macOS 27.0**. Swift: `func es_sync_client(_ client: OpaquePointer, _ block: @escaping () -> Void) -> es_return_t`. DOC: "Can NOT be called from the ES handler block of `client`." and "When a program issues a syscall (or similar), it is guaranteed that before control is returned to the caller, the associated ES message has been created and enqueued with all ES clients. Message delivery is asynchronous (even for auth evnts), but enqueing is fully synchronous."
+### New in macOS 27 (DOC, and the 27.0 SDK header; not in the 26.5 header)
+- `es_new_descendants_client` — DOC:es_new_descendants_client(_:_:). **macOS 27.0**. Swift: `func es_new_descendants_client(_ client: UnsafeMutablePointer<OpaquePointer?>, _ handler: @escaping es_handler_block_t) -> es_new_client_result_t`. DOC: "The returned client receives notify events for the calling process and auth+notify events for its descendant processes ... Requires the com.apple.developer.endpoint-security.client entitlement. / Does NOT require root privilege. / Does NOT require TCC approval." Also: "Path muting and target-path muting work normally." [SDK27] (ESClient.h:798-827) says the same and adds that the subtree includes descendants that already exist when the client is created, and that process muting works only for processes already in the subtree (ES_RETURN_ERROR for any other).
+- `es_sync_client` — DOC:es_sync_client(_:_:). **macOS 27.0**. Swift: `func es_sync_client(_ client: OpaquePointer, _ block: @escaping () -> Void) -> es_return_t`. DOC: "Can NOT be called from the ES handler block of `client`." and "When a program issues a syscall (or similar), it is guaranteed that before control is returned to the caller, the associated ES message has been created and enqueued with all ES clients. Message delivery is asynchronous (even for auth evnts), but enqueing is fully synchronous." [SDK27] (ESClient.h:700-734): "Place a sync marker at the back of the message queue for `client`, run `block` when it reaches the front of the queue." / "if a caller unsubscribes from a certain event type, they could then call `es_sync_client()`, and after the callback fires, know that all events of that type have now been delivered." / "@note If the ES client is destroyed, all sync blocks are called." / "@note If client is null, the callback is immediately invoked and the function returns `ES_RETURN_SUCCESS`."
 
 ---
 
@@ -90,6 +92,7 @@ Short URL prefixes used below (always expand them literally):
 
 - es_subscribe return value (DOC): "`ES_RETURN_ERROR` indicates that the caller couldn't reach the Endpoint Security subsystem or that the request was invalid."
 - HDR (HC:#L26-L32): "@note Subscribing to new event types does not remove previous subscriptions." and "@note Subscribing to events is not optional for clients that have opted into early boot mode (see NSEndpointSecurityEarlyBoot in EndpointSecurity(7)). Early boot clients that fail to subscribe to at least one event type will cause early boot to time out, resulting in a bad user experience and risking watchdog timeout panics."
+- [SDK27] (ESClient.h:34-37): "@note Event types with values >= ES_EVENT_TYPE_LAST are silently ignored. The remaining valid events in the array are still processed and ES_RETURN_SUCCESS is returned even if some events were invalid. Calling with an event_count of 0 is a no-op returning ES_RETURN_SUCCESS." So SUCCESS does not prove a subscription to an event type the running macOS does not know. es_unsubscribe (ESClient.h:53-55): unsubscribing from a type that is not subscribed is "a safe no-op".
 - es_unsubscribe DOC: "After making this call successfully, Endpoint Security continues to deliver messages for any previously-subscribed events that aren't specifically unsubscribed from."
 - es_subscriptions DOC: "On return, the caller takes ownership of the memory pointed to by the `subscriptions` parameter, and must free it."
 - [WWDC20]: "your client should be prepared to subscribe to all necessary events in a single call to es_subscribe. If you split your events across multiple calls, third-party applications may begin executing before the additional subscriptions are in place and your client can miss events." (This is about early boot.)
@@ -120,7 +123,7 @@ Short URL prefixes used below (always expand them literally):
 ### Which events use which respond API (HT:#L88-L97, verbatim)
 > When a program subscribes to and receives an AUTH-related event, it must respond with an appropriate result indicating whether or not the operation should be allowed to continue. ... Currently, only ES_EVENT_TYPE_AUTH_OPEN must use es_respond_flags_result. All other AUTH events must use es_respond_auth_result.
 
-[WWDC20] says the same: "as of today, only the AUTH OPEN event uses the flags result API." (This is the 26.5 header. The macOS 27 DOC adds new AUTH events, e.g. `ES_EVENT_TYPE_AUTH_XPC_CONNECT` and `ES_EVENT_TYPE_AUTH_BOOTSTRAP_*`. Whether the "only AUTH_OPEN" rule still holds for them is UNVERIFIED.)
+[WWDC20] says the same: "as of today, only the AUTH OPEN event uses the flags result API." (This is the 26.5 header. The macOS 27 DOC adds new AUTH events, e.g. `ES_EVENT_TYPE_AUTH_XPC_CONNECT` and `ES_EVENT_TYPE_AUTH_BOOTSTRAP_*`. [SDK27] ESTypes.h:107-108 still reads "Currently, only ES_EVENT_TYPE_AUTH_OPEN must use es_respond_flags_result. All other AUTH events must use es_respond_auth_result.")
 
 ### AUTH_OPEN: what if authorized_flags is a strict subset of the requested fflag?
 - [HDR]: authorized_flags is a mask over the event's flags. 0 means deny. UINT32_MAX means allow regardless. On a **cache hit**: "allowed only if the flags of the event are a subset of the flags in authorized_flags, and denied otherwise".
@@ -150,12 +153,12 @@ DOC:es_respond_result_err_event_type discussion: "This error occurs if the clien
   - DOC:es_message_t/deadline (verbatim): "If you fail to respond to an event before this deadline, Endpoint Security may terminate the client process, or restart the process if it's a system extension. If your client repeatedly misses deadlines, Endpoint Security may refuse new connections from `es_new_client(_:_:)` altogether."
   - HDR (HM:#L2610-L2615, verbatim): "@field deadline The Mach absolute time before which an auth event must be responded to. If a client fails to respond to auth events prior to the `deadline`, the client will be killed. Each message can contain its own unique deadline, and some deadlines can vary substantially. Clients must take care to inspect the deadline value of each message to know how much time is allotted for processing." The "client will be killed" wording is already in the **10.15** SDK header ("The Mach time before which an auth event must be responded to. If a client fails to respond to auth events prior to the `deadline`, the client will be killed."). So killing has been the documented behavior since ES shipped in 10.15.
   - [WWDC20, verbatim]: "If a client fails to respond before the deadline, the application will be terminated. If your application is a system extension, the launchd job we submit for you will be automatically restarted. ... there is no guarantee that each message allows for the same amount of response time. These values can and will change over time. **When a deadline is missed, an implicit ALLOW is applied as the response, but the result will not be cached**, allowing future operations to be reevaluated."
-  - **macOS 27.0 makes this configurable** (DOC only):
+  - **macOS 27.0 makes this configurable** (DOC; the 27.0 SDK header has the same text, ESClient.h:829-946, and the raw values in §15):
     - `es_deadline_miss_mode_t` (DOC:es_deadline_miss_mode_t): "Determines how the system responds when a client fails to respond to an auth event within the deadline." Cases: `ES_DEADLINE_MISS_MODE_KILL` ("Kill the client when it fails to respond to an auth event (default behavior)"), `ES_DEADLINE_MISS_MODE_FAIL_OPEN` ("Allow the operation when client fails to respond, but don't kill the client"), `ES_DEADLINE_MISS_MODE_FAIL_CLOSED` ("Deny the operation when client fails to respond, but don't kill the client").
     - `func es_set_deadline_miss_mode(_ client: OpaquePointer, _ mode: es_deadline_miss_mode_t) -> es_return_t` (macOS 27.0, DOC:es_set_deadline_miss_mode(_:_:)): "The default mode is ES_DEADLINE_MISS_MODE_KILL." / "This allows clients to defer deadline management to the kernel instead of implementing their own timeout mechanisms." / "**When `ES_DEADLINE_MISS_MODE_FAIL_CLOSED` is used, if an `AUTH` message is dropped because the message queue was full, it will be `DENY`ed instead of the usual `ALLOW` behaviour.**" So by default, AUTH messages dropped because of a full queue are allowed.
     - `func es_get_deadline_miss_mode(_ client: OpaquePointer, _ mode: UnsafeMutablePointer<es_deadline_miss_mode_t>) -> es_return_t` (macOS 27.0)
     - `func es_set_deadline_max_milliseconds(_ client: OpaquePointer, _ events: UnsafePointer<es_event_type_t>, _ event_count: UInt32, _ milliseconds: UInt32) -> es_return_t` (macOS 27.0): "This allows clients to configure lower per-event-type deadlines ... The kernel will automatically unblock operations based on the client's deadline miss mode when the deadline expires." It returns ES_RETURN_ERROR "if milliseconds exceeds system default".
-    - `es_get_deadline_max_milliseconds`, `es_set/get_deadline_min_milliseconds` (macOS 27.0; min only for descendants clients).
+    - `es_get_deadline_max_milliseconds`, `es_set/get_deadline_min_milliseconds` (macOS 27.0; min only for descendants clients). [SDK27] (ESClient.h:901-924): the minimum "is not capped by the system default. Setting a minimum above the system default is permitted and will effectively extend deadlines beyond the system default", and it may not include the bootstrap AUTH events.
 
 ### What the `cache` flag caches, and the cache key per event
 - The cache is **global and shared by all clients**:
@@ -201,6 +204,7 @@ Other events with cache keys in 26.5: mmap (process exe, source file), mount (pr
 | es_message_size — DOC:es_message_size(_:) | 10.15, **deprecated 11.0** | `func es_message_size(_ msg: UnsafePointer<es_message_t>) -> Int` | `extern size_t es_message_size(const es_message_t *msg);` |
 
 - es_retain_message DOC: "If you asynchronously process the message provided to the event-handler block of `es_new_client(_:_:)`, you must retain the message." HDR (HM:#L2747-L2752): "Retains the given es_message_t, extending its lifetime until released with `es_release_message`. ... @note It is necessary to retain a message when the es_message_t provided in the event handler block of `es_new_client` will be processed asynchronously."
+- [SDK27] (ESMessage.h:2849-2852): "@note Each call to es_retain_message must be balanced by exactly one call to es_release_message. Failing to release a retained message leaks memory. Releasing a message more than once per retain, or releasing a message that was never retained, is undefined behavior."
 - es_free_message DOC: "Only free messages you explicitly copied with `es_copy_message(_:)`." / "[Warning] Freeing a message from inside a handler block will cause your app to crash."
 - es_copy_message HDR (HM:#L2715-L2732): since 11.0 it actually "Retains an es_message_t, returning a non-const pointer ... It is invalid to attempt to write to the returned es_message_t, despite being non-const, and doing so will result in a crash."
 - es_message_size deprecation (DOC): "Don't use `es_message_size(_:)` in conjunction with attempting to copy a message; doing so will result in use-after-free bugs."
@@ -236,6 +240,7 @@ Notes:
 - Structs (HT:#L462-L486; DOC:es_muted_process_t, DOC:es_muted_processes_t): `es_muted_process_t { audit_token_t audit_token; size_t event_count; const es_event_type_t *events; }` and `es_muted_processes_t { size_t count; const es_muted_process_t *processes; }`.
 - es_muted_processes HDR (HC:#L212-L224): "If there are no muted processes and the call completes successfully, `*count` is set to 0 and `*audit_token` is set to NULL. @note The audit tokens are returned in the same state as they were passed to `es_mute_process` and may not accurately reflect the current state of the respective processes."
 - [WWDC20]: "The EndpointSecurity subsystem will automatically track process exits and remove them from your client's set of muted processes." / "Muting by process audit token is generally a better way to mute events without as much overhead."
+- [SDK27] (ESClient.h:152-154) puts both in the header: "@note The audit_token must refer to a currently running process. Muting a process that has already exited returns ES_RETURN_ERROR." / "@note Muted processes are automatically unmuted when they exit." It also calls process-mute inversion "an involution" (ESClient.h:172): inverting twice restores the original state.
 
 ---
 
@@ -437,7 +442,7 @@ typedef struct {
 	es_cs_validation_category_t cs_validation_category; /* field available only if message version >= 10 */
 } es_process_t;
 ```
-Swift types (DOC): `audit_token: audit_token_t`, `ppid: pid_t`, `original_ppid: pid_t`, `group_id: pid_t`, `session_id: pid_t`, `codesigning_flags: UInt32`, `is_platform_binary: Bool`, `is_es_client: Bool`, `cdhash: es_cdhash_t`, `signing_id: es_string_token_t`, `team_id: es_string_token_t`, `executable: UnsafeMutablePointer<es_file_t>`, `tty: UnsafeMutablePointer<es_file_t>?`, `start_time: timeval`, `responsible_audit_token: audit_token_t`, `parent_audit_token: audit_token_t`, `cs_validation_category: es_cs_validation_category_t`. **macOS 27 DOC also lists `cdhash_full: es_token_t` ("Structure buffer with size") and `reserved` (C: `uint8_t reserved[16];`).** These are not in the 26.5 header. The message version that gates `cdhash_full` is UNVERIFIED.
+Swift types (DOC): `audit_token: audit_token_t`, `ppid: pid_t`, `original_ppid: pid_t`, `group_id: pid_t`, `session_id: pid_t`, `codesigning_flags: UInt32`, `is_platform_binary: Bool`, `is_es_client: Bool`, `cdhash: es_cdhash_t`, `signing_id: es_string_token_t`, `team_id: es_string_token_t`, `executable: UnsafeMutablePointer<es_file_t>`, `tty: UnsafeMutablePointer<es_file_t>?`, `start_time: timeval`, `responsible_audit_token: audit_token_t`, `parent_audit_token: audit_token_t`, `cs_validation_category: es_cs_validation_category_t`. **macOS 27 DOC also lists `cdhash_full: es_token_t` ("Structure buffer with size") and `reserved` (C: `uint8_t reserved[16];`).** These are not in the 26.5 header. [SDK27] declares them after `cs_validation_category`: a `union { uint8_t reserved[16]; }` and `es_token_t cdhash_full; /* field available only if message version >= 11 */`, with the comment "The `cdhash` field only captures the first 20 bytes of the real CDHash of the process. This field contains the full CDHash, the length and algorithm of which is subject to change."
 - `es_cdhash_t` = `typedef uint8_t es_cdhash_t[20];` (HT). In Swift this is a 20-tuple.
 - Per-field notes (verbatim):
   - ppid (HDR): "Parent pid of the process. It is recommended to instead use the parent_audit_token field."
@@ -495,7 +500,7 @@ All DOC struct pages: `DOC:es_event_<name>_t`. Swift field types come from the D
 
 Field notes (verbatim):
 - close (HDR): "`was_mapped_writable` only indicates whether the target file was mapped into writable memory or not for the lifetime of the vnode. ... The `modified` flag only reflects that a file was or was not modified by filesystem syscall. If a file was only modifed though a memory mapping this flag will be false, but was_mapped_writable will be true." DOC modified: "This value corresponds to `KAUTH_FILEOP_CLOSE_MODIFIED`."
-- rename/unlink/create (HDR): "This event can fire multiple times for a single syscall, for example when the syscall has to be retried due to racing VFS operations."
+- rename/unlink/create (HDR): "This event can fire multiple times for a single syscall, for example when the syscall has to be retried due to racing VFS operations." [SDK27]: unlink ESMessage.h:348, rename :514, create :684; fsgetpath :1112 has the same note.
 - create (HDR): "If an object is being created but has not yet been created, the `destination_type` will be `ES_DESTINATION_TYPE_NEW_PATH`." / "Typically `ES_EVENT_TYPE_NOTIFY_CREATE` events are fired after the object has been created and the `destination_type` will be `ES_DESTINATION_TYPE_EXISTING_FILE`. The exception to this is for notifications that occur if an ES client responds to an `ES_EVENT_TYPE_AUTH_CREATE` event with `ES_AUTH_RESULT_DENY`."
 - copyfile (HDR): "@note Not to be confused with copyfile(3). @note Prior to macOS 12.0, the copyfile syscall fired open, unlink and auth create events, but no notify create, nor write or close events." DOC target_file: "The copy file operation overwrites this file if the operation completes. If no file exists at the target location, this value is `NULL`."
 - Syscall-specific events (HM:#L98-L110): "A truncate event does not indicate that a file is being truncated generally (for example by calling open(2) with the O_TRUNC flag), only specifically that truncate(2) was called. This is true for EXCHANGEDATA, CLONE, COPYFILE, SEARCHFS etc. ES events always describe specific operations, not broad concepts."
@@ -565,6 +570,7 @@ Member names match the event names: `open`, `close`, `rename`, `clone`, `copyfil
   - `NSEndpointSecurityEarlyBoot` — "Type: Boolean. If set to TRUE, the ES subsystem will hold up all mounts and third party executions (anything that is not a platform binary) until all early boot ES extensions make their first subscription."
   - `NSEndpointSecurityRebootRequired` — "Type: Boolean. If not set or set to FALSE, the new version of the extension is started immediately after terminating the old version. If set to TRUE, the new version of the extension is NOT started until the system reboots. ..."
   - `NSEndpointSecurityMachServiceName` — "Type: String. If set, this string will be the name of the MachService which can be used for XPC between the ES extension and its app. If not set, a default mach service (name: <teamID>.<bundleID>.xpc) will be provided but its usage is deprecated."
+- [SDK27]: the 27.0 SDK's man page documents the same three keys (`EndpointSecurity.7` lines 17-34).
 - The 10.15 man page also said: "If ES extension is combined with a Network Extension, set the NEMachServiceName key in the Info.plist." That line is gone from 11.3 onward.
 - NSEndpointSecurityEarlyBoot has a DOC page (https://developer.apple.com/documentation/bundleresources/information-property-list/nsendpointsecurityearlyboot, macOS 10.15, Boolean) with an **empty abstract**.
 
@@ -585,6 +591,48 @@ Member names match the event names: `open`, `close`, `rename`, `clone`, `copyfil
 - The DOC deadline page adds: "If your client repeatedly misses deadlines, Endpoint Security may refuse new connections from `es_new_client(_:_:)` altogether." Which result code that produces is **UNVERIFIED**.
 - The maximum number of clients is **not documented** (UNVERIFIED).
 - macOS 27 `es_new_descendants_client` does NOT require root or TCC (§1).
+
+---
+
+## 15. What the macOS 27.0 SDK headers add [SDK27]
+
+The header facts in §1-§14 that WhoRead relies on (the functions it calls, the structs and fields it
+reads, the constants it uses) were checked against the installed 27.0 SDK; their text is unchanged
+except where noted there (§1 es_delete_client, §2 es_subscribe, §4 retain and release, §6 process
+muting, §10 es_process_t). Line numbers that start with `HC:`/`HM:`/`HMC:`/`HT:` are the 26.5
+mirror's; the 27 headers moved some text. The additions that matter for WhoRead:
+
+**Thread safety (ESClient.h:777-790, in the es_new_client comment, verbatim):**
+> The handler block is invoked strictly serially and in the order messages are delivered. All other es_* APIs — including subscribe, unsubscribe, mute, unmute, respond, retain, release, and cache operations — are safe to call concurrently from any thread on the same es_client_t.
+>
+> The only exception is es_delete_client(), which is not safe to call concurrently with any other es_* function (including itself). It can be called from any thread as long as that thread has exclusive access to the client.
+>
+> After es_delete_client() returns, the client pointer is invalid. Passing a deleted client to any es_* function is undefined behavior.
+
+This settles the thread question for `es_respond_*` on retained messages (it was not stated before).
+
+**Deadline miss mode (ESClient.h:829-861), raw values compiled from ESTypes.h:** `ES_DEADLINE_MISS_MODE_KILL` = 0, `ES_DEADLINE_MISS_MODE_FAIL_CLOSED` = 1, `ES_DEADLINE_MISS_MODE_FAIL_OPEN` = 2 (DOC lists FAIL_OPEN before FAIL_CLOSED; the declaration order is the one above). `es_set_deadline_miss_mode(es_client_t *, es_deadline_miss_mode_t)` and `es_get_deadline_miss_mode(es_client_t *, es_deadline_miss_mode_t *)` return `es_return_t` (`ES_RETURN_SUCCESS` = 0). A client that needs to build with older SDKs and run on older systems can look them up at run time and pass the raw value.
+
+**Default mute set and its API.** `es_muted_paths_events` (12.0) is declared `es_return_t es_muted_paths_events(es_client_t *_Nonnull client, es_muted_paths_t *_Nonnull *_Nullable muted_paths)` (ESClient.h:556), the opposite nullability of `es_muted_processes_events`. In Swift the parameter is `UnsafeMutablePointer<UnsafeMutablePointer<es_muted_paths_t>>?`, so the out-pointer's pointee is non-optional: call it through temporary storage, then `es_release_muted_paths`. Path types: `PREFIX` = 0 and `LITERAL` = 1 (programs), `TARGET_PREFIX` = 2 and `TARGET_LITERAL` = 3.
+
+**es_exec_entitlements (ESMessage.h:2935-2947, macOS 27.0):** "The XPC dictionary containing all entitlements, or NULL if there are no entitlements." / "The caller is responsible for releasing the returned object." (`OS_OBJECT_RETURNS_RETAINED`).
+
+**Code signing state (ESMessageCore.h, es_process_t discussion), verbatim excerpt:**
+> The CS_VALID bit in the `codesigning_flags` means that everything the kernel has validated up to that point in time was valid, but not that there has been a full validation of all the pages in the executable file. If page content has been tampered with in the executable, we won't know until that page is paged in. At that time, the process will have its CS_VALID bit cleared and, if CS_KILL is set, the process will be killed, preventing any tampered code from being executed. CS_KILL is generally set for platform binaries and for binaries having opted into the hardened runtime.
+
+The flag values are in `kern/cs_blobs.h` in the SDK's Kernel.framework, which user space cannot include: `CS_VALID` 0x1, `CS_GET_TASK_ALLOW` 0x4, `CS_INVALID_ALLOWED` 0x20, `CS_DEBUGGED` 0x10000000, `CS_SIGNED` 0x20000000.
+
+**es_cs_validation_category_t (message version 10):** `INVALID` 0, `PLATFORM` 1, `TESTFLIGHT` 2, `DEVELOPMENT` 3, `APP_STORE` 4, `ENTERPRISE` 5, `DEVELOPER_ID` 6, `LOCAL_SIGNING` 7, `ROSETTA` 8, `OOPJIT` 9, `NONE` 10.
+
+**Event types added since macOS 15 (ESTypes.h:273-309):** `NOTIFY_GATEKEEPER_USER_OVERRIDE` (146, 15.0), `NOTIFY_TCC_MODIFY` (147, 15.4), `RESERVED_0`-`RESERVED_8` (148-156, 26.3 to 26.5, no struct), `AUTH_XPC_CONNECT` (157, 27.0), `AUTH/NOTIFY_BOOTSTRAP_CHECK_IN` (158/159, 27.0) and `AUTH/NOTIFY_BOOTSTRAP_LOOK_UP` (160/161, 27.0; the AUTH variant "is unavailable for non-descendants clients"). `ES_EVENT_TYPE_LAST` is 162. No file event type has been added since COPYFILE (12.0).
+
+**Raw values of the file events WhoRead answers:** `AUTH_OPEN` 1, `AUTH_MOUNT` 5, `AUTH_SETATTRLIST` 45, `AUTH_SETMODE` 48, `AUTH_SETOWNER` 49, `AUTH_SETACL` 81; the rest are in the record. `es_respond_result_t`: `SUCCESS` 0, `ERR_INVALID_ARGUMENT` 1, `ERR_INTERNAL` 2, `NOT_FOUND` 3, `ERR_DUPLICATE_RESPONSE` 4, `ERR_EVENT_TYPE` 5. `es_mute_inverted_return_t`: `ES_MUTE_INVERTED` 0, `ES_MUTE_NOT_INVERTED` 1, `ES_MUTE_INVERTED_ERROR` 2.
+
+**Layout, compiled from the headers and matched by Swift's `MemoryLayout`:** `es_message_t` is 224 bytes with `event` at offset 104 and `global_seq_num` at 216, so a pointer to `event` inside the original message is what `es_exec_arg` needs. `es_process_t` is 248 bytes, `cs_validation_category` at 208 and `cdhash_full` at 232.
+
+**Message versions and macOS releases:** no header maps one to the other. v10 (`cs_validation_category`) is in the 26.5 header and not in the 15.5 one, and v11 (`cdhash_full`) is new in 27, so v10 ≈ macOS 26 and v11 ≈ macOS 27 are inferences. Other gates confirmed: `close.was_mapped_writable` v6, `exec.dyld_exec_path` v7, `mount.disposition` v8.
+
+**eslogger on macOS 27.0.1:** `eslogger --list-events` lists 106 events, the 104 of macOS 26.5.2 plus `bootstrap_check_in` and `bootstrap_look_up`. Listing needs no root.
 
 ---
 
@@ -612,9 +660,9 @@ Member names match the event names: `open`, `close`, `rename`, `clone`, `copyfil
 2. AUTH_OPEN with a **non-cached** `authorized_flags` that is a strict subset of `fflag`: whether `open(2)` fails (EPERM/EACCES?) or proceeds with reduced access. Only "mask" wording and the cache-hit rule (deny unless subset) are documented.
 3. The macOS release in which deadline-miss **killing** began, beyond "documented since the 10.15 SDK header". There is also a wording conflict: DOC says "may terminate"; HDR says "will be killed"; WWDC20 says "will be terminated … implicit ALLOW … not cached". macOS 27 makes it configurable, default KILL.
 4. Which `es_new_client_result_t` is returned when ES "may refuse new connections" after repeated deadline misses. Also the maximum client count behind `ERR_TOO_MANY_CLIENTS`.
-5. Whether the rule "only AUTH_OPEN uses `es_respond_flags_result`" (26.5 header) still holds for AUTH events new in macOS 27 (`AUTH_XPC_CONNECT`, `AUTH_BOOTSTRAP_CHECK_IN/LOOK_UP`).
-6. The message `version` that gates `es_process_t.cdhash_full` (macOS 27 DOC only). The macOS release that corresponds to message version 10 (`cs_validation_category`).
-7. A thread-safety statement for calling `es_respond_*`, `es_mute_*` or `es_subscribe` from arbitrary threads/queues. Only "respond out of order after retaining" is documented. The one explicit thread rule is that `es_delete_client` must be called on the thread that called `es_new_client`.
+5. Resolved by [SDK27]: the 27 header still says only `ES_EVENT_TYPE_AUTH_OPEN` uses `es_respond_flags_result` (ESTypes.h:107-108), with the macOS 27 AUTH events declared (§3).
+6. Partly resolved by [SDK27]: `cdhash_full` is gated by message version 11. Which macOS release sends which message version is still not documented (v10 ≈ macOS 26 and v11 ≈ macOS 27 are inferred, §15).
+7. Resolved by [SDK27]: every `es_*` call except `es_delete_client` is safe concurrently from any thread on the same client; `es_delete_client` needs exclusive access, from any thread (§1, §15). Older headers say nothing about other threads and require `es_delete_client` on the thread that called `es_new_client`.
 8. The exact Capability Requests path for the ES entitlement. Apple's ES docs point to https://developer.apple.com/system-extensions/ ("Request an Entitlement" → contact form). The generic Account Help "Capability Requests" page does not mention ES.
 9. A DocC page for `NSEndpointSecurityMachServiceName`. None exists; the only source is the EndpointSecurity(7) man page in the SDK.
 10. Per-field availability (introducedAt) for enums/structs on DocC. It is absent from the JSON. Rely on the header `message version` comments and `API_AVAILABLE` annotations instead.

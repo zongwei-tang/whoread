@@ -1,13 +1,39 @@
-// WhoRead menu bar app (macOS 14+).
-// NOT YET COMPILED: written on a Linux host. Logic lives in WhoReadUIModel (unit-tested);
-// this target is SwiftUI/AppKit glue only.
+// WhoRead menu bar app (macOS 14+). Logic lives in WhoReadUIModel (unit-tested); this target is
+// SwiftUI/AppKit glue only.
 import SwiftUI
 import UserNotifications
 import WhoReadCore
 import WhoReadIPC
 import WhoReadUIModel
 
+/// The entry point. `--self-check` checks the daemon and `--unregister-login-item` takes back the login
+/// item (scripts/uninstall.sh); both exit before anything of the app starts: no window, no menu bar
+/// item, no notification permission request. Anything else runs the menu bar app.
 @main
+@MainActor
+enum WhoReadMain {
+    static func main() {
+        let arguments = CommandLine.arguments.dropFirst()
+        if arguments.contains(SelfCheck.argument) { SelfCheckCommand.run() }
+        if arguments.contains(OpenAtLogin.unregisterArgument) { AppLoginItem.unregisterAndExit() }
+        WhoReadApp.main()
+    }
+}
+
+/// `--self-check` (`SelfCheck`): on the Mach service and transport the app would use, then exit.
+@MainActor
+enum SelfCheckCommand {
+    static func run() -> Never {
+        let name = DaemonConnection.resolveServiceName()
+        let client = XPCClient(machServiceName: name, timeout: SelfCheck.timeout)
+        let result = SelfCheck.run(client, viaExtension: name == DaemonConnection.extensionServiceName)
+        client.invalidate()
+        for line in result.lines { print(line) }
+        fflush(stdout)
+        exit(result.exitStatus)
+    }
+}
+
 struct WhoReadApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var connection = DaemonConnection.shared
@@ -68,7 +94,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         center.delegate = self
         NotificationManager.shared.registerCategories()
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
-        Task { @MainActor in DaemonConnection.shared.start() }
+        Task { @MainActor in
+            DaemonConnection.shared.start()
+            // The first launch registers WhoRead to open at login; later ones leave it as the user set it.
+            AppLoginItem.shared.appLaunched()
+        }
     }
 
     // Show banners even while the app is frontmost.

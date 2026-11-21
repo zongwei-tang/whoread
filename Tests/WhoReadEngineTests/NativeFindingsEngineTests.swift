@@ -139,9 +139,13 @@ final class NativeDeadlineMissModeTests: XCTestCase {
 
     func testFunctionsAreFoundOnlyWhereTheSystemHasThem() {
         // Looked up at run time; libEndpointSecurity is linked into this bundle.
+        // The SDK says macOS 27, but macOS 26.6 already exports both functions: what counts is
+        // whether the system has them, and that the setter and the getter come together.
         let has27 = ProcessInfo.processInfo.isOperatingSystemAtLeast(OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0))
-        XCTAssertEqual(NativeDeadlineMissMode.symbol(NativeDeadlineMissMode.setterName) != nil, has27)
-        XCTAssertEqual(NativeDeadlineMissMode.symbol(NativeDeadlineMissMode.getterName) != nil, has27)
+        let setter = NativeDeadlineMissMode.symbol(NativeDeadlineMissMode.setterName) != nil
+        let getter = NativeDeadlineMissMode.symbol(NativeDeadlineMissMode.getterName) != nil
+        XCTAssertEqual(setter, getter)
+        if has27 { XCTAssertTrue(setter, "macOS 27 and later have es_set_deadline_miss_mode") }
         XCTAssertNil(NativeDeadlineMissMode.symbol("es_no_such_function"))
     }
 

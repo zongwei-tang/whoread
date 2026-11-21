@@ -91,24 +91,26 @@ public enum UnixSocket {
         }
     }
 
-    static func readExactly(_ fd: Int32, _ count: Int, deadline: DispatchTime? = nil) -> Data? {
+    static func readExactly(_ fd: Int32, _ count: Int, deadline: DispatchTime? = nil) -> Result<Data, FrameFailure> {
         var buffer = Data(count: count)
         var offset = 0
-        let ok = buffer.withUnsafeMutableBytes { raw -> Bool in
-            guard let base = raw.baseAddress else { return count == 0 }
+        let failure = buffer.withUnsafeMutableBytes { raw -> FrameFailure? in
+            guard let base = raw.baseAddress else { return count == 0 ? nil : .failed(EINVAL) }
             while offset < count {
-                if let deadline, !waitReady(fd, POLLIN, until: deadline) { return false }
+                if let deadline, !waitReady(fd, POLLIN, until: deadline) { return .timedOut }
                 let n = read(fd, base + offset, count - offset)
                 if n < 0 {
-                    if errno == EINTR { continue }
-                    return false
+                    let e = errno
+                    if e == EINTR { continue }
+                    // SO_RCVTIMEO passed.
+                    return e == EAGAIN || e == EWOULDBLOCK ? .timedOut : .failed(e)
                 }
-                if n == 0 { return false }
+                if n == 0 { return .closed }
                 offset += n
             }
-            return true
+            return nil
         }
-        return ok ? buffer : nil
+        return failure.map { .failure($0) } ?? .success(buffer)
     }
 
     static func sendFrame(_ fd: Int32, _ payload: Data, deadline: DispatchTime? = nil) -> Bool {
@@ -118,10 +120,29 @@ public enum UnixSocket {
     }
 
     static func receiveFrame(_ fd: Int32, max: Int = maxFrame, deadline: DispatchTime? = nil) -> Data? {
-        guard let header = readExactly(fd, 4, deadline: deadline) else { return nil }
-        let len = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian
-        guard Int(len) <= max else { return nil }
-        return readExactly(fd, Int(len), deadline: deadline)
+        try? readFrame(fd, max: max, deadline: deadline).get()
+    }
+
+    /// Why no frame came.
+    enum FrameFailure: Error, Equatable {
+        /// The peer closed the connection.
+        case closed
+        /// The deadline, or the socket's receive timeout, passed.
+        case timedOut
+        /// The header announces this many bytes, more than the limit: none of them was read.
+        case tooLarge(Int)
+        /// read() failed with this errno.
+        case failed(Int32)
+    }
+
+    /// One frame of at most `max` bytes, or why none came. A larger one is refused from its header: none
+    /// of its payload is read (the server's request limit, the client's reply limit).
+    static func readFrame(_ fd: Int32, max: Int = maxFrame, deadline: DispatchTime? = nil) -> Result<Data, FrameFailure> {
+        readExactly(fd, 4, deadline: deadline).flatMap { header in
+            let len = Int(header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
+            guard len <= max else { return .failure(.tooLarge(len)) }
+            return readExactly(fd, len, deadline: deadline)
+        }
     }
 
     /// (pid, euid) of the connected peer.
@@ -184,7 +205,9 @@ public final class UnixSocketServer: @unchecked Sendable {
             throw IPCError(.unavailable, "bind(\(path)): \(String(cString: strerror(errno)))")
         }
         chmod(path, mode)
-        guard listen(fd, 16) == 0 else {
+        // A backlog below the connection limit refuses connects (ECONNREFUSED on Darwin) whenever
+        // clients arrive faster than the accept loop takes them, well before any slot is short.
+        guard listen(fd, Int32(UnixSocketServer.maxConnections * 2)) == 0 else {
             close(fd)
             throw IPCError(.unavailable, "listen(): \(String(cString: strerror(errno)))")
         }
@@ -253,19 +276,64 @@ public final class UnixSocketClient: IPCClient, @unchecked Sendable {
     }
 
     public func send(_ request: IPCRequest) throws -> IPCResponse {
+        let payload = try IPCCodec.encode(request)
+        // The server closes the connection on a larger frame without reading it (and without a reply),
+        // which would read here as a daemon that did not answer.
+        guard payload.count <= UnixSocket.maxRequestFrame else {
+            throw IPCError(.invalid, "request too large: \(payload.count) bytes, the daemon's dev socket accepts at most "
+                           + "\(UnixSocket.maxRequestFrame / (1024 * 1024)) MiB")
+        }
         let fd = socket(AF_UNIX, UnixSocket.streamType, 0)
-        guard fd >= 0 else { throw IPCError(.unavailable, "socket(): \(String(cString: strerror(errno)))") }
+        guard fd >= 0 else {
+            throw IPCError(.unavailable, "socket(): \(String(cString: strerror(errno)))", noAnswer: .noConnection)
+        }
         defer { close(fd) }
         UnixSocket.configure(fd, receiveTimeout: replyTimeout, sendTimeout: UnixSocketServer.ioTimeout)
         var addr = try UnixSocket.makeAddress(path)
         let rc = withUnsafePointer(to: &addr) { p in
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
-        guard rc == 0 else { throw IPCError(.unavailable, "connect(\(path)): \(String(cString: strerror(errno)))") }
-        guard UnixSocket.sendFrame(fd, try IPCCodec.encode(request)) else { throw IPCError(.unavailable, "send failed") }
-        guard let reply = UnixSocket.receiveFrame(fd) else {
-            throw IPCError(.unavailable, "no reply from \(path) (timed out after \(replyTimeout) s, reply too large, or connection closed)")
+        guard rc == 0 else {
+            let e = errno
+            throw IPCError(.unavailable, "connect(\(path)): \(String(cString: strerror(e)))",
+                           noAnswer: UnixSocketClient.noAnswer(connectErrno: e))
         }
-        return try IPCCodec.decodeResponse(reply)
+        return try exchange(fd, payload)
+    }
+
+    /// What a failed connect() says about the daemon.
+    static func noAnswer(connectErrno e: Int32) -> IPCError.NoAnswer {
+        switch e {
+        // No socket file.
+        case ENOENT, ENOTDIR: return .notFound
+        // The socket's mode (owner only by default: whoreadd --dev-socket-mode).
+        case EACCES, EPERM: return .refused
+        // ECONNREFUSED: a socket file nothing listens at any more (a daemon that stopped), or a full
+        // listen backlog (Darwin refuses connects then, see UnixSocketServer.start).
+        default: return .noConnection
+        }
+    }
+
+    /// Sends one framed request on the connected `fd` and reads the reply (tests: one end of a socketpair).
+    func exchange(_ fd: Int32, _ payload: Data) throws -> IPCResponse {
+        guard UnixSocket.sendFrame(fd, payload) else {
+            let e = errno
+            // The send timeout passed (the daemon reads nothing), or the daemon closed the connection first.
+            throw IPCError(.unavailable, "sending to \(path) failed: \(String(cString: strerror(e)))",
+                           noAnswer: e == EAGAIN || e == EWOULDBLOCK ? .timedOut : .droppedBeforeAnswer)
+        }
+        switch UnixSocket.readFrame(fd) {
+        case .success(let reply):
+            return try IPCCodec.decodeResponse(reply)
+        case .failure(.timedOut):
+            throw IPCError(.unavailable, "no reply from \(path) within \(replyTimeout) s", noAnswer: .timedOut)
+        case .failure(.tooLarge(let n)):
+            throw IPCError(.unavailable, "the reply from \(path) is \(n) bytes, more than the "
+                           + "\(UnixSocket.maxFrame / (1024 * 1024)) MiB this client takes", noAnswer: .replyTooLarge)
+        case .failure(.closed):
+            throw IPCError(.unavailable, "\(path) closed the connection without answering", noAnswer: .droppedBeforeAnswer)
+        case .failure(.failed(let e)):
+            throw IPCError(.unavailable, "no reply from \(path): \(String(cString: strerror(e)))", noAnswer: .noConnection)
+        }
     }
 }

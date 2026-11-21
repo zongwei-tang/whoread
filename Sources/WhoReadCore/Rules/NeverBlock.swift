@@ -52,7 +52,8 @@ public struct NeverBlockList: Sendable {
                 return true
             }
         }
-        guard p.isPlatformBinary, IdentitySpec.isSystemLocation(p.executablePath) else { return false }
+        // The kernel's signing category, where reported, must confirm the platform flag.
+        guard p.isVerifiedPlatformBinary, IdentitySpec.isSystemLocation(p.executablePath) else { return false }
         let name = p.name
         if NeverBlockList.exactNames.contains(name) { return true }
         return NeverBlockList.namePrefixes.contains { name.hasPrefix($0) }

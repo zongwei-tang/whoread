@@ -178,3 +178,99 @@ final class RuleDecodingTests: XCTestCase {
         }
     }
 }
+
+/// The database's directory is the daemon's data directory, created and checked before the store opens
+/// (macos-4). The store creates no directories of its own and does not open a database through a link.
+final class StoreDirectoryTests: XCTestCase {
+    var dir: URL!
+
+    override func setUpWithError() throws {
+        dir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("whoread-storedir-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        XCTAssertEqual(chmod(dir.path, 0o755), 0)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    private func exists(_ path: String) -> Bool {
+        var st = stat()
+        return lstat(path, &st) == 0
+    }
+
+    private func assertRefused(_ path: String, owner: uid_t = geteuid(), mentioning text: String,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try SQLiteEventStore(path: path, directoryOwner: owner), file: file, line: line) { error in
+            XCTAssertTrue("\(error)".contains(text), "\(error)", file: file, line: line)
+        }
+    }
+
+    // macos-4 variant: the store ran mkdir -p for a missing directory (as root, through whatever links
+    // the path held) instead of leaving that to the checked data directory.
+    func testMissingDirectoryIsNotCreated() throws {
+        let missing = dir.appendingPathComponent("missing").path
+        assertRefused(missing + "/db.sqlite", mentioning: missing)
+        XCTAssertFalse(exists(missing))
+    }
+
+    func testDirectoryOthersCanWriteIsRefused() throws {
+        XCTAssertEqual(chmod(dir.path, 0o777), 0)
+        assertRefused(dir.appendingPathComponent("db.sqlite").path, mentioning: "writable by group or others")
+        XCTAssertFalse(exists(dir.appendingPathComponent("db.sqlite").path))
+    }
+
+    func testDirectoryThatIsALinkIsRefused() throws {
+        let elsewhere = dir.appendingPathComponent("elsewhere").path
+        XCTAssertEqual(mkdir(elsewhere, 0o755), 0)
+        let link = dir.appendingPathComponent("data").path
+        XCTAssertEqual(symlink(elsewhere, link), 0)
+        assertRefused(link + "/db.sqlite", mentioning: "not a directory")
+        XCTAssertFalse(exists(elsewhere + "/db.sqlite"))
+    }
+
+    func testDirectoryOfAnotherOwnerIsRefused() throws {
+        let someoneElse: uid_t = geteuid() == 0 ? 1 : 0
+        assertRefused(dir.appendingPathComponent("db.sqlite").path, owner: someoneElse, mentioning: "owned by uid")
+        XCTAssertFalse(exists(dir.appendingPathComponent("db.sqlite").path))
+    }
+
+    // macos-4 variant: an existing entry at the database path was opened by SQLite and chmod-ed
+    // through a link, into whatever file it pointed to.
+    func testDatabasePathThatIsALinkIsNotFollowed() throws {
+        let target = dir.appendingPathComponent("target").path
+        try SafeFile.replace(target, with: Data("not a database\n".utf8), mode: 0o644)
+        let path = dir.appendingPathComponent("db.sqlite").path
+        XCTAssertEqual(symlink(target, path), 0)
+        assertRefused(path, mentioning: "symbolic link")
+        var st = stat()
+        XCTAssertEqual(stat(target, &st), 0)
+        XCTAssertEqual(st.st_mode & 0o777, 0o644, "the link's target keeps its mode")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: target)), Data("not a database\n".utf8))
+        XCTAssertFalse(exists(path + "-wal"))
+    }
+
+    func testDatabaseWithAnotherNameIsRefused() throws {
+        let other = dir.appendingPathComponent("other").path
+        try SafeFile.replace(other, with: Data(), mode: 0o600)
+        let path = dir.appendingPathComponent("db.sqlite").path
+        XCTAssertEqual(link(other, path), 0)
+        assertRefused(path, mentioning: "hard links")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: other)), Data(), "nothing was written through the other name")
+    }
+
+    func testDatabasePathThatIsADirectoryIsRefused() throws {
+        let path = dir.appendingPathComponent("db.sqlite").path
+        XCTAssertEqual(mkdir(path, 0o755), 0)
+        assertRefused(path, mentioning: "not a regular file")
+    }
+
+    func testExistingDatabaseInATrustedDirectoryOpensAgain() throws {
+        let path = dir.appendingPathComponent("db.sqlite").path
+        try SQLiteEventStore(path: path).saveRules(RuleTemplates.all)
+        XCTAssertEqual(try SQLiteEventStore(path: path).loadRules()?.count, RuleTemplates.all.count)
+        var st = stat()
+        XCTAssertEqual(lstat(path, &st), 0)
+        XCTAssertEqual(st.st_mode & 0o777, 0o600)
+    }
+}

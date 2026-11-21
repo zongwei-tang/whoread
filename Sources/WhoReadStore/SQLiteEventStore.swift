@@ -15,21 +15,62 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     private let encoder = Exporter.encoder(pretty: false)
     private let decoder = Exporter.decoder()
     public let path: String
+    /// Summary and daily rows kept at most (`applyRetention`).
+    public let limits: StoreLimits
     /// The last loadRules failed: the next saveRules backs the old rows up whatever the cause (after
     /// an SQLite error at start, rows that decode now were still never loaded).
     private var rulesLoadFailed = false
+    /// `counts()` as of the last write (app-7: status asks for them every second, also on an idle
+    /// machine). Each write the store makes clears it; the store is the database's only writer.
+    private var cachedCounts: StoreCounts?
+    /// Rows the summary and daily reads take per hold of the store lock, and events per page of the
+    /// activity scan (ipc-1): the lock is released in between, so a long read does not hold off the
+    /// writer, rule saves or status. Set only before the store is used (tests).
+    var readBatch = 1_000
+    var scanBatch = 5_000
+    /// Tests: runs after each page of an activity read, outside the lock (where a write may come in).
+    var activityPageHook: (() -> Void)?
+    /// Retention runs so far (guarded by `lock`): a read in several holds of the lock that saw one start
+    /// meanwhile reads again (`activity`).
+    private var retentionRuns: UInt64 = 0
 
-    public init(path: String) throws {
+    /// Opens or creates the database at `path`. Its directory (the daemon's data directory, created
+    /// and checked before the store opens) must already exist as a real directory owned by
+    /// `directoryOwner` that others cannot change: the store creates no directories. An existing
+    /// database must be a regular file of that owner with one name, never a link, which SQLite and
+    /// the chmod below would follow.
+    public init(path: String, directoryOwner: uid_t = geteuid(), limits: StoreLimits = StoreLimits()) throws {
         self.path = path
+        self.limits = limits
         let dir = (path as NSString).deletingLastPathComponent
-        if !dir.isEmpty {
-            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        }
+        try SafeFile.checkTrustedDirectory(dir.isEmpty ? "." : dir, owner: directoryOwner)
         // Create with restrictive permissions before SQLite touches it.
-        try SafeFile.createIfAbsent(path, mode: 0o600)
+        if !(try SafeFile.createIfAbsent(path, mode: 0o600)) {
+            try SQLiteEventStore.checkExistingDatabase(path, owner: directoryOwner)
+        }
         db = try SQLiteDatabase(path: path)
         chmod(path, 0o600)
         try migrate()
+    }
+
+    struct UnsafeDatabaseFile: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    private static func checkExistingDatabase(_ path: String, owner: uid_t) throws {
+        var st = stat()
+        guard lstat(path, &st) == 0 else {
+            throw UnsafeDatabaseFile(description: "cannot inspect \(path): \(String(cString: strerror(errno)))")
+        }
+        let problem: String?
+        switch st.st_mode & S_IFMT {
+        case S_IFLNK: problem = "is a symbolic link"
+        case S_IFREG:
+            problem = st.st_uid != owner ? "is owned by uid \(st.st_uid), expected \(owner)"
+                : st.st_nlink != 1 ? "has \(st.st_nlink) hard links" : nil
+        default: problem = "is not a regular file"
+        }
+        if let problem { throw UnsafeDatabaseFile(description: "\(path) \(problem); refusing to open it") }
     }
 
     private func migrate() throws {
@@ -69,6 +110,9 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             CREATE INDEX IF NOT EXISTS daily_last ON daily(last_ts);
             CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY, updated REAL NOT NULL, status TEXT NOT NULL, body BLOB NOT NULL);
             CREATE INDEX IF NOT EXISTS alerts_updated ON alerts(updated);
+            CREATE INDEX IF NOT EXISTS alerts_status_updated ON alerts(status, updated);
+            DROP INDEX IF EXISTS alerts_status;
+            CREATE INDEX IF NOT EXISTS summary_last ON summary(last_ts);
             CREATE TABLE IF NOT EXISTS baseline(
                 responsible_key TEXT NOT NULL, category TEXT NOT NULL, access TEXT NOT NULL, body BLOB NOT NULL,
                 PRIMARY KEY(responsible_key, category, access));
@@ -89,6 +133,7 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     public func insert(_ events: [AnalyzedEvent]) throws {
         guard !events.isEmpty else { return }
         try locked {
+            cachedCounts = nil
             try db.transaction {
                 let ins = try db.prepare("""
                     INSERT OR REPLACE INTO events(id, ts, category, severity, responsible_key, agent_id, benign, decision, access, search, body)
@@ -149,6 +194,11 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             clauses.append("instr(search, ?) > 0")
             args.append(.text(text.lowercased()))
         }
+        if let app = query.appName, !app.isEmpty {
+            // `search` is "display name \u{1} process name \u{1} path": only what comes before the second \u{1}.
+            clauses.append("instr(substr(search, 1, instr(search, char(1)) + instr(substr(search, instr(search, char(1)) + 1), char(1)) - 1), ?) > 0")
+            args.append(.text(app.lowercased()))
+        }
         let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
         let order = query.newestFirst ? "DESC" : "ASC"
         let sql = "SELECT body FROM events \(whereSQL) ORDER BY id \(order) LIMIT ?"
@@ -189,6 +239,7 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     public func upsert(_ alerts: [Alert]) throws {
         guard !alerts.isEmpty else { return }
         try locked {
+            cachedCounts = nil
             try db.transaction {
                 let st = try db.prepare("INSERT OR REPLACE INTO alerts(id, updated, status, body) VALUES(?,?,?,?)")
                 for a in alerts {
@@ -199,20 +250,26 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         }
     }
 
+    /// The newest alerts (by update), `since` and of `statuses` statuses when given (0: any).
+    static func alertsSQL(since: Bool, statuses: Int) -> String {
+        let clauses = (since ? ["updated >= ?"] : [])
+            + (statuses > 0 ? ["status IN (" + Array(repeating: "?", count: statuses).joined(separator: ",") + ")"] : [])
+        return "SELECT body FROM alerts" + (clauses.isEmpty ? "" : " WHERE " + clauses.joined(separator: " AND "))
+            + " ORDER BY updated DESC, id DESC LIMIT ?"
+    }
+
     public func alerts(_ query: AlertQuery) throws -> [Alert] {
-        var clauses: [String] = []
         var args: [Statement.Value] = []
-        if let since = query.since { clauses.append("updated >= ?"); args.append(.double(since.timeIntervalSince1970)) }
+        if let since = query.since { args.append(.double(since.timeIntervalSince1970)) }
         if let statuses = query.statuses {
             if statuses.isEmpty { return [] }
-            clauses.append("status IN (" + Array(repeating: "?", count: statuses.count).joined(separator: ",") + ")")
             args += statuses.map { .text($0.rawValue) }
         }
-        let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
         args.append(.int(Int64(max(0, min(query.limit, 10_000)))))
+        let sql = SQLiteEventStore.alertsSQL(since: query.since != nil, statuses: query.statuses?.count ?? 0)
         return try locked {
             var out: [Alert] = []
-            try db.prepare("SELECT body FROM alerts \(whereSQL) ORDER BY updated DESC, id DESC LIMIT ?").query(args) { row in
+            try db.prepare(sql).query(args) { row in
                 if let a = try? decoder.decode(Alert.self, from: row.blob(0)) { out.append(a) }
             }
             return out
@@ -227,6 +284,20 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             }
             return out
         }
+    }
+
+    /// In batches of 500 ids, decoded off the lock.
+    public func alerts(ids: [Int64]) throws -> [Alert] {
+        var bodies: [Data] = []
+        for start in stride(from: 0, to: ids.count, by: 500) {
+            let batch = ids[start..<min(start + 500, ids.count)]
+            try locked {
+                let sql = "SELECT body FROM alerts WHERE id IN (" + Array(repeating: "?", count: batch.count).joined(separator: ",") + ")"
+                try db.prepare(sql).query(batch.map { .int($0) }) { row in bodies.append(row.blob(0)) }
+            }
+        }
+        let decoder = Exporter.decoder()
+        return bodies.compactMap { try? decoder.decode(Alert.self, from: $0) }
     }
 
     public func maxAlertID() throws -> Int64 {
@@ -244,21 +315,227 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     // MARK: - Summaries
 
     public func summaries(since: Date?) throws -> [UsageSummary] {
-        try locked {
-            var out: [UsageSummary] = []
-            let sql = "SELECT responsible, category, agent_id, first_ts, last_ts, count, reads, writes, denied, benign FROM summary"
-                + (since != nil ? " WHERE last_ts >= ?" : "") + " ORDER BY last_ts DESC"
-            try db.prepare(sql).query(since.map { [.double($0.timeIntervalSince1970)] } ?? []) { row in
-                guard let responsible = try? decoder.decode(ResponsibleEntity.self, from: row.blob(0)) else { return }
-                let agent = row.text(2) ?? ""
-                out.append(UsageSummary(
-                    responsible: responsible, categoryID: row.text(1) ?? "", agentID: agent.isEmpty ? nil : agent,
-                    firstSeen: Date(timeIntervalSince1970: row.double(3)), lastSeen: Date(timeIntervalSince1970: row.double(4)),
-                    count: Int(row.int(5)), reads: Int(row.int(6)), writes: Int(row.int(7)), denied: Int(row.int(8)),
-                    benign: row.int(9) != 0))
-            }
-            return out
+        try newestSummaries(since: since, limit: .max)
+    }
+
+    public func summaries(limit: Int) throws -> [UsageSummary] {
+        try newestSummaries(since: nil, limit: limit)
+    }
+
+    /// One batch of summary rows, newest first: walks the summary_last index from the cursor
+    /// (`after`: the last row of the previous batch), never the whole table (daemon-6).
+    static func summariesSQL(since: Bool, after: Bool) -> String {
+        let clauses = (since ? ["last_ts >= ?"] : []) + (after ? ["(last_ts, rowid) < (?, ?)"] : [])
+        return "SELECT rowid, responsible, category, agent_id, first_ts, last_ts, count, reads, writes, denied, benign FROM summary"
+            + (clauses.isEmpty ? "" : " WHERE " + clauses.joined(separator: " AND ")) + " ORDER BY last_ts DESC, rowid DESC LIMIT ?"
+    }
+
+    /// A summary row as read; decoded after the lock is released.
+    private struct SummaryRow {
+        var rowid: Int64
+        var responsible: Data
+        var category: String
+        var agent: String
+        var first: Double
+        var last: Double
+        var count: Int64
+        var reads: Int64
+        var writes: Int64
+        var denied: Int64
+        var benign: Bool
+
+        init(_ r: Statement.Row) {
+            rowid = r.int(0)
+            responsible = r.blob(1)
+            category = r.text(2) ?? ""
+            agent = r.text(3) ?? ""
+            first = r.double(4)
+            last = r.double(5)
+            count = r.int(6)
+            reads = r.int(7)
+            writes = r.int(8)
+            denied = r.int(9)
+            benign = r.int(10) != 0
         }
+
+        func decoded(_ decoder: JSONDecoder) -> UsageSummary? {
+            guard let app = try? decoder.decode(ResponsibleEntity.self, from: responsible) else { return nil }
+            return UsageSummary(responsible: app, categoryID: category, agentID: agent.isEmpty ? nil : agent,
+                                firstSeen: Date(timeIntervalSince1970: first), lastSeen: Date(timeIntervalSince1970: last),
+                                count: Int(count), reads: Int(reads), writes: Int(writes), denied: Int(denied), benign: benign)
+        }
+    }
+
+    /// Summary rows by last access, newest first, at most `limit`: `readBatch` rows per hold of the
+    /// lock, decoded outside it (ipc-1). A row whose app cannot be decoded (a newer build's, or damaged)
+    /// is skipped without making the reply shorter while readable rows remain.
+    private func newestSummaries(since: Date?, limit: Int) throws -> [UsageSummary] {
+        let decoder = Exporter.decoder()
+        // A reply's worth in one hold of the lock (a walk of the summary_last index): one snapshot. Between
+        // batches a write could move a row the read has not reached ahead of its cursor, and leave it out.
+        // The rest of a longer read, or rows to make up for ones that cannot be decoded, in batches.
+        var batch = max(1, min(limit, UsageSummary.replyLimit))
+        var out: [UsageSummary] = []
+        var after: (last: Double, rowid: Int64)?
+        while out.count < limit {
+            var args: [Statement.Value] = since.map { [.double($0.timeIntervalSince1970)] } ?? []
+            if let after { args += [.double(after.last), .int(after.rowid)] }
+            args.append(.int(Int64(batch)))
+            let sql = SQLiteEventStore.summariesSQL(since: since != nil, after: after != nil)
+            let rows = try locked { () -> [SummaryRow] in
+                var rows: [SummaryRow] = []
+                try db.prepare(sql).query(args) { rows.append(SummaryRow($0)) }
+                return rows
+            }
+            for row in rows {
+                guard let s = row.decoded(decoder) else { continue }
+                out.append(s)
+                if out.count == limit { break }
+            }
+            guard rows.count == batch, let last = rows.last else { break }
+            after = (last.last, last.rowid)
+            batch = max(1, readBatch)
+        }
+        return out
+    }
+
+    // MARK: - Activity in a window (cli-6)
+
+    /// The end of one page of the window's events, in (ts, id) order: a walk of the events_ts index.
+    static let activityPageEndSQL = "SELECT ts, id FROM events WHERE (ts, id) > (?, ?) ORDER BY ts, id LIMIT 1 OFFSET ?"
+
+    /// One page of the window's events, counted per summary row by SQLite.
+    static func activityPageSQL(bounded: Bool) -> String {
+        """
+        SELECT responsible_key, category, coalesce(agent_id, ''), benign, min(ts), max(ts), count(*),
+               sum((access & 1) != 0), sum((access & 2) != 0), sum(decision = 'denied'), max(id)
+        FROM events WHERE (ts, id) > (?, ?)\(bounded ? " AND (ts, id) <= (?, ?)" : "")
+        GROUP BY responsible_key, category, coalesce(agent_id, ''), benign
+        """
+    }
+
+    /// Rolled-up days last seen in the window, in batches by last access.
+    static let activityDaysSQL = """
+        SELECT rowid, responsible_key, category, agent_id, benign, first_ts, last_ts, count, reads, writes, denied, responsible
+        FROM daily WHERE (last_ts, rowid) > (?, ?) ORDER BY last_ts, rowid LIMIT ?
+        """
+
+    public func activity(since: Date, limit: Int) throws -> [UsageSummary] {
+        guard limit > 0 else { return [] }
+        struct Key: Hashable {
+            var responsible: String
+            var category: String
+            var agent: String
+            var benign: Bool
+            /// UsageSummary.rowKey, for the same order of equal times as the other store.
+            var rowKey: String { responsible + "\u{0}" + category + "\u{0}" + agent + (benign ? "\u{0}b" : "") }
+        }
+        struct Totals {
+            var first: Double
+            var last: Double
+            var count: Int64 = 0
+            var reads: Int64 = 0
+            var writes: Int64 = 0
+            var denied: Int64 = 0
+            /// The newest event counted, and the app of the newest rolled-up day: where the app comes
+            /// from when its summary row is gone.
+            var newestEvent: Int64 = 0
+            var day: (last: Double, app: Data)?
+        }
+        var totals: [Key: Totals] = [:]
+        func add(_ key: Key, first: Double, last: Double, _ n: [Int64], event: Int64 = 0, day: (last: Double, app: Data)? = nil) {
+            var t = totals[key] ?? Totals(first: first, last: last)
+            t.first = min(t.first, first)
+            t.last = max(t.last, last)
+            t.count += n[0]
+            t.reads += n[1]
+            t.writes += n[2]
+            t.denied += n[3]
+            t.newestEvent = max(t.newestEvent, event)
+            if let day, day.last >= (t.day?.last ?? -.infinity) { t.day = day }
+            totals[key] = t
+        }
+
+        // Read again when a retention run rolled counted events into days meanwhile (they would count twice),
+        // at most three times.
+        let batch = max(1, readBatch)
+        for attempt in 1...3 {
+            totals = [:]
+            let runs = try locked { retentionRuns }
+            // Details: pages of `scanBatch` events, each counted by SQLite in one hold of the lock.
+            let page = Int64(max(1, scanBatch))
+            var lo = (ts: since.timeIntervalSince1970, id: Int64.min)
+            while true {
+                let hi = try locked { () -> (ts: Double, id: Int64)? in
+                    var hi: (ts: Double, id: Int64)?
+                    try db.prepare(SQLiteEventStore.activityPageEndSQL).query([.double(lo.ts), .int(lo.id), .int(page - 1)]) {
+                        hi = ($0.double(0), $0.int(1))
+                    }
+                    let args: [Statement.Value] = [.double(lo.ts), .int(lo.id)] + (hi.map { [.double($0.ts), .int($0.id)] } ?? [])
+                    try db.prepare(SQLiteEventStore.activityPageSQL(bounded: hi != nil)).query(args) { r in
+                        add(Key(responsible: r.text(0) ?? "", category: r.text(1) ?? "", agent: r.text(2) ?? "", benign: r.int(3) != 0),
+                            first: r.double(4), last: r.double(5), [r.int(6), r.int(7), r.int(8), r.int(9)], event: r.int(10))
+                    }
+                    return hi
+                }
+                guard let hi else { break }
+                lo = hi
+                activityPageHook?()
+            }
+
+            // Days rolled up past the detail window: only per-day totals are left, so such a day counts
+            // whole (one row per day for benign and other accesses: benign only if every access was).
+            var dayCursor = (last: since.timeIntervalSince1970, rowid: Int64.min)
+            while true {
+                let read = try locked { () -> (n: Int, last: (last: Double, rowid: Int64)?) in
+                    var n = 0
+                    var last: (last: Double, rowid: Int64)?
+                    try db.prepare(SQLiteEventStore.activityDaysSQL).query([.double(dayCursor.last), .int(dayCursor.rowid), .int(Int64(batch))]) { r in
+                        n += 1
+                        last = (r.double(6), r.int(0))
+                        add(Key(responsible: r.text(1) ?? "", category: r.text(2) ?? "", agent: r.text(3) ?? "", benign: r.int(4) != 0),
+                            first: r.double(5), last: r.double(6), [r.int(7), r.int(8), r.int(9), r.int(10)], day: (r.double(6), r.blob(11)))
+                    }
+                    return (n, last)
+                }
+                guard read.n == batch, let last = read.last else { break }
+                dayCursor = last
+            }
+            let after = try locked { retentionRuns }
+            if attempt == 3 || after == runs { break }
+        }
+
+        // The newest rows, each with its app as last seen (its summary row), else as of its newest
+        // rolled-up day, else as its newest event in the window names it.
+        let chosen = Array(totals.sorted { a, b in
+            a.value.last != b.value.last ? a.value.last > b.value.last : b.key.rowKey.utf8.lexicographicallyPrecedes(a.key.rowKey.utf8)
+        }.prefix(limit))
+        var apps: [Data?] = []
+        for start in stride(from: 0, to: chosen.count, by: batch) {
+            apps += try locked { () -> [Data?] in
+                let summaryApp = try db.prepare(
+                    "SELECT responsible FROM summary WHERE responsible_key = ? AND category = ? AND agent_id = ? AND benign = ?")
+                return try chosen[start..<min(start + batch, chosen.count)].map { key, _ in
+                    var app: Data?
+                    try summaryApp.query([.text(key.responsible), .text(key.category), .text(key.agent), .int(key.benign ? 1 : 0)]) {
+                        app = $0.blob(0)
+                    }
+                    return app
+                }
+            }
+        }
+        let decoder = Exporter.decoder()
+        var out: [UsageSummary] = []
+        for ((key, t), stored) in zip(chosen, apps) {
+            var app = stored.flatMap { try? decoder.decode(ResponsibleEntity.self, from: $0) }
+                ?? t.day.flatMap { try? decoder.decode(ResponsibleEntity.self, from: $0.app) }
+            if app == nil, t.newestEvent != 0, let e = try event(id: t.newestEvent) { app = e.responsible }
+            guard let app else { continue }
+            out.append(UsageSummary(responsible: app, categoryID: key.category, agentID: key.agent.isEmpty ? nil : key.agent,
+                                    firstSeen: Date(timeIntervalSince1970: t.first), lastSeen: Date(timeIntervalSince1970: t.last),
+                                    count: Int(t.count), reads: Int(t.reads), writes: Int(t.writes), denied: Int(t.denied), benign: key.benign))
+        }
+        return out
     }
 
     // MARK: - Baseline, rules, kv
@@ -368,7 +645,9 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
     @discardableResult
     public func applyRetention(detailCutoff: Date, retentionCutoff: Date) throws -> Int {
         try locked {
-            try db.transaction {
+            cachedCounts = nil
+            retentionRuns &+= 1
+            return try db.transaction {
                 // Remember the high-water marks so new ids never collide with rolled-up or purged ones.
                 var maxID: Int64 = 0
                 try db.prepare("SELECT max(id) FROM events").query { maxID = $0.isNull(0) ? 0 : $0.int(0) }
@@ -423,43 +702,124 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
                 try db.prepare("DELETE FROM daily WHERE last_ts < ?").run([old])
                 try db.prepare("DELETE FROM summary WHERE last_ts < ?").run([old])
                 try db.prepare("DELETE FROM alerts WHERE updated < ?").run([old])
+                // Bounded by count too (daemon-6): minted apps add rows faster than age removes them.
+                try evictLocked("summary", limit: limits.summaryRows)
+                try evictLocked("daily", limit: limits.dailyRows)
                 return removed
             }
         }
     }
 
+    /// Past `limit` rows, the least recently seen rows of `table` (summary or daily) go, down to a
+    /// tenth below it: a walk of its last_ts index, as long as the rows evicted.
+    private func evictLocked(_ table: String, limit: Int) throws {
+        var rows: Int64 = 0
+        try db.prepare("SELECT count(*) FROM \(table)").query { rows = $0.int(0) }
+        guard rows > Int64(limit) else { return }
+        try db.prepare("DELETE FROM \(table) WHERE rowid IN (SELECT rowid FROM \(table) ORDER BY last_ts, rowid LIMIT ?)")
+            .run([.int(rows - Int64(StoreLimits.lowWaterMark(limit)))])
+    }
+
+    /// Unread alerts, counted on the alerts_status_updated index (daemon-6: without it every status walked
+    /// every alert, bodies included). The index is on (status, updated), not status alone: a query of the
+    /// newest alerts of a status then reads them in order and stops at its limit, instead of taking every
+    /// alert of that status and sorting them under the store lock.
+    static let unreadAlertsSQL = "SELECT count(*) FROM alerts WHERE status = 'unread'"
+
     public func counts() throws -> StoreCounts {
         try locked {
+            if let cachedCounts { return cachedCounts }
             func count(_ sql: String) throws -> Int {
                 var v = 0
                 try db.prepare(sql).query { v = Int($0.int(0)) }
                 return v
             }
-            return StoreCounts(
+            let counts = StoreCounts(
                 events: try count("SELECT count(*) FROM events"),
                 aggregatedDays: try count("SELECT count(DISTINCT day) FROM daily"),
                 alerts: try count("SELECT count(*) FROM alerts"),
-                unreadAlerts: try count("SELECT count(*) FROM alerts WHERE status = 'unread'"))
+                unreadAlerts: try count(SQLiteEventStore.unreadAlertsSQL))
+            cachedCounts = counts
+            return counts
         }
     }
 
-    /// Daily aggregates (for exports beyond the detail window).
-    public func dailyAggregates(since: Date?) throws -> [DailyAggregate] {
-        try locked {
-            var out: [DailyAggregate] = []
-            let sql = "SELECT day, responsible, category, agent_id, first_ts, last_ts, count, reads, writes, denied, benign FROM daily"
-                + (since != nil ? " WHERE last_ts >= ?" : "") + " ORDER BY day DESC"
-            try db.prepare(sql).query(since.map { [.double($0.timeIntervalSince1970)] } ?? []) { row in
-                guard let responsible = try? decoder.decode(ResponsibleEntity.self, from: row.blob(1)) else { return }
-                let agent = row.text(3) ?? ""
-                out.append(DailyAggregate(day: row.text(0) ?? "", summary: UsageSummary(
-                    responsible: responsible, categoryID: row.text(2) ?? "", agentID: agent.isEmpty ? nil : agent,
-                    firstSeen: Date(timeIntervalSince1970: row.double(4)), lastSeen: Date(timeIntervalSince1970: row.double(5)),
-                    count: Int(row.int(6)), reads: Int(row.int(7)), writes: Int(row.int(8)), denied: Int(row.int(9)),
-                    benign: row.int(10) != 0)))
-            }
-            return out
+    // MARK: - Daily aggregates (for exports beyond the detail window)
+
+    /// One batch of daily rows in reply order (newest day first, then app, category and agent, each
+    /// descending): walks the primary key from the cursor. `+last_ts` keeps the last_ts index out, so
+    /// a `since` filter does not turn the walk into a sort.
+    static func dailySQL(since: Bool, after: Bool) -> String {
+        let clauses = (since ? ["+last_ts >= ?"] : []) + (after ? ["(day, responsible_key, category, agent_id) < (?, ?, ?, ?)"] : [])
+        return "SELECT day, responsible_key, category, agent_id, responsible, first_ts, last_ts, count, reads, writes, denied, benign FROM daily"
+            + (clauses.isEmpty ? "" : " WHERE " + clauses.joined(separator: " AND "))
+            + " ORDER BY day DESC, responsible_key DESC, category DESC, agent_id DESC LIMIT ?"
+    }
+
+    /// A daily row as read; decoded after the lock is released.
+    private struct DailyRow {
+        var key: DailyAggregate.Key
+        var responsible: Data
+        var first: Double
+        var last: Double
+        var count: Int64
+        var reads: Int64
+        var writes: Int64
+        var denied: Int64
+        var benign: Bool
+
+        init(_ r: Statement.Row) {
+            key = DailyAggregate.Key(day: r.text(0) ?? "", responsibleKey: r.text(1) ?? "", categoryID: r.text(2) ?? "", agentID: r.text(3) ?? "")
+            responsible = r.blob(4)
+            first = r.double(5)
+            last = r.double(6)
+            count = r.int(7)
+            reads = r.int(8)
+            writes = r.int(9)
+            denied = r.int(10)
+            benign = r.int(11) != 0
         }
+
+        func decoded(_ decoder: JSONDecoder) -> DailyAggregate? {
+            guard let app = try? decoder.decode(ResponsibleEntity.self, from: responsible) else { return nil }
+            return DailyAggregate(day: key.day, summary: UsageSummary(
+                responsible: app, categoryID: key.categoryID, agentID: key.agentID.isEmpty ? nil : key.agentID,
+                firstSeen: Date(timeIntervalSince1970: first), lastSeen: Date(timeIntervalSince1970: last),
+                count: Int(count), reads: Int(reads), writes: Int(writes), denied: Int(denied), benign: benign))
+        }
+    }
+
+    public func dailyAggregates(since: Date?) throws -> [DailyAggregate] {
+        try dailyAggregates(since: since, after: nil, limit: .max)
+    }
+
+    /// `readBatch` rows per hold of the lock, decoded outside it. A row whose app cannot be decoded is
+    /// skipped without making the page shorter while readable rows remain, so a short page always
+    /// means the end (`export --aggregates` pages until one).
+    public func dailyAggregates(since: Date?, after: DailyAggregate.Key?, limit: Int) throws -> [DailyAggregate] {
+        let decoder = Exporter.decoder()
+        let batch = max(1, readBatch)
+        var out: [DailyAggregate] = []
+        var cursor = after
+        while out.count < limit {
+            var args: [Statement.Value] = since.map { [.double($0.timeIntervalSince1970)] } ?? []
+            if let cursor { args += [.text(cursor.day), .text(cursor.responsibleKey), .text(cursor.categoryID), .text(cursor.agentID)] }
+            args.append(.int(Int64(batch)))
+            let sql = SQLiteEventStore.dailySQL(since: since != nil, after: cursor != nil)
+            let rows = try locked { () -> [DailyRow] in
+                var rows: [DailyRow] = []
+                try db.prepare(sql).query(args) { rows.append(DailyRow($0)) }
+                return rows
+            }
+            for row in rows {
+                guard let a = row.decoded(decoder) else { continue }
+                out.append(a)
+                if out.count == limit { break }
+            }
+            guard rows.count == batch, let last = rows.last else { break }
+            cursor = last.key
+        }
+        return out
     }
 }
 

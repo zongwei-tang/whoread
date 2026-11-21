@@ -276,8 +276,10 @@ final class AppModelTests: XCTestCase {
         let planned = planner.plan(model.alerts + [fresh], settings: settings, formatter: model.formatter)
         XCTAssertEqual(planned.count, 1)
         // The fixture's chain is all Apple with no AI agent: "allow all Apple programs" is offered, also
-        // as a banner button (its own category).
-        XCTAssertEqual(planned[0].categoryIdentifier, NotificationPlanner.categoryAlertApple)
+        // as a banner button (its own category, one per kind of app, AI agent or program).
+        XCTAssertEqual(planned[0].categoryIdentifier,
+                       NotificationPlanner.category(for: .firstAccess, appleProgram: true, responsible: fresh.responsible.kind))
+        XCTAssertTrue(planned[0].categoryIdentifier.hasPrefix(NotificationPlanner.categoryAlertApple + "."))
         XCTAssertEqual(planned[0].actions, [.alwaysAllow, .blockFromNowOn, .ignore, .trustApplePrograms])
         XCTAssertTrue(planned[0].body.contains("调用链："))
         // Repeats (merged count) do not re-notify; escalation to blocked does.
@@ -355,12 +357,21 @@ final class AppModelTests: XCTestCase {
 
         // Step 1 is detected from the connection, not only from this session's request.
         status.source = .eslogger
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .pending)
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: true), .done)
-        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: true), .pending)
+        // The dev daemon with eslogger is monitor-only: there is no extension to install
+        // (InstallUIModelTests).
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false, canInstallExtension: true), .notAvailable)
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: true, canInstallExtension: true), .done)
+        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: true, canInstallExtension: true), .pending)
+        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: false, canInstallExtension: true), .pending,
+                       "not known yet")
+        // A build that can never install the extension (no extension service, as scripts/install.sh's): not
+        // offered while the daemon is down either (SetupUIModelTests).
+        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: false, canInstallExtension: false), .notAvailable,
+                       "this build cannot install it")
         status.source = .native
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .done)
-        XCTAssertEqual(OnboardingModel(extensionState: .needsRestart).extensionStepState(nil, connected: false, viaExtension: false), .needsRestart)
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false, canInstallExtension: true), .done)
+        XCTAssertEqual(OnboardingModel(extensionState: .needsRestart).extensionStepState(nil, connected: false, viaExtension: false,
+                                                                                         canInstallExtension: true), .needsRestart)
     }
 
     func testRuleDraftRoundTrip() {

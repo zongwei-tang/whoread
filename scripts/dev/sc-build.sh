@@ -8,19 +8,41 @@
 # next to its outputs, so this script works there. Outside such a sandbox `swift build` / `swift
 # test` remain the normal way.
 #
-# Usage: scripts/dev/sc-build.sh [build|test|all|app] [XCTest filter]
+# Usage: [WHOREAD_CONFIG=debug|release] scripts/dev/sc-build.sh [build|test|all|app] [XCTest filter]
 #   build  libraries + whoreadd + whoread               (default)
 #   test   build, then build and run the four test bundles (optional filter, e.g. WhoReadCoreTests
 #          or WhoReadCoreTests.AnalyzerTests/testX)
 #   app    build, then WhoRead.app (menu bar app, CLI helper, system extension) signed ad hoc and
-#          verified; [WHOREAD_ENTITLED=1] adds the restricted entitlements (SIP-disabled VM only).
-#          See scripts/dev/sc-app.sh.
-# Products: .build-sc/debug/{whoreadd,whoread,lib*.a,*.swiftmodule,*.xctest,WhoRead.app}
+#          verified; [WHOREAD_ENTITLED=1] builds a copy with the restricted entitlements in
+#          .build-sc/<config>/entitled instead (SIP-disabled VM only). See scripts/dev/sc-app.sh.
+# WHOREAD_CONFIG: debug (default: unoptimized, -enable-testing, into .build-sc/debug) or release
+# (optimized whole-module builds without -enable-testing, into .build-sc/release: what
+# scripts/install.sh installs). The tests need the debug configuration (@testable import).
+# Products: .build-sc/<config>/{whoreadd,whoread,lib*.a,*.swiftmodule,*.xctest,WhoRead.app}, none
+# of them with an entitlement (AMFI kills an ad-hoc binary that claims a restricted one on a Mac
+# with SIP on); .build-sc/<config>/entitled/{whoreadd,WhoRead.app} only from WHOREAD_ENTITLED=1 ... app.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MODE="${1:-build}"
 FILTER="${2:-}"
-OUT="$ROOT/.build-sc/debug"
+CONFIG="${WHOREAD_CONFIG:-debug}"
+JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
+# OPT: the configuration's optimization flags for the package; APPOPT: for the app and the extension
+# (as the Xcode targets: no -enable-testing).
+case "$CONFIG" in
+  debug)
+    OPT=(-Onone -g -enable-testing -DDEBUG -j"$JOBS")
+    APPOPT=(-Onone -g -DDEBUG -j"$JOBS") ;;
+  release)
+    OPT=(-O -wmo -num-threads "$JOBS")
+    APPOPT=(-O -wmo -num-threads "$JOBS") ;;
+  *) echo "sc-build.sh: WHOREAD_CONFIG must be debug or release, not '$CONFIG'" >&2; exit 2 ;;
+esac
+case "$CONFIG:$MODE" in
+  release:test|release:all)
+    echo "sc-build.sh: the tests need the debug configuration (they use @testable import)" >&2; exit 2 ;;
+esac
+OUT="$ROOT/.build-sc/$CONFIG"
 MC="$ROOT/.build-sc/ModuleCache"
 mkdir -p "$OUT" "$MC"
 SDK="$(xcrun --show-sdk-path)"
@@ -30,10 +52,13 @@ SWIFTC="$(xcrun -f swiftc)"
 # fails inside a sandbox.
 PLUGINS="$(dirname "$SWIFTC")/../lib/swift/host/plugins"
 TARGET="$(uname -m)-apple-macosx14.0"
-JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
-COMMON=(-target "$TARGET" -sdk "$SDK" -module-cache-path "$MC" -swift-version 5 -Onone -g
-        -enable-testing -DDEBUG -DSWIFT_PACKAGE -I "$OUT" -L "$OUT" -j"$JOBS" -plugin-path "$PLUGINS"
-        ${WHOREAD_SWIFTFLAGS:-})
+COMMON=(-target "$TARGET" -sdk "$SDK" -module-cache-path "$MC" -swift-version 5 "${OPT[@]}"
+        -DSWIFT_PACKAGE -I "$OUT" -L "$OUT" -plugin-path "$PLUGINS")
+# Extra compiler flags, split on spaces.
+if [ -n "${WHOREAD_SWIFTFLAGS:-}" ]; then
+  read -r -a EXTRA_FLAGS <<< "$WHOREAD_SWIFTFLAGS"
+  COMMON+=("${EXTRA_FLAGS[@]}")
+fi
 XCT=(-F "$PLAT/Developer/Library/Frameworks" -I "$PLAT/Developer/usr/lib" -L "$PLAT/Developer/usr/lib")
 RPATH=(-Xlinker -rpath -Xlinker "$PLAT/Developer/Library/Frameworks" -Xlinker -rpath -Xlinker "$PLAT/Developer/usr/lib")
 SYSLIBS=(-lsqlite3 -lEndpointSecurity -lbsm)
@@ -98,6 +123,39 @@ EOF
   fi
 }
 
+# entitlements_of PATH : the entitlements PATH is signed with ("" when none, or when unsigned).
+entitlements_of() { codesign -d --entitlements - --xml "$1" 2>/dev/null || true; }
+
+# unentitled : no product in $OUT carries an entitlement. Earlier versions of the app mode signed
+# $OUT/whoreadd and $OUT/WhoRead.app themselves with WHOREAD_ENTITLED=1, and a later build that
+# had nothing to relink kept that signature. whoreadd is re-signed without its entitlements as a new
+# file (re-signing a Mach-O in place can get its next launch killed through the kernel's cached
+# signature); such a WhoRead.app is removed (`app` builds it again).
+unentitled() {
+  local d="$OUT/whoreadd" app="$OUT/WhoRead.app" f
+  if [ -e "$d" ] && [ -n "$(entitlements_of "$d")" ]; then
+    echo "== whoreadd: removing the restricted entitlements of an earlier WHOREAD_ENTITLED=1 build"
+    rm -f "$d.sc-tmp"
+    cp -X "$d" "$d.sc-tmp"
+    codesign --force --sign - --preserve-metadata=identifier,flags "$d.sc-tmp" 2>&1 \
+      | grep -v 'replacing existing signature' || true
+    if [ -n "$(entitlements_of "$d.sc-tmp")" ] || ! codesign --verify --strict "$d.sc-tmp"; then
+      rm -f "$d.sc-tmp"
+      echo "sc-build.sh: could not re-sign $d without entitlements; remove it and build again" >&2
+      exit 1
+    fi
+    mv -f "$d.sc-tmp" "$d"
+  fi
+  [ -d "$app" ] || return 0
+  for f in "$app" "$app"/Contents/Library/SystemExtensions/*.systemextension; do
+    [ -e "$f" ] && [ -n "$(entitlements_of "$f")" ] || continue
+    echo "== removing $app: an earlier WHOREAD_ENTITLED=1 build signed it with the restricted entitlements"
+    echo "   (such builds now go to $OUT/entitled; scripts/dev/sc-build.sh app builds it again)"
+    find "$app" -delete
+    break
+  done
+}
+
 build() {
   lib WhoReadCore
   lib WhoReadStore WhoReadCore
@@ -106,6 +164,7 @@ build() {
   lib WhoReadUIModel WhoReadCore WhoReadIPC
   exe whoreadd
   exe whoread
+  unentitled
 }
 
 runtests() {

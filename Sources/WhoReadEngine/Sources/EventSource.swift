@@ -16,6 +16,9 @@ public protocol EventSource: AnyObject, Sendable {
     var droppedEvents: UInt64 { get }
     /// Messages the kernel dropped for the source's ES clients (global_seq_num gaps), when known.
     var kernelDroppedEvents: UInt64? { get }
+    /// Native source: AUTH outcomes only the kernel's side shows (late answers, dropped AUTH messages)
+    /// and the default mute set. nil for other sources.
+    var authCounts: SourceAuthCounts? { get }
     func start(sink: EventSink) throws
     func stop()
     /// Monitored prefixes (+ literal ancestors) changed. eslogger: rebuild the prefilter.
@@ -31,6 +34,7 @@ extension EventSource {
     public var parserStats: EsloggerParser.Stats? { nil }
     public var droppedEvents: UInt64 { 0 }
     public var kernelDroppedEvents: UInt64? { parserStats?.droppedByKernel }
+    public var authCounts: SourceAuthCounts? { nil }
     public func enforcementChanged(active: Bool) {}
     public func policyChanged() {}
 }

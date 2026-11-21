@@ -16,11 +16,16 @@ public struct EvaluationTarget: Sendable {
     /// Access requested for this path by this operation.
     public var access: AccessSet
     public var categories: [TargetCategory]
+    /// The category the path is named by (`PathClassifier.classify`), when it is one of several the
+    /// path belongs to and not only through a link (`PathClassifier.ownerLendingCategory`): its owners
+    /// count as owners for some of the path's other categories (`PathClassifier.owns`).
+    public var primaryCategory: TargetCategory?
 
-    public init(path: String, access: AccessSet, categories: [TargetCategory]) {
+    public init(path: String, access: AccessSet, categories: [TargetCategory], primaryCategory: TargetCategory? = nil) {
         self.path = path
         self.access = access
         self.categories = categories
+        self.primaryCategory = primaryCategory
     }
 }
 
@@ -52,6 +57,9 @@ public enum DecisionReason: String, Codable, Sendable {
     /// "Trust Apple programs" is on and this is an Apple program in a system location, with no AI
     /// agent in its chain.
     case trustedApple
+    /// Allowed by the daemon, but the answer reached the kernel at or after the AUTH deadline (or not at
+    /// all) while the deadline miss mode was fail-closed (macOS 27): the kernel denied the access.
+    case deadlineMissed
 }
 
 public struct RuleDecision: Codable, Hashable, Sendable {
@@ -249,6 +257,11 @@ public final class RuleEngine: @unchecked Sendable {
             ownerCache[category] = v
             return v
         }
+        /// Owner of a category of a path: of the category itself, or, for some, of the category the path
+        /// is named by (PathClassifier.owns).
+        func owns(_ category: TargetCategory, _ primary: TargetCategory?) -> Bool {
+            classifier.owns(category, namedBy: primary, isOwner: isOwner)
+        }
         var responsibleCache: ResponsibleEntity??
         func responsible() -> ResponsibleEntity? {
             if let cached = responsibleCache { return cached }
@@ -257,6 +270,8 @@ public final class RuleEngine: @unchecked Sendable {
             return r
         }
         let chainAgents = Set(chain.compactMap(\.agentID))
+        // A chain that does not reach launchd (ancestry unknown or cut short) may hide an AI agent.
+        let ancestryKnown = chain.reachesLaunchd
 
         let processPathKey = PathNormalizer.fold(process.executablePath)
         let processCdhash = process.cdhash?.lowercased()
@@ -264,7 +279,8 @@ public final class RuleEngine: @unchecked Sendable {
         /// `unsignedKey` is the precompiled program path of an `.unsigned` subject. For deny rules a
         /// pinned cdhash also matches the same code at any other path (copying the binary is not a
         /// way around a block), and a responsible agent also matches wherever it is in the chain.
-        func subjectMatches(_ subject: RuleSubject, category: String, unsignedKey: String? = nil, widenForDeny: Bool = false) -> Bool {
+        func subjectMatches(_ subject: RuleSubject, category: TargetCategory, primary: TargetCategory?, unsignedKey: String? = nil,
+                            widenForDeny: Bool = false) -> Bool {
             switch subject {
             case .signed(let sid, let team):
                 return process.signingID == sid && process.teamID == team
@@ -280,28 +296,28 @@ public final class RuleEngine: @unchecked Sendable {
                     if team == nil, let pin = cdhash?.lowercased() {
                         let r = responsible()
                         if (r?.kind == .binary && r?.cdhash?.lowercased() == pin) || processCdhash == pin {
-                            return !(exceptOwners && isOwner(category))
+                            return !(exceptOwners && owns(category, primary))
                         }
                     }
                     // For an agent: attribution picks the nearest .app first, so a leaf inside any bundle
                     // (`mkdir X.app; cp /bin/cat X.app/`) would otherwise be charged to that bundle.
                     if cdhash == nil, key.hasPrefix("agent:") {
                         let id = String(key.dropFirst("agent:".count))
-                        if chain.contains(where: { $0.agentID == id && (team == nil || $0.image.teamID == team) }) {
-                            return !(exceptOwners && isOwner(category))
+                        if chain.contains(where: { $0.agentID == id && (team == nil || $0.agentTeamID == team) }) {
+                            return !(exceptOwners && owns(category, primary))
                         }
                     }
                 }
                 guard let r = responsible(), r.key == key else { return false }
                 if let team, r.teamID != team { return false }
                 if let cdhash, r.cdhash?.lowercased() != cdhash.lowercased() { return false }
-                return !(exceptOwners && isOwner(category))
+                return !(exceptOwners && owns(category, primary))
             case .anyNonOwner:
-                return !isOwner(category)
+                return !owns(category, primary)
             case .agentAncestor(let ids, let exceptOwners):
                 let hit = ids.map { !chainAgents.isDisjoint(with: $0) } ?? !chainAgents.isEmpty
                 guard hit else { return false }
-                return !(exceptOwners && isOwner(category))
+                return !(exceptOwners && owns(category, primary))
             }
         }
 
@@ -352,12 +368,14 @@ public final class RuleEngine: @unchecked Sendable {
                     }
                     // Scoped to the AI agents the user saw: a chain with any other agent is not covered.
                     if let scope = c.chainAgents, !chainAgents.isSubset(of: scope) { continue }
-                    guard subjectMatches(c.rule.subject, category: category.id, unsignedKey: c.unsignedKey,
-                                         widenForDeny: c.rule.action == .deny) else { continue }
+                    // Nor, for an answer given for a known chain, one whose ancestry is unknown.
+                    if c.chainAgents != nil, c.rule.action == .allow, !c.rule.coversUnknownAncestry, !ancestryKnown { continue }
+                    guard subjectMatches(c.rule.subject, category: category, primary: target.primaryCategory,
+                                         unsignedKey: c.unsignedKey, widenForDeny: c.rule.action == .deny) else { continue }
 
                     switch c.rule.action {
                     case .deny:
-                        if case .anyNonOwner = c.rule.subject, process.isPlatformBinary, !c.rule.includePlatformBinaries {
+                        if case .anyNonOwner = c.rule.subject, process.isVerifiedPlatformBinary, !c.rule.includePlatformBinaries {
                             continue
                         }
                         // Exceptions carve the subject out of this rule.
@@ -368,12 +386,14 @@ public final class RuleEngine: @unchecked Sendable {
                             // Only requests the approval fully covers (a read approval is not a write approval).
                             if let a = e.access, a.intersect(requested) != requested { return false }
                             // Only chains whose agents the user saw when approving.
-                            if let approved = e.chainAgents, !chainAgents.isSubset(of: Set(approved)) { return false }
+                            if !Rule.scopeCovers(agents: e.chainAgents, unknownAncestry: e.coversUnknownAncestry,
+                                                 chainAgents: chainAgents, ancestryKnown: ancestryKnown) { return false }
                             let prefixes = c.exceptionPrefixKeys[ei]
                             if !prefixes.isEmpty && !prefixes.contains(where: { pathKey == $0 || pathKey.hasPrefix($0 + "/") }) {
                                 return false
                             }
-                            return subjectMatches(e.subject, category: category.id, unsignedKey: c.exceptionUnsignedKeys[ei])
+                            return subjectMatches(e.subject, category: category, primary: target.primaryCategory,
+                                                  unsignedKey: c.exceptionUnsignedKeys[ei])
                         }
                         if let ei = exceptionIndex {
                             if !requested.isEmpty, c.rule.exceptions[ei].remainingUses != nil {
@@ -427,7 +447,6 @@ public final class RuleEngine: @unchecked Sendable {
             // Every (path, category) with a requested read or write needs a decision. An owner only
             // counts with no AI agent in the chain: an agent can drive ssh or git to read a key. A
             // chain that does not reach launchd (ancestry unknown or cut short) may hide one.
-            let ancestryKnown = chain.reachesLaunchd
             var undecided: [(target: Int, category: Int)] = []
             var byOwner = false
             // ES caches an AUTH_OPEN allow for this executable and file whatever the later open's
@@ -438,7 +457,7 @@ public final class RuleEngine: @unchecked Sendable {
                 for (ci, category) in t.categories.enumerated() {
                     if allowedKinds[ti][ci] != .readWrite { staticAllow = false }
                     if allowed[ti][ci].isSuperset(of: needed) { continue }
-                    if chainAgents.isEmpty && ancestryKnown && isOwner(category.id) {
+                    if chainAgents.isEmpty && ancestryKnown && owns(category, t.primaryCategory) {
                         byOwner = true
                         continue
                     }
@@ -460,7 +479,7 @@ public final class RuleEngine: @unchecked Sendable {
                 }.intersection(.readWrite)
                 // The daemon always has an attributor; without one, the program stands for itself.
                 let key = AskKey(responsibleKey: responsible()?.key ?? "bin:" + PathNormalizer.fold(process.executablePath),
-                                 categoryID: categoryID, access: access, chainAgents: Array(chainAgents))
+                                 categoryID: categoryID, access: access, chainAgents: Array(chainAgents), ancestryKnown: ancestryKnown)
                 return RuleDecision(verdict: .ask, policyDenied: enforcedDenied, reason: .askUser, cacheable: false, askKey: key)
             }
             consume()
@@ -508,7 +527,7 @@ public final class RuleEngine: @unchecked Sendable {
             return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: .alertRule,
                                 ruleID: rule.id, forceAlert: true, cacheable: cacheable)
         }
-        let owner = sensitive.allSatisfy { t in t.categories.allSatisfy { isOwner($0.id) } }
+        let owner = sensitive.allSatisfy { t in t.categories.allSatisfy { owns($0, t.primaryCategory) } }
         return RuleDecision(verdict: .allow, policyDenied: enforcedDenied, reason: owner ? .owner : .defaultAllow,
                             cacheable: cacheable)
     }

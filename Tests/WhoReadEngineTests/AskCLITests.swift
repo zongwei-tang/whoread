@@ -143,11 +143,20 @@ final class AskCLITests: XCTestCase {
         for cell in ["Preview", "read+write", "~/.ssh/config", "0/1"] { XCTAssertTrue(preview.contains(cell), "\(cell) in \(preview)") }
         XCTAssertTrue(preview.hasSuffix("yes"), preview)
         XCTAssertTrue(en.stdout.contains("whoread ask ID allow-once|allow|deny|block|trust-apple"), "how to answer")
+        // task-2: an answer is per app, not per program; each question says what allowing covers.
+        let previewCover = try XCTUnwrap(line(en.stdout, starting: "#8 "), en.stdout)
+        XCTAssertEqual(previewCover, "#8 allow-once / allow cover: Preview (any program run in it) reading and modifying SSH keys, "
+                                     + "only when the chain has no AI agent")
+        let claudeCover = try XCTUnwrap(line(en.stdout, starting: "#7 "), en.stdout)
+        XCTAssertTrue(claudeCover.hasPrefix("#7 allow-once / allow cover: Claude Code (any program it runs) reading SSH keys, "
+                                            + "only when the chain has no AI agent other than "), claudeCover)
 
         let zh = try whoread(["asks"], socket: socket, lang: "zh-Hans")
         XCTAssertEqual(zh.status, 0, zh.stderr)
         XCTAssertTrue(zh.stdout.contains("等待/次数") && zh.stdout.contains("SSH 密钥"), zh.stdout)
         XCTAssertTrue(try XCTUnwrap(line(zh.stdout, starting: "8 ")).hasSuffix("是"))
+        XCTAssertEqual(try XCTUnwrap(line(zh.stdout, starting: "#8 ")),
+                       "#8 允许（allow-once、allow）适用于：Preview（及在其中运行的任何程序）读写 SSH 密钥，仅限调用链中没有 AI agent 时")
 
         let json = try whoread(["asks", "--json"], socket: socket)
         XCTAssertEqual(json.status, 0, json.stderr)
@@ -297,6 +306,8 @@ final class AskCLITests: XCTestCase {
             Rule(id: "agent", target: .category("ssh"), subject: terminal, access: .read, action: .allow,
                  expiresAt: t.addingTimeInterval(600), template: "ask-answer", chainAgents: ["claude-code"]),
             Rule(id: "old", target: .category("ssh"), subject: terminal, access: .read, action: .allow),
+            Rule(id: "unknown", target: .category("ssh"), subject: terminal, access: .read, action: .allow, template: "ask-answer",
+                 chainAgents: [], coversUnknownAncestry: true),
         ]
         let (server, socket) = try serve(stub, dir)
         defer { server.stop() }
@@ -304,7 +315,11 @@ final class AskCLITests: XCTestCase {
         XCTAssertEqual(r.status, 0, r.stderr)
         let plain = try XCTUnwrap(line(r.stdout, starting: "plain "), r.stdout)
         XCTAssertTrue(plain.contains("terminal.app, no AI agent in chain"), plain)
+        XCTAssertFalse(plain.contains("unknown starter"), plain)
         XCTAssertFalse(plain.contains("until"), plain)
+        // An answer given for a program whose starter was unknown also covers such chains.
+        let unknown = try XCTUnwrap(line(r.stdout, starting: "unknown "), r.stdout)
+        XCTAssertTrue(unknown.contains("terminal.app, no AI agent in chain (also unknown starter)"), unknown)
         let agent = try XCTUnwrap(line(r.stdout, starting: "agent "), r.stdout)
         XCTAssertTrue(agent.contains("terminal.app, chain agents claude-code"), agent)
         XCTAssertTrue(agent.contains("on until 2025-10-09 09:03:20"), agent)

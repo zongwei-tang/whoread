@@ -80,6 +80,9 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
     /// The rule applies only to chains whose AI agents are all in this list; nil = any chain. Answers
     /// to ask-mode questions set it (an approval for an app never covers it driven by another agent).
     public var chainAgents: [String]?
+    /// With `chainAgents`: also chains whose ancestry is unknown (they may hide an AI agent above the
+    /// agents seen). Only answers given for such a chain, knowing it, set it.
+    public var coversUnknownAncestry: Bool
 
     public init(
         id: String = UUID().uuidString,
@@ -96,7 +99,8 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
         createdAt: Date = Date(),
         template: String? = nil,
         exceptions: [RuleException] = [],
-        chainAgents: [String]? = nil
+        chainAgents: [String]? = nil,
+        coversUnknownAncestry: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -113,6 +117,7 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
         self.template = template
         self.exceptions = exceptions
         self.chainAgents = chainAgents
+        self.coversUnknownAncestry = coversUnknownAncestry
     }
 
     /// Decisions depend on time, a use counter, or exceptions that do.
@@ -121,6 +126,13 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
     }
 
     var hasChainDependentExceptions: Bool { exceptions.contains { $0.subject.isChainDependent || $0.chainAgents != nil } }
+
+    /// An allow scoped to the agents of a chain covers this one: only those agents (or none), and a chain
+    /// whose ancestry is unknown only if the answer was given for such a chain.
+    static func scopeCovers(agents scope: [String]?, unknownAncestry: Bool, chainAgents: Set<String>, ancestryKnown: Bool) -> Bool {
+        guard let scope else { return true }
+        return chainAgents.isSubset(of: Set(scope)) && (ancestryKnown || unknownAncestry)
+    }
 
     public func isLive(at now: Date) -> Bool {
         guard enabled else { return false }
@@ -131,7 +143,7 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, enabled, enforce, target, subject, access, action, includePlatformBinaries
-        case expiresAt, remainingUses, createdAt, template, exceptions, chainAgents
+        case expiresAt, remainingUses, createdAt, template, exceptions, chainAgents, coversUnknownAncestry
     }
 
     public init(from decoder: Decoder) throws {
@@ -151,6 +163,7 @@ public struct Rule: Codable, Hashable, Sendable, Identifiable {
         template = try c.decodeIfPresent(String.self, forKey: .template)
         exceptions = try c.decodeIfPresent([RuleException].self, forKey: .exceptions) ?? []
         chainAgents = try c.decodeIfPresent([String].self, forKey: .chainAgents)
+        coversUnknownAncestry = try c.decodeIfPresent(Bool.self, forKey: .coversUnknownAncestry) ?? false
     }
 }
 
@@ -168,12 +181,14 @@ public struct RuleException: Codable, Hashable, Sendable, Identifiable {
     /// The AI agents that were in the chain when the user approved; nil = not scoped. A chain with
     /// any other agent is not covered (an approved app's binary cannot be a tunnel for another agent).
     public var chainAgents: [String]?
+    /// As `Rule.coversUnknownAncestry`.
+    public var coversUnknownAncestry: Bool
     public var expiresAt: Date?
     public var remainingUses: Int?
     public var createdAt: Date
 
     public init(id: String = UUID().uuidString, subject: RuleSubject, pathPrefix: String? = nil, categoryID: String? = nil,
-                access: RuleAccess? = nil, chainAgents: [String]? = nil,
+                access: RuleAccess? = nil, chainAgents: [String]? = nil, coversUnknownAncestry: Bool = false,
                 expiresAt: Date? = nil, remainingUses: Int? = nil, createdAt: Date = Date()) {
         self.id = id
         self.subject = subject
@@ -181,9 +196,28 @@ public struct RuleException: Codable, Hashable, Sendable, Identifiable {
         self.categoryID = categoryID
         self.access = access
         self.chainAgents = chainAgents
+        self.coversUnknownAncestry = coversUnknownAncestry
         self.expiresAt = expiresAt
         self.remainingUses = remainingUses
         self.createdAt = createdAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, subject, pathPrefix, categoryID, access, chainAgents, coversUnknownAncestry, expiresAt, remainingUses, createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        subject = try c.decode(RuleSubject.self, forKey: .subject)
+        pathPrefix = try c.decodeIfPresent(String.self, forKey: .pathPrefix)
+        categoryID = try c.decodeIfPresent(String.self, forKey: .categoryID)
+        access = try c.decodeIfPresent(RuleAccess.self, forKey: .access)
+        chainAgents = try c.decodeIfPresent([String].self, forKey: .chainAgents)
+        coversUnknownAncestry = try c.decodeIfPresent(Bool.self, forKey: .coversUnknownAncestry) ?? false
+        expiresAt = try c.decodeIfPresent(Date.self, forKey: .expiresAt)
+        remainingUses = try c.decodeIfPresent(Int.self, forKey: .remainingUses)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
     }
 
     public func isLive(at now: Date) -> Bool {

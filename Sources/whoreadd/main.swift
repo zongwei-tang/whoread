@@ -67,6 +67,9 @@ default:
 }
 
 if has("--verbose") { Log.minimum = .debug }
+// A client that hangs up mid-reply must cost one EPIPE, not the daemon; so must a log line on a
+// standard error that is a closed pipe (Log drops it).
+signal(SIGPIPE, SIG_IGN)
 var config = DaemonConfiguration()
 let source = value("--source") ?? "eslogger"
 if source.hasPrefix("replay:") {
@@ -75,7 +78,8 @@ if source.hasPrefix("replay:") {
 } else if let kind = SourceKind(rawValue: source) {
     config.source = kind
 } else {
-    FileHandle.standardError.write(Data("unknown source \(source)\n".utf8))
+    // Not FileHandle.write: it raises (and aborts) when standard error cannot be written (daemon-2).
+    Log.writeAll(STDERR_FILENO, "unknown source \(source)\n")
     exit(64)
 }
 config.replayRealtime = has("--realtime")
@@ -107,8 +111,6 @@ if geteuid() == 0, let problem = Log.privateLogProblem(descriptor: STDERR_FILENO
 }
 
 umask(0o022)
-// A client that hangs up mid-reply must cost one EPIPE, not the daemon.
-signal(SIGPIPE, SIG_IGN)
 let daemon: Daemon
 do {
     daemon = try Daemon(configuration: config)

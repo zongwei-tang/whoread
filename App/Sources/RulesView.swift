@@ -1,4 +1,3 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
 import SwiftUI
 import WhoReadCore
 import WhoReadUIModel
@@ -24,6 +23,8 @@ struct RulesView: View {
                 Text(caveat).font(.caption).foregroundStyle(.orange)
             }
             if let err = connection.lastActionError { Text(err).font(.caption).foregroundStyle(.red) }
+            // Refused (not recognised as the signed app): a new block rule can still be added.
+            UnavailableNote(part: .rules)
             List(model.rules) { rule in
                 RuleRow(rule: rule) { editing = RuleDraft(rule: rule) }
             }
@@ -185,8 +186,16 @@ struct RuleEditor: View {
                     Text(L10n.t(.actionAllow)).tag(RuleAction.allow)
                 }
                 Toggle(L10n.t(.ruleEnabled), isOn: $draft.enabled)
+                // An answer's chain scope, kept while it stays an allow (a block or an alert covers every chain).
+                if let scope = model.chainScope(draft.build()) {
+                    Text(scope).font(.caption).foregroundStyle(.secondary)
+                }
                 if draft.action == .deny {
                     Toggle(L10n.t(.ruleEnforce), isOn: $draft.enforce)
+                    // Saved either way, but nothing blocks right now (eslogger cannot): say so here too.
+                    if let caveat = model.enforcementCaveat {
+                        Text(caveat).font(.caption).foregroundStyle(.orange)
+                    }
                 }
             }
             HStack {
@@ -208,5 +217,7 @@ struct RuleEditor: View {
         .padding()
         // Only this sheet's saves are shown in it.
         .onAppear { connection.lastActionError = nil }
+        // Its list of apps comes from the summaries: read while the sheet is open.
+        .readsWhileShown(.ruleEditor)
     }
 }

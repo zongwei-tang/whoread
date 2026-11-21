@@ -324,7 +324,7 @@ final class CreateEventsRound2Tests: XCTestCase {
         XCTAssertEqual(filter.verdict(createLine(#"\/Users\/alice\/Library\/Caches\/x.tmp"#, mode: 0o100644)), .drop,
                        "every file creation on the system is a create: not parsed unless it can matter")
         let newPath = #"{"schema_version":1,"process":{"audit_token":{"pid":501},"executable":{"path":"\/bin\/ln"}},"event":{"create":{"destination_type":1,"destination":{"new_path":{"dir":{"path":"\/Users\/alice"},"filename":".ssh","mode":448}}}}}"#
-        XCTAssertEqual(filter.verdict(newPath), .parse, "dir + name: the prefix may not appear")
+        XCTAssertEqual(filter.verdict(newPath), .drop, "new_path: a create an ES client denied, which the parser ignores")
     }
 
     func testSymlinkCreateInAMonitoredDirectoryIsRecorded() throws {

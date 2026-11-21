@@ -35,6 +35,9 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
     private var droppedByPrefilter: UInt64 = 0
     /// Left by the current reader thread at EOF; the next reader waits on it (see launch()).
     private var readerDone: DispatchGroup?
+    /// Tests only: called once a child is spawned, before it is published (updateMonitoring cannot
+    /// reach it yet).
+    var afterSpawn: (() -> Void)?
 
     public static func eventNames(readdir: Bool) -> [String] {
         // "create": symlink, mkdir and mknod have no open (the parser skips regular-file creates).
@@ -123,8 +126,10 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: executable)
         lock.lock()
-        p.arguments = EsloggerSource.eventNames(readdir: readdir)
+        let launchedReaddir = readdir
+        let afterSpawn = self.afterSpawn
         lock.unlock()
+        p.arguments = EsloggerSource.eventNames(readdir: launchedReaddir)
         let out = Pipe()
         let err = Pipe()
         p.standardOutput = out
@@ -145,6 +150,7 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
             }
             throw error
         }
+        afterSpawn?()
         let done = DispatchGroup()
         done.enter()
         lock.lock()
@@ -153,6 +159,10 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
         stderrTail = Data()
         let previous = readerDone
         readerDone = done
+        // An updateMonitoring since the list was built found no running child to restart (the
+        // previous one had exited, or there was none yet): restart this one with the current list.
+        let stale = readdir != launchedReaddir
+        if stale { restartRequested = true }
         lock.unlock()
         publish {
             $0.running = true
@@ -190,6 +200,11 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
         reader.name = "whoread.eslogger.reader"
         reader.qualityOfService = .userInitiated
         reader.start()
+        // childExited relaunches it at once (requested, so no error and no backoff).
+        if stale {
+            p.interrupt()
+            escalate(p)
+        }
     }
 
     private func handle(_ line: UnsafeRawBufferPointer) {
@@ -265,15 +280,17 @@ public final class EsloggerSource: EventSource, @unchecked Sendable {
     }
 
     /// Best-effort explanation for an immediate exit. The exact stderr text of eslogger is not
-    /// documented (UNVERIFIED), so this keys on the documented failure causes.
+    /// documented (UNVERIFIED), so this keys on the documented failure causes. eslogger runs with the
+    /// daemon's euid: as root it cannot lack root, so words like "root" or "super-user" (a sentence
+    /// naming both requirements, "rootless") say nothing; only an explicit not_privileged does.
     static func diagnose(stderr: String, euid: uid_t) -> String {
         let s = stderr.lowercased()
-        if euid != 0 || s.contains("not_privileged") || s.contains("root") || s.contains("super-user") {
-            return "eslogger must run as root (start whoreadd with sudo or as a LaunchDaemon)."
-        }
+        let root = "eslogger must run as root (start whoreadd with sudo or as a LaunchDaemon)."
+        if euid != 0 { return root }
         if s.contains("not_permitted") || s.contains("permitted") || s.contains("tcc") || s.contains("full disk") {
             return "Full Disk Access is missing for the process that started eslogger (the WhoRead daemon, or Terminal when run by hand). System Settings → Privacy & Security → Full Disk Access."
         }
+        if s.contains("not_privileged") { return root }
         return "eslogger exited immediately. Check that whoreadd runs as root and has Full Disk Access."
     }
 }

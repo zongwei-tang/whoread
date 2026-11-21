@@ -109,7 +109,20 @@ public final class AskBroker: @unchecked Sendable {
     private var nextID: Int64 = 1
     private var nextToken: UInt64 = 1
     private var entries: [Int64: Entry] = [:]
-    private var byKey: [AskKey: Int64] = [:]
+    /// Open questions by what they ask (`Group`).
+    private var byKey: [Group: Int64] = [:]
+    /// A question asks about its key for one app or AI agent as the baseline knows it
+    /// (`ResponsibleEntity.baselineKey`): a process that only looks like an AI agent with a team (argv0
+    /// `claude`, no team) is asked about apart from it (attribution-2). Held as one, an answer to the
+    /// agent would release the impostor's accesses too.
+    private struct Group: Hashable {
+        var key: AskKey
+        var identity: String
+        init(_ r: AskRequest) {
+            key = r.key
+            identity = r.responsible.baselineKey
+        }
+    }
     private var heldCount = 0
     private var lastPoll: Date?
 
@@ -126,7 +139,7 @@ public final class AskBroker: @unchecked Sendable {
         let t = now()
         lock.lock()
         let id: Int64
-        if let existing = byKey[request.key], var e = entries[existing] {
+        if let existing = byKey[Group(request)], var e = entries[existing] {
             id = existing
             e.request.attempts += 1
             e.request.lastAt = t
@@ -147,7 +160,7 @@ public final class AskBroker: @unchecked Sendable {
             r.holding = 0
             r.answerBy = nil
             entries[id] = Entry(request: r)
-            byKey[r.key] = id
+            byKey[Group(r)] = id
             // Non-blocking: only enqueues.
             redactQueue.async { self.redactEntry(id) }
         }
@@ -188,7 +201,7 @@ public final class AskBroker: @unchecked Sendable {
     @discardableResult
     private func removeLocked(_ id: Int64) -> Entry? {
         guard let e = entries.removeValue(forKey: id) else { return nil }
-        if byKey[e.request.key] == id { byKey.removeValue(forKey: e.request.key) }
+        if byKey[Group(e.request)] == id { byKey.removeValue(forKey: Group(e.request)) }
         heldCount -= e.held.count
         return e
     }
@@ -309,10 +322,17 @@ public final class AskBroker: @unchecked Sendable {
         }
     }
 
-    /// Denies everything held (source stopping: ES clients are about to be deleted). Returns only
-    /// once every held access has been answered, including answers queued just before. The questions
-    /// stay listed.
-    public func denyAll() {
+    /// How long `denyAll` waits by default for the broker queue to answer.
+    public static let denyAllWait: TimeInterval = 1
+
+    /// Denies everything held (source stopping: ES clients are about to be deleted). The questions
+    /// stay listed. True once every held access has been answered, including answers queued just
+    /// before. False when the queue did not get to them within `timeout` (a response stuck on it): the
+    /// denials then run whenever it frees, and the caller must deny what it still holds by itself (the
+    /// native source does, before deleting its client). Never waits longer, so a stuck queue cannot
+    /// hold up a stop.
+    @discardableResult
+    public func denyAll(waitAtMost timeout: TimeInterval = AskBroker.denyAllWait) -> Bool {
         lock.lock()
         var held: [Held] = []
         for (id, var e) in entries where !e.held.isEmpty {
@@ -327,10 +347,15 @@ public final class AskBroker: @unchecked Sendable {
         let run = { for h in held { h.fire(.deny) } }
         if DispatchQueue.getSpecific(key: AskBroker.queueKey) == queueToken {
             run()
-        } else {
-            // Behind every response queued so far (resolve, timeouts in progress).
-            queue.sync(execute: run)
+            return true
         }
+        // Behind every response queued so far (resolve, timeouts in progress).
+        let done = DispatchSemaphore(value: 0)
+        queue.async {
+            run()
+            done.signal()
+        }
+        return done.wait(timeout: .now() + timeout) == .success
     }
 
     /// Forgets unanswered requests older than `requestLifetime` (maintenance).

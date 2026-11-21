@@ -22,6 +22,24 @@ public struct PlannedAskNotification: Equatable, Sendable {
     public var body: String
     public var categoryIdentifier: String
     public var actions: [AlertAction]
+    /// Replaces the banner already shown for this question (now with its file path): no sound.
+    public var quiet = false
+}
+
+/// A notification category to register: the answers offered on a banner, as buttons. Button titles
+/// are registered once per category, not per notification, so "always allow" and "always deny" say
+/// what they cover by kind ("this app (any program run in it)"); the banner's body names the app.
+public struct PlannedCategory: Equatable, Sendable {
+    public struct Button: Equatable, Sendable {
+        public var action: AlertAction
+        public var title: String
+        /// Allowing saves a rule that also answers later questions: never from the lock screen.
+        public var needsUnlock: Bool
+        public var destructive: Bool
+    }
+
+    public var identifier: String
+    public var buttons: [Button]
 }
 
 /// What to change in the delivered question notifications after a poll.
@@ -61,15 +79,31 @@ public final class NotificationPlanner: @unchecked Sendable {
         /// The coalescer moves it on every escalation (also a new access kind at the same level),
         /// never on a merged repeat.
         var firstEventID: Int64
+        /// No event merges into the alert (nor escalates it) from then on.
+        var windowEndsAt: Date
     }
 
+    /// Alerts remembered, so that merged repeats never notify again. Forgotten once the list no
+    /// longer has them and their window has been closed for `forgetAfterWindow`.
     private var notified: [Int64: Seen] = [:]
+    /// How long after its window closed an alert no longer listed is still remembered: an event
+    /// handled late merges into the window its own time falls in.
+    static let forgetAfterWindow: TimeInterval = 600
     private var seeded = false
     private let launchedAt: Date
     private var lastUncleanStop: String?
-    /// Questions notified: id → first asked (a restarted daemon reuses ids).
-    private var askNotified: [Int64: Date] = [:]
+    /// Questions notified: id → when first asked (another first time under the same id is another
+    /// question), and whether the banner went out incomplete (`plan(asks:)`).
+    private var askNotified: [Int64: AskBanner] = [:]
 
+    private struct AskBanner {
+        var firstAt: Date
+        /// Without the file path, or with category and AI agent ids for names.
+        var incomplete: Bool
+    }
+
+    // Category prefixes: each is registered once per kind of app, AI agent or program (".app",
+    // ".agent", ".binary"), see `categories(language:)`.
     public static let categoryBlocked = "whoread.blocked"
     public static let categoryAlert = "whoread.alert"
     public static let categoryWouldBlock = "whoread.wouldblock"
@@ -82,12 +116,61 @@ public final class NotificationPlanner: @unchecked Sendable {
 
     public static let categoryAlertApple = "whoread.alert.apple"
 
-    public static func category(for kind: AlertKind, appleProgram: Bool = false) -> String {
+    /// One category per kind of alert and kind of app, AI agent or program it is charged to (the
+    /// button titles say what an answer covers).
+    public static func category(for kind: AlertKind, appleProgram: Bool = false, responsible: ResponsibleEntity.Kind) -> String {
+        let base: String
         switch kind {
-        case .blocked: return categoryBlocked
-        case .wouldBlock: return categoryWouldBlock
-        default: return appleProgram ? categoryAlertApple : categoryAlert
+        case .blocked: base = categoryBlocked
+        case .wouldBlock: base = categoryWouldBlock
+        default: base = appleProgram ? categoryAlertApple : categoryAlert
         }
+        return base + "." + responsible.rawValue
+    }
+
+    /// A question's category: "allow all Apple programs" for an all-Apple chain, and the kind it is
+    /// charged to.
+    public static func askCategory(apple: Bool, responsible: ResponsibleEntity.Kind) -> String {
+        (apple ? categoryAskApple : categoryAsk) + "." + responsible.rawValue
+    }
+
+    /// Every category, with its button titles in `language` (registered at launch and when the
+    /// language changes).
+    public static func categories(language: Language) -> [PlannedCategory] {
+        let f = AlertFormatter(language: language)
+        let kinds: [ResponsibleEntity.Kind] = [.app, .agent, .binary]
+        func alertCategory(_ id: String, _ actions: [AlertAction], kind: ResponsibleEntity.Kind) -> PlannedCategory {
+            PlannedCategory(identifier: id + "." + kind.rawValue, buttons: actions.map { a in
+                let title: String
+                switch a {
+                case .alwaysAllow: title = f.alwaysAllowTitle(kind: kind)
+                case .blockFromNowOn: title = f.alwaysDenyTitle(kind: kind, alertKind: .firstAccess)
+                default: title = f.actionTitle(a)
+                }
+                return PlannedCategory.Button(action: a, title: title, needsUnlock: AskAnswers.isAllow(a),
+                                              destructive: a == .blockFromNowOn || a == .keepBlocking)
+            })
+        }
+        func askCategory(apple: Bool, kind: ResponsibleEntity.Kind) -> PlannedCategory {
+            PlannedCategory(identifier: NotificationPlanner.askCategory(apple: apple, responsible: kind),
+                            buttons: AskAnswers.actions(apple: apple).map { a in
+                let title: String
+                switch a {
+                case .alwaysAllow: title = f.alwaysAllowTitle(kind: kind)
+                case .blockFromNowOn: title = f.alwaysDenyTitle(kind: kind, alertKind: .ask)
+                default: title = L10n.askActionTitle(a, language)
+                }
+                return PlannedCategory.Button(action: a, title: title, needsUnlock: AskAnswers.isAllow(a), destructive: !AskAnswers.isAllow(a))
+            })
+        }
+        return kinds.flatMap { kind in [
+            alertCategory(categoryBlocked, [.allowOnce, .alwaysAllow, .keepBlocking], kind: kind),
+            alertCategory(categoryAlert, [.alwaysAllow, .blockFromNowOn, .ignore], kind: kind),
+            alertCategory(categoryAlertApple, [.alwaysAllow, .blockFromNowOn, .ignore, .trustApplePrograms], kind: kind),
+            alertCategory(categoryWouldBlock, [.alwaysAllow, .ignore], kind: kind),
+            askCategory(apple: false, kind: kind),
+            askCategory(apple: true, kind: kind),
+        ] }
     }
 
     /// `launchedAt`: alerts created before this are not notified on the first plan.
@@ -100,10 +183,22 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// The unclean stop last reported (nil once a status showed none), for the app to keep.
     public var notifiedUncleanStop: String? { lastUncleanStop }
 
+    /// Alerts remembered as notified or seeded (tests).
+    var notifiedCount: Int { notified.count }
+
     /// The first plan only records alerts from before launch (no burst of old notifications);
     /// alerts raised since launch notify even if the daemon was unreachable until now.
-    public func plan(_ alerts: [Alert], settings: NotificationSettings, formatter: AlertFormatter) -> [PlannedNotification] {
-        defer { seeded = true }
+    /// `alerts` nil: they were not read this time (refused, failed): nothing is planned or recorded, so
+    /// the first read that succeeds still only records what is older than the launch.
+    /// `alerts` is the whole list as the daemon lists it (the most recently updated, of every status),
+    /// not only what changed: alerts it no longer has are forgotten once their window is long closed.
+    public func plan(_ alerts: [Alert]?, settings: NotificationSettings, formatter: AlertFormatter,
+                     agentName: (String) -> String = { $0 }) -> [PlannedNotification] {
+        guard let alerts else { return [] }
+        defer {
+            seeded = true
+            forgetClosed(listed: alerts)
+        }
         var out: [PlannedNotification] = []
         for a in alerts.sorted(by: { $0.updatedAt < $1.updatedAt }) {
             // Same id, different creation time: the daemon reused the id (its alert table was
@@ -112,7 +207,7 @@ public final class NotificationPlanner: @unchecked Sendable {
             let isNew = previous == nil
             let escalated = previous.map { a.kind.priority > $0.kind.priority || a.firstEventID != $0.firstEventID } ?? false
             let kind = previous.map { $0.kind.priority >= a.kind.priority ? $0.kind : a.kind } ?? a.kind
-            notified[a.id] = Seen(createdAt: a.createdAt, kind: kind, firstEventID: a.firstEventID)
+            notified[a.id] = Seen(createdAt: a.createdAt, kind: kind, firstEventID: a.firstEventID, windowEndsAt: a.windowEndsAt)
             // Not updatedAt: repeats merged since launch move it on alerts notified before.
             guard isNew || escalated, seeded || a.createdAt >= launchedAt else { continue }
             // The question itself is notified (`plan(asks:)`), with the answers as buttons.
@@ -123,16 +218,33 @@ public final class NotificationPlanner: @unchecked Sendable {
             let title = a.kind == .blocked ? L10n.t(.notifBlockedTitle, formatter.language) : L10n.t(.notifTitle, formatter.language)
             out.append(PlannedNotification(
                 identifier: "alert-\(a.id)-\(Int(a.createdAt.timeIntervalSince1970))-\(a.kind.rawValue)-\(a.firstEventID)", alertID: a.id, title: title,
-                body: [formatter.headline(a), formatter.identityLine(a), formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
-                categoryIdentifier: NotificationPlanner.category(for: a.kind, appleProgram: a.appleProgram), threadIdentifier: a.categoryID,
+                body: [formatter.headline(a), formatter.identityLine(a), a.allowCoverageLine(formatter, agentName: agentName),
+                       formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
+                categoryIdentifier: NotificationPlanner.category(for: a.kind, appleProgram: a.appleProgram, responsible: a.responsible.kind),
+                threadIdentifier: a.categoryID,
                 actions: a.availableActions))
         }
         return out
     }
 
-    /// The daemon's previous instance stopped while it could block (likely killed by the kernel for
-    /// a missed deadline). Enforcement was left as the user set it; tell them once (the daemon keeps
-    /// reporting it while that instance runs). Posted whatever the notification settings say.
+    /// Forgets alerts the list no longer has whose window closed `forgetAfterWindow` ago: nothing merges
+    /// into them or escalates them any more, so they do not come back to the list. Timed by the list's
+    /// newest update (the daemon's event times decide the windows), not by this Mac's clock. One that
+    /// left the list while its window is open (pushed out by a flood of newer alerts) is kept: a merged
+    /// repeat brings it back, and must not notify as new.
+    private func forgetClosed(listed alerts: [Alert]) {
+        guard let clock = alerts.map(\.updatedAt).max() else { return }
+        let listed = Set(alerts.map(\.id))
+        notified = notified.filter { id, seen in
+            listed.contains(id) || clock.timeIntervalSince(seen.windowEndsAt) < NotificationPlanner.forgetAfterWindow
+        }
+    }
+
+    /// The daemon's previous instance stopped uncleanly: while it could block (likely killed by the
+    /// kernel for a missed deadline), or exited by its watchdog, which the daemon also reports when it
+    /// only monitored (the daemon's note says which). Enforcement was left as the user set it; tell
+    /// them once (the daemon keeps reporting it while that instance runs). Posted whatever the
+    /// notification settings say.
     public func plan(status: DaemonStatus, language: Language) -> [SystemNotice] {
         defer { lastUncleanStop = status.uncleanStop }
         guard let stop = status.uncleanStop, stop != lastUncleanStop else { return [] }
@@ -147,22 +259,33 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// `complete`: the reply listed every open question. The daemon caps the list (200), so a question
     /// missing from a capped reply may still be open: only a complete reply withdraws banners.
     /// The body puts the AI agents in the chain first (a collapsed banner shows only its first lines),
-    /// then the headline, where the program really is and who signed it, and the chain; names and
-    /// paths are escaped and capped (`DisplayText`).
+    /// then the headline, where the program really is and who signed it, what allowing covers (the
+    /// app, not only that program), and the chain; names and paths are escaped and capped (`DisplayText`).
+    /// A banner that went out incomplete is replaced once, quietly, when it can be complete: posted
+    /// while the daemon hid the file path from this app (`AskRequest.pathHidden`: its connection was
+    /// not taken for the app), it would keep saying that only the signed app can see the path, to the
+    /// signed app; posted before the catalog and the AI agent list were read (`namesKnown` false: the
+    /// questions are read on their own connection, often first at launch), it would name the category
+    /// and the agents by their ids ("ssh" for "SSH keys").
     public func plan(asks: [AskRequest], formatter: AlertFormatter, complete: Bool = true,
-                     agentName: (String) -> String = { $0 }) -> AskNotificationPlan {
+                     agentName: (String) -> String = { $0 }, namesKnown: Bool = true) -> AskNotificationPlan {
         var plan = AskNotificationPlan()
-        var open: [Int64: Date] = [:]
+        var open: [Int64: AskBanner] = [:]
         for a in asks.sorted(by: { ($0.firstAt, $0.id) < ($1.firstAt, $1.id) }) {
-            open[a.id] = a.firstAt
-            // Same id, other first time: a restarted daemon's new question (replaces the old banner).
-            if let seen = askNotified[a.id], abs(seen.timeIntervalSince(a.firstAt)) < 1 { continue }
+            // Same id, other first time: another question (replaces the old banner).
+            let seen = askNotified[a.id].flatMap { abs($0.firstAt.timeIntervalSince(a.firstAt)) < 1 ? $0 : nil }
+            let incomplete = a.pathHidden || !namesKnown
+            let completes = seen?.incomplete == true && !incomplete
+            // Never back to an incomplete text once the complete one was shown.
+            open[a.id] = AskBanner(firstAt: a.firstAt, incomplete: seen.map { $0.incomplete && incomplete } ?? incomplete)
+            if seen != nil && !completes { continue }
             plan.post.append(PlannedAskNotification(
                 identifier: NotificationPlanner.askIdentifier(a.id), askID: a.id, title: L10n.t(.notifAskTitle, formatter.language),
-                body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.asAlert),
-                       formatter.identityLine(a.asAlert), formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
-                categoryIdentifier: a.appleProgram ? NotificationPlanner.categoryAskApple : NotificationPlanner.categoryAsk,
-                actions: AskAnswers.actions(for: a)))
+                body: [a.agentsLine(formatter.language, agentName: agentName), formatter.headline(a.displayAlert(formatter.language)),
+                       formatter.identityLine(a.asAlert), a.allowCoverageLine(formatter, agentName: agentName),
+                       formatter.chainLine(a.chain)].compactMap { $0 }.joined(separator: "\n"),
+                categoryIdentifier: NotificationPlanner.askCategory(apple: a.appleProgram, responsible: a.responsible.kind),
+                actions: AskAnswers.actions(for: a), quiet: completes))
         }
         if complete {
             plan.remove = askNotified.keys.filter { open[$0] == nil }.sorted().map(NotificationPlanner.askIdentifier)
@@ -176,6 +299,12 @@ public final class NotificationPlanner: @unchecked Sendable {
 
 /// Onboarding: Full Disk Access, system extension approval, daemon running — each detected live
 /// from daemon status (FDA problems surface as the source failing with NOT_PERMITTED).
+///
+/// Monitor-only mode (`isMonitorOnly`): the dev LaunchDaemon runs Apple's eslogger. There is no
+/// extension to install (a build without a team cannot install one), Full Disk Access goes to the
+/// daemon's executable rather than to the app, and onboarding completes without the extension.
+/// Which steps onboarding shows is decided by the build first (`showsMonitorOnly`): one that cannot
+/// install the extension shows those steps whether or not the daemon answers right now.
 public struct OnboardingModel: Equatable, Sendable {
     public enum StepState: Equatable, Sendable {
         case pending
@@ -184,6 +313,8 @@ public struct OnboardingModel: Equatable, Sendable {
         /// The extension activates after the next restart (`.willCompleteAfterReboot`).
         case needsRestart
         case failed(String)
+        /// Cannot be done with this installation: the system extension in monitor-only mode.
+        case notAvailable
     }
 
     /// macOS 13+ first, then the pre-13 form (see docs/RESEARCH.md #1).
@@ -193,6 +324,10 @@ public struct OnboardingModel: Equatable, Sendable {
     ]
     public static let loginItemsExtensionsURL = "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
 
+    /// The dev LaunchDaemon's executable, as installed (packaging/com.whoread.daemon.plist). In
+    /// monitor-only mode Full Disk Access belongs to it: it starts eslogger, which needs it.
+    public static let daemonExecutablePath = "/usr/local/libexec/whoreadd"
+
     /// What this app session saw of its own activation request.
     public var extensionState: StepState = .pending
 
@@ -200,11 +335,61 @@ public struct OnboardingModel: Equatable, Sendable {
         self.extensionState = extensionState
     }
 
+    /// Monitor-only mode: the app talks to the dev LaunchDaemon (not through the system extension's
+    /// service), which monitors with Apple's eslogger. eslogger cannot block, and this build cannot
+    /// install the extension that could: WhoRead records and alerts, without blocking or questions.
+    public static func isMonitorOnly(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool) -> Bool {
+        connected && !viaExtension && status?.source == .eslogger
+    }
+
+    /// Onboarding shows the monitor-only steps (`extensionBody`, `fullDiskAccessBody`, `daemonBody`).
+    /// Decided by the build first. One that cannot install the system extension (`canInstallExtension`
+    /// false: it names no extension service, `DaemonConnection.extensionServiceName`, as the ad hoc build
+    /// scripts/install.sh makes) only ever uses the dev LaunchDaemon, so its steps stay the same while that
+    /// daemon is not running, restarting, or refusing this app: all three look like no answer to the app.
+    /// `status` is the last one read (kept while the daemon does not answer): only the native source (the
+    /// dev daemon in a VM with SIP disabled) can block, and then the usual steps apply. A build that can
+    /// install the extension: monitor-only while the daemon answers as the dev LaunchDaemon with eslogger.
+    public static func showsMonitorOnly(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool, canInstallExtension: Bool) -> Bool {
+        guard canInstallExtension else { return status?.source != .native }
+        return isMonitorOnly(status, connected: connected, viaExtension: viaExtension)
+    }
+
+    /// The Full Disk Access step names the daemon's executable (`fullDiskAccessBody(monitorOnly: true)`, with
+    /// a button that copies its path), not this app: always for a build that cannot install the extension,
+    /// which only uses the dev LaunchDaemon (whoreadd needs Full Disk Access with the native source too),
+    /// otherwise in monitor-only mode.
+    public static func fullDiskAccessGoesToDaemon(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool,
+                                                  canInstallExtension: Bool) -> Bool {
+        !canInstallExtension || isMonitorOnly(status, connected: connected, viaExtension: viaExtension)
+    }
+
     /// Done once the daemon answers through the extension's Mach service (or runs the native
-    /// Endpoint Security source), even if the extension was approved before this launch.
-    public func extensionStepState(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool) -> StepState {
+    /// Endpoint Security source), even if the extension was approved before this launch. Not
+    /// available in monitor-only mode: nothing to install, monitoring runs without it. Never offered by
+    /// a build that cannot install it (`showsMonitorOnly`), whatever this session's request did and
+    /// whether or not the daemon answers now; for such a build the native source last seen does its job.
+    public func extensionStepState(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool, canInstallExtension: Bool) -> StepState {
+        guard canInstallExtension else { return status?.source == .native ? .done : .notAvailable }
         if connected, let s = status, viaExtension || s.source == .native { return .done }
+        if OnboardingModel.isMonitorOnly(status, connected: connected, viaExtension: viaExtension) { return .notAvailable }
         return extensionState
+    }
+
+    /// The extension step's text: in monitor-only mode, why it is not available.
+    public static func extensionBody(monitorOnly: Bool, _ language: Language = L10n.current) -> String {
+        L10n.t(monitorOnly ? .onbExtNotAvailableBody : .onbExtBody, language)
+    }
+
+    /// The Full Disk Access step's text: in monitor-only mode it names the daemon's executable, which
+    /// needs it, not this app (onboarding passes `fullDiskAccessGoesToDaemon`).
+    public static func fullDiskAccessBody(monitorOnly: Bool, _ language: Language = L10n.current) -> String {
+        monitorOnly ? L10n.f(.onbFDABodyDaemonFormat, daemonExecutablePath, language: language) : L10n.t(.onbFDABody, language)
+    }
+
+    /// The last step's text: in monitor-only mode, that nothing is blocked.
+    public static func daemonBody(monitorOnly: Bool, _ language: Language = L10n.current) -> String {
+        L10n.t(monitorOnly ? .onbDaemonBodyMonitorOnly : .onbDaemonBody, language)
     }
 
     public func fullDiskAccessState(_ status: DaemonStatus?, connected: Bool) -> StepState {
@@ -222,6 +407,8 @@ public struct OnboardingModel: Equatable, Sendable {
         return s.sourceRunning ? .done : .waiting
     }
 
+    /// Full Disk Access granted and monitoring running. The extension step is not part of it: monitor-only
+    /// mode has none, and an approved extension shows as monitoring running.
     public func isComplete(_ status: DaemonStatus?, connected: Bool) -> Bool {
         fullDiskAccessState(status, connected: connected) == .done && daemonState(status, connected: connected) == .done
     }
@@ -351,15 +538,40 @@ public struct RuleDraft: Equatable, Sendable {
         case .anyNonOwner: subject = .anyNonOwner
         case .agentChain: subject = .agentAncestor(agentIDs: agentIDs.isEmpty ? nil : agentIDs, exceptOwners: exceptOwners)
         }
-        // Editing keeps expiry, use count and creation time; a template only lends its provenance.
-        // The chain scope (not shown in the editor) is kept: an answer that allowed an app without an
-        // AI agent must not become an allow for that app driven by any agent once edited.
+        // Editing keeps creation time; a template only lends its provenance. An allow keeps its chain
+        // scope (shown in the editor, not editable there): an answer that allowed an app without an AI agent must not
+        // become an allow for that app driven by any agent once edited. So is whether it also covers
+        // chains whose starter is unknown. A block or an alert made from an allow covers every chain
+        // (a scope would leave out exactly the chains with an AI agent), and is no longer an answer:
+        // expiry and use count go with the action, so a block made from "allow once" does not end, and
+        // is not deleted as an expired answer, 10 minutes later.
         let edited = id != nil && original?.id == id ? original : nil
+        let staysAllow = action == .allow && original?.action == .allow
+        let sameAction = edited?.action == action
+        let template = original?.template == RuleTemplates.askAnswer && !staysAllow ? nil : original?.template
         return Rule(id: id ?? UUID().uuidString, name: name.isEmpty ? nil : name, enabled: enabled, enforce: enforce,
                     target: target, subject: subject, access: access, action: action,
-                    includePlatformBinaries: includePlatformBinaries, expiresAt: edited?.expiresAt,
-                    remainingUses: edited?.remainingUses, createdAt: edited?.createdAt ?? now, template: original?.template,
-                    exceptions: exceptions, chainAgents: original?.chainAgents)
+                    includePlatformBinaries: includePlatformBinaries, expiresAt: sameAction ? edited?.expiresAt : nil,
+                    remainingUses: sameAction ? edited?.remainingUses : nil, createdAt: edited?.createdAt ?? now, template: template,
+                    exceptions: exceptions, chainAgents: staysAllow ? original?.chainAgents : nil,
+                    coversUnknownAncestry: staysAllow && (original?.coversUnknownAncestry ?? false))
+    }
+}
+
+/// Saving a rule from the editor.
+public enum RuleSave {
+    /// Saves `rule` with what the daemon changes on its own taken from its current copy
+    /// (`keepingDaemonState`), read right before saving. When the daemon refuses that read (it does
+    /// not serve this app as the signed one), the rule is saved as built: such a peer may only add a
+    /// new deny or alert rule, which has no daemon state yet, and the daemon refuses anything else.
+    public static func save(_ rule: Rule, with client: IPCClient) throws -> IPCResponse {
+        let current: Rule?
+        do {
+            current = try client.rules().first { $0.id == rule.id }
+        } catch let e as IPCError where e.code == .notPermitted {
+            current = nil
+        }
+        return try client.call(.upsertRule(rule.keepingDaemonState(of: current)))
     }
 }
 
@@ -367,13 +579,16 @@ extension Rule {
     /// This rule as edited in the app, with what the daemon changes on its own taken from its
     /// current copy: exceptions (a used "allow once", an "always allow" from a banner), use count
     /// and expiry. The editor shows none of them, and the app's copy can be up to 10 s old.
-    /// Without a current copy (a new rule) it is saved as built.
+    /// Use count and expiry only while the action is the same: a block made from an "allow once"
+    /// answer does not end with it. Without a current copy (a new rule) it is saved as built.
     public func keepingDaemonState(of current: Rule?) -> Rule {
         guard let current else { return self }
         var r = self
         r.exceptions = current.exceptions
-        r.remainingUses = current.remainingUses
-        r.expiresAt = current.expiresAt
+        if current.action == action {
+            r.remainingUses = current.remainingUses
+            r.expiresAt = current.expiresAt
+        }
         return r
     }
 }

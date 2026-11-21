@@ -72,7 +72,9 @@ private func heldID(_ d: AskBroker.Disposition, file: StaticString = #filePath, 
 
 /// A broker that holds with short budgets (an answering app is present).
 private func presentBroker(maxHeld: Int = 256) -> AskBroker {
-    let b = AskBroker(maxHeld: maxHeld, minimumBudget: 0.01)
+    // A long presence window: on a loaded machine a test can take longer than the default 5 s, and
+    // these tests are not about an app that stopped polling.
+    let b = AskBroker(presenceWindow: 600, maxHeld: maxHeld, minimumBudget: 0.01)
     b.noteAnsweringClient()
     return b
 }

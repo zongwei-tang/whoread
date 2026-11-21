@@ -33,6 +33,8 @@ func baseConfig(_ dir: TempDir, source: SourceKind = .replay, replay: String? = 
     c.source = source
     c.replayPath = replay
     c.homeDirectories = ["/Users/alice"]
+    // The synthetic home is every test user's own (what a console-user client may add to the catalog).
+    c.homeOf = { _ in "/Users/alice" }
     c.killSwitchPath = dir.path("data/disable-enforcement")
     c.seedProcesses = false
     return c

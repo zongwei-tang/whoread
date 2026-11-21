@@ -11,12 +11,19 @@ public struct DaemonConfiguration: Sendable {
     public var dataDirectoryOwner: uid_t = geteuid()
     /// Directory with catalog.json / agents.json / benign.json defaults. nil = search.
     public var defaultsDirectory: String?
+    /// When set, the defaults are read only where no one but this user and root can change them, nor
+    /// a directory above them (`DefaultData.locate`, macos-4): root for a daemon running as root. A
+    /// daemon (or `whoread replay`) running as a user reads them as they are.
+    public var defaultsOwner: uid_t? = geteuid() == 0 ? 0 : nil
     public var source: SourceKind = .eslogger
     public var esloggerPath = "/usr/bin/eslogger"
     public var replayPath: String?
     public var replayRealtime = false
     /// Overrides home discovery (tests, replay of fixtures recorded under /Users/alice).
     public var homeDirectories: [String]?
+    /// A user's home directory: the only one a client without sudo or the app may extend monitoring to
+    /// (`DaemonCore.ensureMonitored`, ipc-2). The user database by default; tests give synthetic homes.
+    public var homeOf: @Sendable (uid_t) -> String? = { DaemonConfiguration.userDatabaseHome($0) }
     public var killSwitchPath: String?
     /// macOS XPC listener.
     public var machServiceName: String?
@@ -39,8 +46,21 @@ public struct DaemonConfiguration: Sendable {
     /// rename or unlink in a monitored dotfile directory) the links are re-discovered (files-9). Also
     /// the shortest interval between two such runs.
     public var linkRediscoveryDelay: TimeInterval = 1.5
+    /// The shortest interval between two full searches for links that lost file events cause (more
+    /// link changes at once than are kept): each one reads up to LinkInventory.walkBudget entries.
+    public var linkFullWalkInterval: TimeInterval = 30
 
     public init() {}
+
+    /// `uid`'s home directory in the user database (getpwuid_r), nil when it has none.
+    public static func userDatabaseHome(_ uid: uid_t) -> String? {
+        var entry = passwd()
+        var found: UnsafeMutablePointer<passwd>?
+        var buffer = [CChar](repeating: 0, count: 16 * 1024)
+        guard getpwuid_r(uid, &entry, &buffer, buffer.count, &found) == 0, found != nil, let dir = entry.pw_dir else { return nil }
+        let home = String(cString: dir)
+        return home.hasPrefix("/") ? home : nil
+    }
 
     public var resolvedKillSwitchPath: String {
         killSwitchPath ?? (dataDirectory as NSString).appendingPathComponent("disable-enforcement")
@@ -54,6 +74,9 @@ public struct DaemonConfiguration: Sendable {
     /// instance died while enforcing (the kernel kills a client that misses an AUTH deadline). It is
     /// reported (`DaemonStatus.uncleanStop`); enforcement stays as the user set it.
     public var authArmedMarkerPath: String { (dataDirectory as NSString).appendingPathComponent("auth-armed") }
+    /// Written by the native source's handler watchdog just before it exits (NativeStallMarker): the next
+    /// start reports the stop as the watchdog's and counts it toward the watchdog's backoff.
+    public var watchdogStallMarkerPath: String { (dataDirectory as NSString).appendingPathComponent("watchdog-stall") }
     public var lockPath: String { (dataDirectory as NSString).appendingPathComponent("daemon.lock") }
 }
 
@@ -317,7 +340,22 @@ public final class DaemonCore: @unchecked Sendable {
     private var _homes: [String]
     private let normalizerBox: LockedBox<PathNormalizer>
     private var lastRetention = Date.distantPast
+    /// Guarded by `lock`: the stored settings this build could not read in full (daemon-5). The values it
+    /// could not read (dotted paths, "*" for the whole blob) use their defaults, `storedSettings` is the
+    /// blob they are kept from when the settings are saved, and `settingsBase` what this build used for
+    /// them (a user change of one of them is saved as such).
+    private var unreadableSettings: Set<String> = []
+    private var storedSettings: Data?
+    private var settingsBase = Settings()
+    /// Guarded by `lock`: retention settings whose stored values could not be read and are not kept in the
+    /// stored blob (the whole blob was unreadable, "*"): retention waits until one of them is set again
+    /// (daemon-5), after the settings were saved anew and the daemon restarted too (`retentionHoldKey`).
+    private var retentionHold: Set<String> = []
+    /// Settings a period of retention depends on: while one is unreadable, retention waits.
+    static let retentionSettings: Set<String> = ["*", "retentionDays", "detailDays"]
     private var lastRediscovery = Date()
+    /// Guarded by `lock`: the tree's agent generation last saved (`persistAgentAncestry`).
+    private var savedAgentGeneration: UInt64?
     /// Where an operation may change a followed link, for the current classifier (files-9).
     private let linkWatch: LockedBox<LinkWatch>
     private let linkSink: LinkWatchingSink
@@ -328,15 +366,31 @@ public final class DaemonCore: @unchecked Sendable {
     private var pendingLinkChanges: [LinkChange] = []
     private var pendingLinkOverflow = false
     private var _linkRediscoveryRuns = 0
+    /// The links the classifier follows in dotfile directories (files-9).
+    let linkInventory: LinkInventory
+    /// Guarded by `lock`: when links were last searched for in full, and whether a full search that
+    /// lost events asked for is waiting for `linkFullWalkInterval` to pass.
+    private var lastFullLinkWalk = Date()
+    private var fullLinkWalkScheduled = false
     private var rulesLoadError: String?
     /// The previous instance stopped while enforcing; kept (and stored) until the next clean stop.
     private var uncleanStopNote: String?
+    /// The shortest stall the native source's handler watchdog waits for in this instance: longer after
+    /// recent watchdog exits (UncleanStops, NativeHandlerWatchdog.floor).
+    public let watchdogStallFloor: TimeInterval
     private var lastSlowWarning = Date.distantPast
 
     /// Older versions switched enforcement off on a latency trip and kept the reason here. There are
     /// no trips any more (ask mode); a leftover value is removed at start.
     static let legacyTripKey = "enforcement_trip_reason"
     static let uncleanStopKey = "unclean_stop"
+    /// The stored settings blob as it was when this build could not read all of it (daemon-5).
+    static let settingsBackupKey = "settings_backup"
+    /// Store key: the approvals an older build made for both access kinds were narrowed (daemon-1), once.
+    static let approvalsNarrowedKey = "baseline_approvals_narrowed"
+    /// Store key: the retention settings stored last could not be read (daemon-5), so retention waits
+    /// until they are set again, also after the stored settings were saved anew and the daemon restarted.
+    static let retentionHoldKey = "settings_retention_hold"
     /// Marks rules made by "block from now on" (the app localizes their names).
     public static let blockFromNowOnTemplate = "block-from-now-on"
     /// Marks allow rules made from answers to ask-mode questions ("allow once", "always allow").
@@ -377,10 +431,12 @@ public final class DaemonCore: @unchecked Sendable {
         let now = Date()
 
         try DaemonCore.prepareDataDirectory(config)
-        store = config.inMemoryStore ? InMemoryEventStore() : try SQLiteEventStore(path: config.databasePath)
+        store = config.inMemoryStore ? InMemoryEventStore()
+            : try SQLiteEventStore(path: config.databasePath, directoryOwner: config.dataDirectoryOwner)
 
         let (defaults, dir) = try DefaultData.locate(explicit: config.defaultsDirectory,
-                                                     executablePath: CommandLine.arguments.first.map(Self.absolutePath))
+                                                     executablePath: CommandLine.arguments.first.map(Self.absolutePath),
+                                                     trustedOwner: config.defaultsOwner)
         Log.debug("default data from \(dir.path)")
         defaultCatalog = defaults.catalog
         var data = defaults
@@ -400,7 +456,36 @@ public final class DaemonCore: @unchecked Sendable {
         }
         _data = data
 
-        let settings = (try? store.settings()) ?? Settings()
+        // A stored value this build cannot read (a newer build's, after going back to an older checkout)
+        // takes its default and keeps every other setting; the blob is backed up and saved settings keep
+        // that value (daemon-5). Rules get the same care (rules_backup).
+        let loaded: SettingsLoad
+        do {
+            loaded = try store.loadSettings()
+        } catch {
+            Log.error("settings could not be read (\(error)); the defaults apply until settings are saved")
+            loaded = SettingsLoad(settings: Settings(), unreadable: ["*"])
+        }
+        let settings = loaded.settings
+        if !loaded.unreadable.isEmpty, let raw = loaded.raw {
+            try? store.setValue(raw, forKey: DaemonCore.settingsBackupKey)
+            let what = loaded.unreadable == ["*"] ? "the stored settings" : "stored settings " + loaded.unreadable.joined(separator: ", ")
+            let retention = !DaemonCore.retentionSettings.isDisjoint(with: loaded.unreadable)
+                ? "; retention waits until the retention settings are set again" : ""
+            Log.error("\(what) could not be read by this version: defaults apply (a copy of the stored settings is kept as "
+                      + "\(DaemonCore.settingsBackupKey), and saving keeps the values it could not read)\(retention)")
+        }
+        unreadableSettings = Set(loaded.unreadable)
+        storedSettings = loaded.raw
+        settingsBase = settings
+        // A whole blob that could not be read holds retention until its settings are set (saveSettings);
+        // so does a hold saved before, when the blob was saved anew.
+        var hold: Set<String> = loaded.unreadable.contains("*") ? DaemonCore.retentionSettings.subtracting(["*"]) : []
+        if let saved = try? store.value(forKey: DaemonCore.retentionHoldKey) {
+            hold.formUnion((try? JSONDecoder().decode([String].self, from: saved)) ?? Array(DaemonCore.retentionSettings.subtracting(["*"])))
+            Log.warning("retention waits: the retention settings stored before could not be read; set them again to resume it")
+        }
+        retentionHold = hold
         _homes = config.homeDirectories ?? HomeDirectories.discover()
         normalizerBox = LockedBox(PathNormalizer(homeDirectories: _homes))
         detector = AgentDetector(catalog: data.agents)
@@ -409,8 +494,15 @@ public final class DaemonCore: @unchecked Sendable {
         attributor = Attributor(agents: detector)
 
         effectiveCatalog = DaemonCore.resolveOwners(data.catalog, config: config)
+        // The first build searches every dotfile directory for links.
+        let links = LinkInventory()
+        linkInventory = links
+        if !config.inMemoryStore {
+            links.walk(PathClassifier.linkWalkDirectories(catalog: effectiveCatalog, normalizer: normalizerBox.value,
+                                                          projectRoots: settings.projectRoots))
+        }
         let classifier = DaemonCore.makeClassifier(catalog: effectiveCatalog, normalizer: normalizerBox.value, settings: settings,
-                                                   resolveSymlinks: !config.inMemoryStore)
+                                                   resolveSymlinks: !config.inMemoryStore, links: links)
 
         // A store that cannot be read must not be mistaken for a fresh one: keep enforcement off and
         // never overwrite the stored rules with the templates.
@@ -438,6 +530,9 @@ public final class DaemonCore: @unchecked Sendable {
         }
         baseline = Baseline(learningStartedAt: learningStart, learningDuration: settings.learningDays * 86400,
                             entries: (try? store.loadBaseline()) ?? [])
+        // Only on rules that were read (or a fresh store's): without them nothing tells what an older build's
+        // approvals answered.
+        if rulesOK { DaemonCore.narrowLegacyApprovals(baseline, rules: ruleList, store: store) }
 
         coalescer = AlertCoalescer(window: settings.coalesceMinutes * 60, nextID: ((try? store.maxAlertID()) ?? 0) + 1)
         if let open = try? store.alerts(AlertQuery(since: now.addingTimeInterval(-settings.coalesceMinutes * 60), limit: 1000)) {
@@ -455,19 +550,27 @@ public final class DaemonCore: @unchecked Sendable {
         // deadline (kill mode), its watchdog exited it with the file handler stuck (fail-closed mode, see
         // NativeHandlerWatchdog), it crashed, or the Mac lost power. Enforcement is never switched off automatically
         // (ask mode): it stays as the user set it, and the stop is reported until the next clean stop.
+        // The watchdog also exits a daemon that only monitors (its stall marker says so): file events were
+        // lost then. Every unclean stop is counted until the next clean stop (UncleanStops), so a wedge
+        // that comes back after each restart shows as one loop with its count, first and last time.
         var unclean = (try? store.value(forKey: DaemonCore.uncleanStopKey))?.flatMap { String(data: $0, encoding: .utf8) }
+        var stops = (try? store.value(forKey: UncleanStops.key))?.flatMap { try? JSONDecoder().decode(UncleanStops.self, from: $0) }
+            ?? UncleanStops()
         var marker = stat()
-        if !config.inMemoryStore, lstat(config.authArmedMarkerPath, &marker) == 0 {
-            // unlink, not removeItem: never a recursive delete, and a link goes, not its target.
-            unlink(config.authArmedMarkerPath)
-            let note = "the previous daemon stopped while enforcing (killed for a missed AUTH deadline, exited by its watchdog "
-                + "with the event handler stuck, a crash or a power loss); "
-                + "found at start \(ISO8601DateFormatter().string(from: now))"
+        let armed = !config.inMemoryStore && lstat(config.authArmedMarkerPath, &marker) == 0
+        // unlink, not removeItem: never a recursive delete, and a link goes, not its target.
+        if armed { unlink(config.authArmedMarkerPath) }
+        let stall = config.inMemoryStore ? nil : NativeStallMarker.take(config.watchdogStallMarkerPath)
+        if armed || stall != nil {
+            stops.record(at: now, stall: stall)
+            let note = stops.note(now: now, armed: armed, stall: stall)
             unclean = note
             try? store.setValue(Data(note.utf8), forKey: DaemonCore.uncleanStopKey)
+            try? store.setValue(try? JSONEncoder().encode(stops), forKey: UncleanStops.key)
             Log.error("\(note); enforcement stays \(settings.enforcementEnabled ? "on" : "off") as set")
         }
         uncleanStopNote = unclean
+        watchdogStallFloor = stops.watchdogFloor(now: now)
         if (try? store.value(forKey: DaemonCore.legacyTripKey)) != nil {
             try? store.setValue(nil, forKey: DaemonCore.legacyTripKey)
         }
@@ -568,9 +671,18 @@ public final class DaemonCore: @unchecked Sendable {
         }
     }
 
-    static func makeClassifier(catalog: Catalog, normalizer: PathNormalizer, settings: Settings, resolveSymlinks: Bool) -> PathClassifier {
-        PathClassifier(catalog: catalog, normalizer: normalizer, projectRoots: settings.projectRoots,
-                       symlinks: resolveSymlinks ? LinkFollowingResolver() : NoSymlinkResolver())
+    /// `links`: where the links in dotfile directories come from (searched there otherwise).
+    static func makeClassifier(catalog: Catalog, normalizer: PathNormalizer, settings: Settings, resolveSymlinks: Bool,
+                               links: LinkInventory? = nil) -> PathClassifier {
+        let resolver: SymlinkResolver
+        if !resolveSymlinks {
+            resolver = NoSymlinkResolver()
+        } else if let links {
+            resolver = InventoryLinkResolver(links)
+        } else {
+            resolver = LinkFollowingResolver()
+        }
+        return PathClassifier(catalog: catalog, normalizer: normalizer, projectRoots: settings.projectRoots, symlinks: resolver)
     }
 
     /// Owner team / signing IDs from `codesign -dv` of the apps installed here (brief §3). Third-party
@@ -608,9 +720,10 @@ public final class DaemonCore: @unchecked Sendable {
 
     static let maxListedAsks = 200
 
-    /// A settings update whose only change is turning "trust Apple programs" off (strengthening).
+    /// A settings update whose only change is turning "trust Apple programs" off (strengthening). Also
+    /// when it is off already: then it changes nothing (an idempotent `settings set trust-apple off`, ipc-3).
     static func onlyTurnsOffAppleTrust(_ new: Settings, current: Settings) -> Bool {
-        guard current.trustApplePrograms, !new.trustApplePrograms else { return false }
+        guard !new.trustApplePrograms else { return false }
         var c = current
         c.trustApplePrograms = false
         // Enforcement and pause are taken from the current settings by updateSettings anyway.
@@ -633,8 +746,17 @@ public final class DaemonCore: @unchecked Sendable {
             try answer(scope, action: action, peer: peer, privileged: privileged)
         }
         // An unprivileged answer (deny, block from now on) leaves the alerts open, as `apply` does.
-        if privileged { try resolveAskAlerts(answering: scope, action: action) }
+        if privileged {
+            do { try resolveAskAlerts(answering: scope, action: action) } catch { throw DaemonCore.alertsNotUpdated(error) }
+        }
         Log.info("question #\(id): \(action.rawValue) by pid \(peer.pid.map(String.init) ?? "?") (uid \(peer.euid.map(String.init) ?? "?"))")
+    }
+
+    /// The answer took effect (rule, setting, held accesses), but marking its alerts handled failed:
+    /// said as such, since a plain error reads as if the answer had been refused.
+    static func alertsNotUpdated(_ error: Error) -> IPCError {
+        Log.error("answer applied, but its alerts could not be updated: \(error)")
+        return IPCError(.internalError, "answer applied, but its alerts could not be updated: \(error)")
     }
 
     /// What an answer applies to: from a question, or from an alert (Alerts tab, monitor-only mode).
@@ -650,8 +772,9 @@ public final class DaemonCore: @unchecked Sendable {
         }
 
         init(_ a: Alert) {
+            // The whole chain's agents (the stored chain keeps the nearest 64 links only).
             key = AskKey(responsibleKey: a.responsible.key, categoryID: a.categoryID, access: a.accesses,
-                         chainAgents: Array(Set(a.chain.compactMap(\.agentID))))
+                         chainAgents: a.scopeAgents, ancestryKnown: a.ancestryKnown ?? true)
             responsible = a.responsible
             appleProgram = a.appleProgram
         }
@@ -662,11 +785,13 @@ public final class DaemonCore: @unchecked Sendable {
         var ruleAccess: RuleAccess { key.access == .read ? .read : (key.access == .write ? .write : .any) }
 
         /// An allow rule saved from this answer covers `other` (same subject and pins, category, an
-        /// access it includes, only agents it names: Rule.chainAgents).
+        /// access it includes, only agents it names: Rule.chainAgents; a chain of unknown ancestry only
+        /// if this answer was given for one: Rule.coversUnknownAncestry).
         func allowCovers(_ other: AnswerScope) -> Bool {
             other.key.responsibleKey == key.responsibleKey && other.key.categoryID == key.categoryID
                 && !other.key.access.isEmpty && other.key.access.isSubset(of: key.access)
                 && Set(other.key.chainAgents).isSubset(of: Set(key.chainAgents))
+                && (other.key.ancestryKnown || !key.ancestryKnown)
                 && (responsible.teamID == nil || other.responsible.teamID == responsible.teamID)
                 && (cdhashPin == nil || other.responsible.cdhash?.lowercased() == cdhashPin?.lowercased())
         }
@@ -725,9 +850,17 @@ public final class DaemonCore: @unchecked Sendable {
     /// The allow rule for "allow once" (10 minutes) or "always allow": the app or agent, the category,
     /// the access, scoped to the AI agents that were in the chain.
     private func addAnswerRule(_ scope: AnswerScope, once: Bool, peer: IPCPeer, now: Date) throws {
+        guard let edit = try answerRuleEdit(scope, once: once, now: now) else { return }
+        try saveRuleChange(peer: peer, privileged: true, edit)
+    }
+
+    /// The change to the rule list that `addAnswerRule` saves (nil: nothing to save). Also tried on a
+    /// copy first where something else would be saved before it, so that a refusal (the rule limit)
+    /// leaves nothing changed.
+    private func answerRuleEdit(_ scope: AnswerScope, once: Bool, now: Date) throws -> ((inout [Rule]) throws -> Void)? {
         // An alert about metadata-only opens (neither read nor write): nothing to allow, and the rule
         // would be `.any` (read and write).
-        guard !scope.key.access.isEmpty else { return }
+        guard !scope.key.access.isEmpty else { return nil }
         let categoryID = scope.key.categoryID
         guard data.catalog.category(categoryID) != nil else {
             throw IPCError(.invalid, "category \(categoryID) is no longer in the catalog")
@@ -741,13 +874,14 @@ public final class DaemonCore: @unchecked Sendable {
                                        maxBytes: DaemonCore.maxNameBytes),
             enabled: true, target: .category(categoryID), subject: subject, access: scope.ruleAccess, action: .allow,
             expiresAt: once ? now.addingTimeInterval(DaemonCore.allowOnceDuration) : nil, createdAt: now,
-            template: DaemonCore.askAnswerTemplate, chainAgents: scope.key.chainAgents)
+            template: DaemonCore.askAnswerTemplate, chainAgents: scope.key.chainAgents,
+            coversUnknownAncestry: !scope.key.ancestryKnown)
         try DaemonCore.validate(rule)
         func sameScope(_ x: Rule) -> Bool {
             x.template == DaemonCore.askAnswerTemplate && x.action == .allow && x.target == rule.target && x.subject == rule.subject
-                && x.access == rule.access && x.chainAgents == rule.chainAgents
+                && x.access == rule.access && x.chainAgents == rule.chainAgents && x.coversUnknownAncestry == rule.coversUnknownAncestry
         }
-        try saveRuleChange(peer: peer, privileged: true) { list in
+        return { list in
             // Answers expire: drop the dead ones, and the earlier "allow once" this one replaces.
             list.removeAll { $0.template == DaemonCore.askAnswerTemplate && ($0.expiresAt.map { $0 <= now } ?? false) }
             if once {
@@ -794,19 +928,49 @@ public final class DaemonCore: @unchecked Sendable {
 
     /// Marks the open `ask` alerts an answer settles as resolved (privileged answers only).
     private func resolveAskAlerts(answering scope: AnswerScope, action: AlertAction, except: Int64? = nil) throws {
-        writer.flush()
+        writer.flushNow()
         let open = try store.alerts(AlertQuery(statuses: [.unread, .read], limit: 10_000))
         let settled = open.filter { $0.kind == .ask && $0.id != except && scope.settles(AnswerScope($0), action: action) }
-        guard !settled.isEmpty else { return }
-        let updated = settled.map { a -> Alert in
-            var a = a
-            a.status = .resolved
-            a.resolution = action
-            return a
+        try setAlertStatus(settled, to: .resolved, resolution: action)
+    }
+
+    /// Gives the alerts the user acted on (`acted`, as read from the store) a new status, each only if it
+    /// did not escalate since (daemon-3): one that did (the same app now writing a key, say) stays unread,
+    /// to be seen. The eslogger reader keeps ingesting meanwhile, so the change is made on the coalescer's
+    /// open copy and queued while no event can be merged in between; that is all the ingestion lock is
+    /// held for (every file event waits on it). An alert whose window closed takes no event any more: its
+    /// last snapshot, if still queued, is written first, then its stored copy is read again and changed.
+    /// Never a copy read earlier written over a newer one. Returns the alerts changed.
+    @discardableResult
+    private func setAlertStatus(_ acted: [Alert], to status: AlertStatus, resolution: AlertAction?) throws -> [Alert] {
+        guard !acted.isEmpty else { return [] }
+        let (open, closed) = pipeline.whileIngestionHeld { () -> ([Alert], [Alert]) in
+            var open: [Alert] = []
+            var closed: [Alert] = []
+            for (seen, change) in zip(acted, coalescer.setStatus(of: acted, to: status, resolution: resolution)) {
+                switch change {
+                case .changed(let a): open.append(a)
+                case .escalated: continue
+                case .notOpen: closed.append(seen)
+                }
+            }
+            // It replaces an older snapshot the writer may hold, and is retried if the write fails.
+            if !open.isEmpty { writer.enqueue(alerts: open) }
+            return (open, closed)
         }
-        try store.upsert(updated)
-        writer.enqueue(alerts: updated)
-        for a in updated { coalescer.updateStatus(alertID: a.id, status: .resolved, resolution: action) }
+        try writer.flushOrThrow()
+        guard !closed.isEmpty else { return open }
+        var current: [Int64: Alert] = [:]
+        for a in try store.alerts(ids: closed.map(\.id)) { current[a.id] = a }
+        var changed: [Alert] = []
+        for seen in closed {
+            guard var a = current[seen.id], a.firstEventID == seen.firstEventID else { continue }
+            a.status = status
+            a.resolution = resolution
+            changed.append(a)
+        }
+        if !changed.isEmpty { try store.upsert(changed) }
+        return open + changed
     }
 
     /// Releases the held accesses "trust Apple programs" now allows (the setting was just turned on).
@@ -819,6 +983,7 @@ public final class DaemonCore: @unchecked Sendable {
     public func noteCleanStop() {
         lock.lock(); uncleanStopNote = nil; lock.unlock()
         try? store.setValue(nil, forKey: DaemonCore.uncleanStopKey)
+        try? store.setValue(nil, forKey: UncleanStops.key)
     }
 
     /// Waits until enforcement observers queued so far have run (tests).
@@ -921,13 +1086,14 @@ public final class DaemonCore: @unchecked Sendable {
     /// question.
     public func apply(action: AlertAction, toAlert id: Int64, peer: IPCPeer, privileged: Bool = true) throws {
         mutation.lock(); defer { mutation.unlock() }
-        writer.flush()
-        guard var alert = try store.alert(id: id) else { throw IPCError(.notFound, "no alert #\(id)") }
+        writer.flushNow()
+        guard let alert = try store.alert(id: id) else { throw IPCError(.notFound, "no alert #\(id)") }
         let now = Date()
         let scope = AnswerScope(alert)
         let r = alert.responsible
         let subject = RuleSubject.responsible(key: r.key, teamID: r.teamID, cdhash: scope.cdhashPin)
         let chainAgents = scope.key.chainAgents
+        let unknownAncestry = !scope.key.ancestryKnown
         let access = scope.ruleAccess
         // The action answered as a question would be (rule, setting, held accesses released or denied).
         var answered = true
@@ -942,7 +1108,8 @@ public final class DaemonCore: @unchecked Sendable {
                 // firstPath is the access that made the alert "blocked" (the coalescer moves it on escalation).
                 try addException(toRule: ruleID, RuleException(
                     subject: subject, pathPrefix: alert.firstPath, categoryID: alert.categoryID, access: access,
-                    chainAgents: chainAgents, expiresAt: now.addingTimeInterval(600), remainingUses: 1, createdAt: now))
+                    chainAgents: chainAgents, coversUnknownAncestry: unknownAncestry, expiresAt: now.addingTimeInterval(600),
+                    remainingUses: 1, createdAt: now))
                 // A rule's block: the path-scoped, one-use exception is the whole answer. A category-wide
                 // 10-minute allow rule would also let through files the deny rule does not cover, which
                 // would otherwise be asked. (A rule denial never has an open question to release.)
@@ -953,11 +1120,22 @@ public final class DaemonCore: @unchecked Sendable {
         case .alwaysAllow:
             guard privileged else { throw IPCError(.notPermitted, "allowing weakens protection: run it with sudo, or use the WhoRead app") }
             if let ruleID = alert.ruleID, alert.kind == .blocked || alert.kind == .wouldBlock {
+                // The answer rule saved below must fit (the rule limit): otherwise nothing changes, not
+                // the exception alone.
+                if let edit = try answerRuleEdit(scope, once: false, now: now) {
+                    var trial = rules.rules
+                    try edit(&trial)
+                }
                 try addException(toRule: ruleID, RuleException(subject: subject, categoryID: alert.categoryID, access: access,
-                                                               chainAgents: chainAgents, createdAt: now))
+                                                               chainAgents: chainAgents, coversUnknownAncestry: unknownAncestry,
+                                                               createdAt: now))
             }
             try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
-            baseline.approve(responsibleKey: r.key, categoryID: alert.categoryID, at: now)
+            // What the alert covered, as the answer rule: a read approval does not answer a write (daemon-1).
+            // An AI agent's approval is its team's (ResponsibleEntity.baselineKey, attribution-2).
+            for kind in alert.accesses.kinds {
+                baseline.approve(responsibleKey: r.baselineKey, categoryID: alert.categoryID, access: kind, at: now)
+            }
             persistBaseline()
         case .blockFromNowOn, .trustApplePrograms:
             try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
@@ -969,13 +1147,17 @@ public final class DaemonCore: @unchecked Sendable {
             answered = false
         }
         if privileged {
-            alert.status = .resolved
-            alert.resolution = action
-            try store.upsert([alert])
-            // Replaces a stale snapshot the writer may have re-queued after a failed flush.
-            writer.enqueue(alerts: [alert])
-            coalescer.updateStatus(alertID: id, status: .resolved, resolution: action)
-            if answered { try resolveAskAlerts(answering: scope, action: action, except: id) }
+            do {
+                // The alert as read above, unless it escalated meanwhile (daemon-3).
+                if try setAlertStatus([alert], to: .resolved, resolution: action).isEmpty {
+                    Log.info("alert #\(id) escalated while \(action.rawValue) was applied: it stays unread")
+                }
+                if answered { try resolveAskAlerts(answering: scope, action: action, except: id) }
+            } catch {
+                // "Ignore" (and "keep blocking" on a block) change nothing else: then nothing changed.
+                guard action == .ignore || (action == .keepBlocking && !answered) else { throw DaemonCore.alertsNotUpdated(error) }
+                throw error
+            }
         }
         Log.info("alert #\(id): \(action.rawValue) by pid \(peer.pid.map(String.init) ?? "?") (uid \(peer.euid.map(String.init) ?? "?"))")
     }
@@ -992,17 +1174,12 @@ public final class DaemonCore: @unchecked Sendable {
     }
 
     public func markRead(_ ids: [Int64]?, peer: IPCPeer = .inProcess) throws {
-        writer.flush()
+        // As every other status change: one at a time, on what was read (an escalation since stays unread).
+        mutation.lock(); defer { mutation.unlock() }
+        writer.flushNow()
         Log.info("alerts \(ids.map { $0.map(String.init).joined(separator: ",") } ?? "all") marked read by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         let targets = try store.alerts(AlertQuery(statuses: [.unread], limit: 10_000)).filter { ids == nil || ids!.contains($0.id) }
-        let updated = targets.map { a -> Alert in
-            var a = a
-            a.status = .read
-            return a
-        }
-        try store.upsert(updated)
-        writer.enqueue(alerts: updated)
-        for a in updated { coalescer.updateStatus(alertID: a.id, status: .read, resolution: nil) }
+        try setAlertStatus(targets, to: .read, resolution: nil)
     }
 
     // MARK: - Rules
@@ -1180,10 +1357,15 @@ public final class DaemonCore: @unchecked Sendable {
         // only extend monitoring to its own files: inside a home or on an external volume, never
         // system paths (a deny rule there would block every user's processes once enforcement is on).
         // Checked on the spelling and on what it resolves to on disk, as the classifier follows links:
-        // `~/link -> /usr/lib` and `/Volumes/Macintosh HD/usr/lib` are system paths.
+        // `~/link -> /usr/lib` and `/Volumes/Macintosh HD/usr/lib` are system paths. Its own home is the
+        // peer's, never every home the daemon monitors (ipc-2): another user's folders are not its files
+        // (and `~/…` expands to every monitored home).
         if !privileged {
+            guard let euid = peer.euid, let home = config.homeOf(euid) else {
+                throw IPCError(.notPermitted, "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app")
+            }
             let resolver = RealpathSymlinkResolver()
-            let homeDirs = c.normalizer.homeDirectories
+            let homeDirs = [c.normalizer.normalize(home)]
             let homes = (homeDirs + homeDirs.compactMap(resolver.resolve)).map { h in PathNormalizer.fold(h.hasSuffix("/") ? h : h + "/") }
             func isOwn(_ path: String) -> Bool {
                 let k = PathNormalizer.fold(c.normalizer.normalize(path))
@@ -1194,7 +1376,13 @@ public final class DaemonCore: @unchecked Sendable {
                 return isOwn(resolved)
             }
             guard own else {
-                throw IPCError(.notPermitted, "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app")
+                var message = "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app"
+                if p.hasPrefix("~/") && expanded.count > 1 {
+                    // `~/` is every monitored home here: the same path in the peer's own home is allowed.
+                    let mine = (home.hasSuffix("/") ? String(home.dropLast()) : home) + p.dropFirst()
+                    message += ". On this Mac ~/ stands for every user's home; for your own files write it as \(mine)"
+                }
+                throw IPCError(.notPermitted, message)
             }
         }
         var catalog = data.catalog
@@ -1257,6 +1445,11 @@ public final class DaemonCore: @unchecked Sendable {
     public func update(settings new: Settings, peer: IPCPeer, reenable: Bool = false) throws {
         mutation.lock(); defer { mutation.unlock() }
         let s = new.validated()
+        // Before anything is applied, the project roots this update adds (cli-1). Only those: roots stored
+        // before must neither block a kill switch or a pause (they come through here too) nor their removal.
+        for root in Set(s.projectRoots).subtracting(currentSettings.projectRoots).sorted() {
+            try checkProjectRoot(root)
+        }
         lock.lock()
         let old = settings
         settings = s
@@ -1290,11 +1483,107 @@ public final class DaemonCore: @unchecked Sendable {
             Log.info("settings changed (\(changed.joined(separator: ", "))) by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         }
         do {
-            try store.saveSettings(s)
+            try saveSettings(s)
         } catch {
             Log.error("settings applied but not saved: \(error)")
             throw IPCError(.internalError, "settings applied but not saved: \(error)")
         }
+    }
+
+    /// Stores `s`. While the stored blob holds values this build could not read (daemon-5), each of them
+    /// is saved again as it was stored unless the user changed that setting: the build that wrote it
+    /// reads it back, and this one keeps using the default. Called under the mutation lock.
+    private func saveSettings(_ s: Settings) throws {
+        lock.lock()
+        let unreadable = unreadableSettings
+        let stored = storedSettings
+        let base = settingsBase
+        var hold = retentionHold
+        lock.unlock()
+        var blob = try JSONEncoder().encode(s)
+        var keep: Set<String> = []
+        let retention = DaemonCore.retentionSettings.subtracting(["*"])
+        if !unreadable.isEmpty || !hold.isEmpty,
+           var fresh = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],
+           let was = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(base)) as? [String: Any] {
+            func unchanged(_ keys: [String]) -> Bool {
+                DaemonCore.sameJSON(DaemonCore.jsonValue(keys, in: fresh), DaemonCore.jsonValue(keys, in: was))
+            }
+            if let stored, let old = try? JSONSerialization.jsonObject(with: stored) as? [String: Any] {
+                for path in unreadable where path != "*" {
+                    let keys = path.split(separator: ".").map(String.init)
+                    // Changed by the user: their value is saved.
+                    guard unchanged(keys), let value = DaemonCore.jsonValue(keys, in: old) else { continue }
+                    DaemonCore.setJSONValue(value, keys, in: &fresh)
+                    keep.insert(path)
+                }
+            }
+            // Nothing of a whole unreadable blob can be kept, but retention keeps waiting: this save may be a
+            // pause, a kill switch or a console user's, not the user setting the retention again. Setting one
+            // of its settings resumes it.
+            if unreadable.contains("*") { hold.formUnion(retention) }
+            if retention.contains(where: { !unchanged([$0]) }) { hold = [] }
+            if !keep.isEmpty { blob = try JSONSerialization.data(withJSONObject: fresh, options: [.sortedKeys]) }
+        }
+        // Settings that could not be read at the start were not backed up then: before they are replaced.
+        if unreadable.contains("*") && stored == nil, let current = try? store.value(forKey: "settings"),
+           (try? store.value(forKey: DaemonCore.settingsBackupKey)) == nil {
+            try store.setValue(current, forKey: DaemonCore.settingsBackupKey)
+        }
+        if !hold.isEmpty {
+            try store.setValue(try JSONEncoder().encode(hold.sorted()), forKey: DaemonCore.retentionHoldKey)
+        }
+        try store.setValue(blob, forKey: "settings")
+        if hold.isEmpty { try store.setValue(nil, forKey: DaemonCore.retentionHoldKey) }
+        lock.lock()
+        unreadableSettings = keep
+        storedSettings = keep.isEmpty ? nil : blob
+        settingsBase = s
+        retentionHold = hold
+        lock.unlock()
+    }
+
+    static func jsonValue(_ keys: [String], in object: [String: Any]) -> Any? {
+        guard let first = keys.first else { return nil }
+        guard keys.count > 1 else { return object[first] }
+        return (object[first] as? [String: Any]).flatMap { jsonValue(Array(keys.dropFirst()), in: $0) }
+    }
+
+    static func setJSONValue(_ value: Any, _ keys: [String], in object: inout [String: Any]) {
+        guard let first = keys.first else { return }
+        guard keys.count > 1 else {
+            object[first] = value
+            return
+        }
+        var inner = object[first] as? [String: Any] ?? [:]
+        setJSONValue(value, Array(keys.dropFirst()), in: &inner)
+        object[first] = inner
+    }
+
+    static func sameJSON(_ a: Any?, _ b: Any?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?): return (x as? NSObject)?.isEqual(y) ?? false
+        default: return false
+        }
+    }
+
+    /// A project root the classifier can monitor (absolute or `~/…`, see PathNormalizer.expand), spelled
+    /// without control characters, `.` or `..`, and not a whole disk, home or folder of homes (which
+    /// would make every .env, .pem and .key there "project secrets"). Refused as invalid, never dropped:
+    /// a root that monitors nothing must not look stored (cli-1).
+    func checkProjectRoot(_ p: String) throws {
+        guard DaemonCore.isCleanPath(p) else {
+            throw IPCError(.invalid, "project root \(p.debugDescription) contains control characters")
+        }
+        let components = PathNormalizer.components(p)
+        guard !components.contains("."), !components.contains("..") else {
+            throw IPCError(.invalid, "project root \(p) must not contain . or .. components")
+        }
+        guard !normalizer.expand(p).isEmpty else {
+            throw IPCError(.invalid, "project root \(p): use an absolute path or ~/…")
+        }
+        if let reason = tooBroad(p) { throw IPCError(.invalid, "project root \(p) is \(reason)") }
     }
 
     /// Read-modify-write of the settings under the mutation lock (two clients toggling different
@@ -1336,7 +1625,7 @@ public final class DaemonCore: @unchecked Sendable {
         let resolved = DaemonCore.resolveOwners(c, config: config)
         let s = currentSettings
         let candidate = DaemonCore.makeClassifier(catalog: resolved, normalizer: normalizerBox.value, settings: s,
-                                                  resolveSymlinks: !config.inMemoryStore)
+                                                  resolveSymlinks: !config.inMemoryStore, links: linkInventory)
         let current = analyzer.classifier
         let orphaned = rules.rules.filter { r in
             guard r.enabled, case .pathPrefix(let p) = r.target else { return false }
@@ -1374,7 +1663,7 @@ public final class DaemonCore: @unchecked Sendable {
         let s = settings
         lock.unlock()
         let c = DaemonCore.makeClassifier(catalog: catalog, normalizer: normalizerBox.value, settings: s,
-                                          resolveSymlinks: !config.inMemoryStore)
+                                          resolveSymlinks: !config.inMemoryStore, links: linkInventory)
         install(classifier: c, readdir: s.readdirEnabled)
     }
 
@@ -1388,11 +1677,25 @@ public final class DaemonCore: @unchecked Sendable {
     /// Homes come and go (new users, network homes) and symlinks inside monitored directories change
     /// (dotfile managers). Rebuilds the classifier only when the monitored set actually changed.
     /// `includingHomes: false` (a link may have changed, files-9) skips the user database.
-    func rediscover(includingHomes: Bool = true) {
+    /// `fullLinkWalk` (default: with the homes) searches the dotfile directories for links again;
+    /// otherwise the rebuild re-reads the links already known (LinkInventory).
+    func rediscover(includingHomes: Bool = true, fullLinkWalk: Bool? = nil) {
         // Discovery reads the user database without any lock; the rebuild runs under the mutation
         // lock so it cannot install a classifier built from a catalog or settings that a concurrent
         // update(catalog:) / update(settings:) has just replaced.
         let found = includingHomes && config.homeDirectories == nil ? HomeDirectories.discover() : nil
+        if fullLinkWalk ?? includingHomes, !config.inMemoryStore {
+            // Outside the mutation lock too: answering a question takes it, and a walk reads the disk.
+            lock.lock()
+            let catalog = effectiveCatalog
+            let s = settings
+            lock.unlock()
+            let normalizer = found.map { PathNormalizer(homeDirectories: $0) } ?? normalizerBox.value
+            linkInventory.walk(PathClassifier.linkWalkDirectories(catalog: catalog, normalizer: normalizer, projectRoots: s.projectRoots))
+            lock.lock()
+            lastFullLinkWalk = Date()
+            lock.unlock()
+        }
         mutation.lock(); defer { mutation.unlock() }
         if let found {
             lock.lock()
@@ -1409,7 +1712,7 @@ public final class DaemonCore: @unchecked Sendable {
         let s = settings
         lock.unlock()
         let candidate = DaemonCore.makeClassifier(catalog: catalog, normalizer: normalizerBox.value, settings: s,
-                                                  resolveSymlinks: !config.inMemoryStore)
+                                                  resolveSymlinks: !config.inMemoryStore, links: linkInventory)
         rediscoveryHook?()
         let current = analyzer.classifier
         if candidate.mutePaths != current.mutePaths || candidate.prefixes != current.prefixes || candidate.ancestors != current.ancestors {
@@ -1433,9 +1736,8 @@ public final class DaemonCore: @unchecked Sendable {
     /// a directory searched for links, may have added, replaced or removed a link the classifier
     /// follows: ES then reports accesses at a target that is not monitored until links are
     /// re-discovered. Instead of waiting up to `rediscoveryInterval`, the paths are looked at
-    /// `linkRediscoveryDelay` later, off the event path, and links are re-discovered when one of them
-    /// is a link now or was a followed one (coalesced: one look per delay at most, which bounds the
-    /// cost of a flood).
+    /// `linkRediscoveryDelay` later, off the event path (coalesced: one look per delay at most, which
+    /// bounds the cost of a flood). See `lookAtLinkChanges`.
     func noteFileOperation(_ activity: FileActivity) {
         switch activity.operation {
         case .create, .rename, .clone, .copyfile, .link, .unlink: break
@@ -1448,43 +1750,112 @@ public final class DaemonCore: @unchecked Sendable {
         }
         guard !changes.isEmpty else { return }
         lock.lock()
-        // Bounded: past that, links are re-discovered without looking at each path.
-        if pendingLinkChanges.count + changes.count > 64 { pendingLinkOverflow = true } else { pendingLinkChanges += changes }
+        // Bounded: past that, links are searched for in full without looking at each path.
+        if pendingLinkChanges.count + changes.count > DaemonCore.maxPendingLinkChanges {
+            pendingLinkOverflow = true
+        } else {
+            pendingLinkChanges += changes
+        }
         guard !linkRediscoveryPending else { lock.unlock(); return }
         linkRediscoveryPending = true
         let generation = linkRediscoveryGeneration
         lock.unlock()
         linkQueue.asyncAfter(deadline: .now() + config.linkRediscoveryDelay) { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            guard generation == self.linkRediscoveryGeneration else { self.lock.unlock(); return }
-            // Taken before the walk: a link that changes during it schedules another look. The next one
-            // starts a delay after this one at least (the queue is serial, so runs never overlap).
-            self.linkRediscoveryPending = false
-            let changes = self.pendingLinkChanges
-            let overflow = self.pendingLinkOverflow
-            self.pendingLinkChanges.removeAll()
-            self.pendingLinkOverflow = false
-            self.lock.unlock()
-            let classifier = self.analyzer.classifier
-            guard overflow || changes.contains(where: { DaemonCore.mayChangeLinks($0, classifier: classifier) }) else { return }
-            self.rediscover(includingHomes: false)
-            self.lock.lock()
-            self._linkRediscoveryRuns += 1
-            self.lock.unlock()
+            self?.lookAtLinkChanges(generation: generation)
         }
+    }
+
+    /// Link changes kept for one look; past that, a full search for links follows.
+    static let maxPendingLinkChanges = 64
+    /// Entries one look reads in directories moved or copied into a searched directory; past that, a
+    /// full search for links follows.
+    static let linkLookBudget = 20_000
+
+    /// On `linkQueue`. The links the noted paths show are added to the LinkInventory: a link created
+    /// there (at any depth: the full search stops at PathClassifier.linkWalkMaxDepth), or the links in
+    /// a directory moved or copied in. Then the classifier is rebuilt from the links already known,
+    /// without searching the directories again, if any path was a followed link or held one, is a link
+    /// now, is a directory moved or copied in, or was made on the way to a link's target. A full search
+    /// runs only when changes were lost, at most once per `linkFullWalkInterval`.
+    private func lookAtLinkChanges(generation: Int) {
+        lock.lock()
+        guard generation == linkRediscoveryGeneration else { lock.unlock(); return }
+        // Taken before the look: a link that changes during it schedules another look. The next one
+        // starts a delay after this one at least (the queue is serial, so runs never overlap).
+        linkRediscoveryPending = false
+        let changes = pendingLinkChanges
+        var overflow = pendingLinkOverflow
+        pendingLinkChanges.removeAll()
+        pendingLinkOverflow = false
+        let sinceFullWalk = Date().timeIntervalSince(lastFullLinkWalk)
+        lock.unlock()
+        let classifier = analyzer.classifier
+        let watch = linkWatch.value
+        var changed = false
+        var budget = DaemonCore.linkLookBudget
+        for change in changes where DaemonCore.mayChangeLinks(change, classifier: classifier, watch: watch) {
+            changed = true
+            var st = stat()
+            guard change.role != .source, change.operation != .unlink, lstat(change.path, &st) == 0 else { continue }
+            switch st.st_mode & S_IFMT {
+            case S_IFLNK:
+                linkInventory.report([change.path])
+            case S_IFDIR where change.operation != .create:
+                let found = LinkFollowingResolver.links(under: change.path, maxDepth: PathClassifier.linkWalkMaxDepth,
+                                                        maxEntries: max(0, budget))
+                budget -= found.visited
+                if budget <= 0 { overflow = true }
+                linkInventory.report(found.links)
+            default:
+                break
+            }
+        }
+        if overflow && sinceFullWalk < config.linkFullWalkInterval {
+            // Too soon after the last full search: it runs when the interval is over. Meanwhile the
+            // links already known (and those found now) are followed.
+            overflow = false
+            lock.lock()
+            let schedule = !fullLinkWalkScheduled
+            fullLinkWalkScheduled = true
+            lock.unlock()
+            if schedule {
+                linkQueue.asyncAfter(deadline: .now() + (config.linkFullWalkInterval - sinceFullWalk)) { [weak self] in
+                    self?.runScheduledFullLinkWalk(generation: generation)
+                }
+            }
+        }
+        guard overflow || changed else { return }
+        rediscover(includingHomes: false, fullLinkWalk: overflow)
+        lock.lock()
+        _linkRediscoveryRuns += 1
+        lock.unlock()
+    }
+
+    /// On `linkQueue`: the full search for links that lost changes asked for.
+    private func runScheduledFullLinkWalk(generation: Int) {
+        lock.lock()
+        guard generation == linkRediscoveryGeneration, fullLinkWalkScheduled else { lock.unlock(); return }
+        fullLinkWalkScheduled = false
+        lock.unlock()
+        rediscover(includingHomes: false, fullLinkWalk: true)
+        lock.lock()
+        _linkRediscoveryRuns += 1
+        lock.unlock()
     }
 
     /// Whether `change` may have changed what the classifier follows: the path was a followed link (or
     /// held one) and was removed, replaced or moved away; or what is there now is a link, or a directory
-    /// moved or copied in (it may hold links). A regular file saved by rename, or a new directory, is not.
-    static func mayChangeLinks(_ change: LinkChange, classifier: PathClassifier) -> Bool {
+    /// moved or copied in (it may hold links), or anything made on the way to a link's target that did
+    /// not exist (the target's real spelling can be read now). A regular file saved by rename, or a new
+    /// directory elsewhere, is not.
+    static func mayChangeLinks(_ change: LinkChange, classifier: PathClassifier, watch: LinkWatch? = nil) -> Bool {
         if !classifier.linkAliases(of: change.path, limit: 1).isEmpty { return true }
         if change.role == .source || change.operation == .unlink { return false }
         var st = stat()
         guard lstat(change.path, &st) == 0 else { return false }
         let type = st.st_mode & S_IFMT
-        return type == S_IFLNK || (type == S_IFDIR && change.operation != .create)
+        if type == S_IFLNK || (type == S_IFDIR && change.operation != .create) { return true }
+        return watch?.isOnTheWayToALinkTarget(change.path) ?? false
     }
 
     /// Drops a scheduled link rediscovery (the daemon is stopping).
@@ -1494,6 +1865,7 @@ public final class DaemonCore: @unchecked Sendable {
         linkRediscoveryPending = false
         pendingLinkChanges.removeAll()
         pendingLinkOverflow = false
+        fullLinkWalkScheduled = false
         lock.unlock()
     }
 
@@ -1553,6 +1925,38 @@ public final class DaemonCore: @unchecked Sendable {
 
     // MARK: - Maintenance & status
 
+    /// daemon-1, once (`approvalsNarrowedKey`): approvals an older build made for both access kinds where
+    /// the "always allow" rule saved with them allowed one (`Baseline.narrowLegacyApprovals`). Saved before
+    /// it is marked done; a store that cannot be read or written leaves it for the next start.
+    static func narrowLegacyApprovals(_ baseline: Baseline, rules: [Rule], store: EventStore) {
+        do {
+            guard try store.value(forKey: approvalsNarrowedKey) == nil else { return }
+        } catch {
+            Log.error("could not read whether older approvals were narrowed: \(error)")
+            return
+        }
+        var answered: [String: (kinds: Set<AccessKind>, since: Date)] = [:]
+        for r in rules where r.template == askAnswerTemplate && r.action == .allow && r.expiresAt == nil {
+            guard case .category(let categoryID) = r.target, case .responsible(let key, _, _, _) = r.subject else { continue }
+            let kinds: Set<AccessKind> = r.access == .read ? [.read] : (r.access == .write ? [.write] : Set(AccessKind.allCases))
+            let k = key + "\u{0}" + categoryID
+            let earlier = answered[k]
+            answered[k] = (kinds.union(earlier?.kinds ?? []), min(r.createdAt, earlier?.since ?? r.createdAt))
+        }
+        let revoked = baseline.narrowLegacyApprovals { answered[$0 + "\u{0}" + $1] }
+        let dirty = baseline.takeDirty()
+        do {
+            if !dirty.isEmpty { try store.saveBaseline(dirty) }
+            try store.setValue(Data("1".utf8), forKey: approvalsNarrowedKey)
+            if revoked > 0 {
+                Log.info("baseline: \(revoked) approvals an older version made for an access kind its \"always allow\" did not cover were taken back")
+            }
+        } catch {
+            baseline.markDirty(dirty.map(\.0))
+            Log.error("could not save the narrowed approvals (\(error)); tried again at the next start")
+        }
+    }
+
     public func persistBaseline() {
         let dirty = baseline.takeDirty()
         guard !dirty.isEmpty else { return }
@@ -1563,6 +1967,62 @@ public final class DaemonCore: @unchecked Sendable {
             baseline.markDirty(dirty.map(\.0))
             Log.error("baseline save failed: \(error)")
         }
+    }
+
+    /// Store key of the AI agent ancestry of running processes, restored at the next start.
+    static let agentAncestryKey = "agentAncestry"
+
+    struct StoredAgentAncestry: Codable {
+        /// kern.boottime when saved: after a reboot none of these processes exist.
+        var bootTime: Date?
+        var records: [AgentAncestryRecord]
+    }
+
+    /// At most this much is saved (long executable paths): the oldest records are kept.
+    static let maxAgentAncestryBytes = 512 * 1024
+
+    /// Saves the AI agent ancestry of running processes (ProcessTree.agentAncestry) when it changed, so
+    /// a restart does not lose the agent of a job whose shell has exited. Called every few seconds and
+    /// at stop; never on the ES callback thread.
+    public func persistAgentAncestry(bootTime: Date? = DaemonCore.bootTime()) {
+        let generation = tree.agentAncestryGeneration
+        lock.lock(); let unchanged = savedAgentGeneration == generation; lock.unlock()
+        guard !unchanged else { return }
+        do {
+            var stored = StoredAgentAncestry(bootTime: bootTime, records: tree.agentAncestry())
+            var data = try JSONEncoder().encode(stored)
+            while data.count > DaemonCore.maxAgentAncestryBytes && !stored.records.isEmpty {
+                stored.records.removeLast((stored.records.count + 1) / 2)
+                data = try JSONEncoder().encode(stored)
+            }
+            try store.setValue(data, forKey: DaemonCore.agentAncestryKey)
+            lock.lock(); savedAgentGeneration = generation; lock.unlock()
+        } catch {
+            Log.error("saving the AI agent ancestry of running processes failed: \(error)")
+        }
+    }
+
+    /// Right after the tree is seeded at start: gives running processes the AI agents they had before.
+    /// Records saved before the last boot are ignored (should a pid and start time match by chance);
+    /// where either boot time is unknown, pid and start time alone decide.
+    public func restoreAgentAncestry(now: Date = Date(), bootTime: Date? = DaemonCore.bootTime()) {
+        guard let data = try? store.value(forKey: DaemonCore.agentAncestryKey),
+              let stored = try? JSONDecoder().decode(StoredAgentAncestry.self, from: data) else { return }
+        if let saved = stored.bootTime, let boot = bootTime, abs(saved.timeIntervalSince(boot)) > 1 { return }
+        tree.restoreAgentAncestry(stored.records, at: now)
+        Log.info("restored the AI agent ancestry of up to \(stored.records.count) running processes")
+    }
+
+    /// When the system booted (kern.boottime), nil if unknown (a sandbox may refuse the sysctl).
+    public static func bootTime() -> Date? {
+        #if canImport(Darwin)
+        var tv = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &tv, &size, nil, 0) == 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(tv.tv_sec) + TimeInterval(tv.tv_usec) / 1_000_000)
+        #else
+        return nil
+        #endif
     }
 
     /// Saves consumed "allow once" uses, and drops exceptions that can never match again. Only writes
@@ -1593,13 +2053,21 @@ public final class DaemonCore: @unchecked Sendable {
         tree.prune(now: now)
         coalescer.expire(now: now)
         askBroker.expire()
-        // dos-1: the baseline is bounded, and with the hourly retention it forgets what history no
-        // longer holds (unapproved entries not seen within the retention period).
-        let retentionDue = now.timeIntervalSince(lastRetention) > 3600
-        let forgotten = baseline.prune(lastSeenBefore: retentionDue ? now.addingTimeInterval(-Double(currentSettings.retentionDays) * 86400) : nil)
-        if forgotten > 0 { Log.info("baseline: forgot \(forgotten) unapproved entries (not seen within retention, or over the limit)") }
+        // dos-1: the baseline is bounded by count. Beyond the limit the least recently seen unapproved
+        // entries go (down to a tenth below it); age alone forgets nothing, so a known access does
+        // not alert as a first access again after the retention period.
+        let forgotten = baseline.prune()
+        if forgotten > 0 { Log.info("baseline: forgot \(forgotten) least recently seen unapproved entries (over the limit of \(baseline.maxUnapproved))") }
         persistBaseline()
-        if now.timeIntervalSince(lastRetention) > 3600 {
+        lock.lock()
+        let periodUnknown = !DaemonCore.retentionSettings.isDisjoint(with: unreadableSettings) || !retentionHold.isEmpty
+        lock.unlock()
+        if now.timeIntervalSince(lastRetention) > 3600 && periodUnknown {
+            // Never on a default period in place of one this build could not read: what it deletes is gone
+            // for good (daemon-5). Once an hour.
+            lastRetention = now
+            Log.warning("retention waits: the stored retention settings could not be read; set them again to resume it")
+        } else if now.timeIntervalSince(lastRetention) > 3600 {
             lastRetention = now
             let s = currentSettings
             writer.flush()
@@ -1673,7 +2141,7 @@ public final class DaemonCore: @unchecked Sendable {
             writerDropped: writer.droppedCount, monitoredPrefixes: analyzer.classifier.prefixes.count,
             homeDirectories: homes, rulesLoadError: rulesError, sourceDroppedEvents: source.droppedEvents,
             sourceKernelDrops: source.kernelDroppedEvents, pendingAsks: askBroker.openRequests, uncleanStop: unclean,
-            sourceDeadlineMissMode: stats.source.deadlineMissMode)
+            sourceDeadlineMissMode: stats.source.deadlineMissMode, sourceAuth: source.authCounts)
     }
 }
 
@@ -1686,7 +2154,11 @@ struct LinkWatch {
     private var exact = Set<String>()
     /// Folded prefixes whose contents the classifier searches for links (dot-directories directly under
     /// a home, as in PathClassifier.walksForLinks) or that a followed link leads to.
-    private var walked: [String] = []
+    private var walked = Set<String>()
+    /// Folded proper ancestors of the targets of followed links. A target may lie below directories
+    /// that do not exist yet (`~/.azure/x -> ~/dotfiles/new/x`); once they are made, the target's real
+    /// spelling (its case, a link on the way) can be read.
+    private var targetAncestors = Set<String>()
 
     init(_ c: PathClassifier) {
         normalizer = c.normalizer
@@ -1694,14 +2166,38 @@ struct LinkWatch {
         for p in c.prefixes {
             let key = PathNormalizer.fold(p.path)
             exact.insert(key)
-            if p.viaSymlink || homes.contains(where: { key.hasPrefix($0) }) { walked.append(key) }
+            if p.viaSymlink || homes.contains(where: { key.hasPrefix($0) }) { walked.insert(key) }
+            if p.viaSymlink {
+                var ancestor = ""
+                for component in PathNormalizer.components(key).dropLast() {
+                    ancestor += "/" + component
+                    targetAncestors.insert(ancestor)
+                }
+            }
         }
         for a in c.ancestors { exact.insert(PathNormalizer.fold(a)) }
     }
 
     func covers(_ normalizedPath: String) -> Bool {
         let key = PathNormalizer.fold(PathClassifier.stripTrailingSlash(normalizedPath))
-        return exact.contains(key) || walked.contains { key.hasPrefix($0 + "/") }
+        return exact.contains(key) || isInsideWalked(key)
+    }
+
+    /// Strictly inside a searched directory or a link's target (folded key). One set lookup per
+    /// component: this runs for every create, rename and unlink the source reports.
+    private func isInsideWalked(_ key: String) -> Bool {
+        guard !walked.isEmpty else { return false }
+        var ancestor = ""
+        for component in PathNormalizer.components(key).dropLast() {
+            ancestor += "/" + component
+            if walked.contains(ancestor) { return true }
+        }
+        return false
+    }
+
+    /// A proper ancestor of a followed link's target (normalized path).
+    func isOnTheWayToALinkTarget(_ normalizedPath: String) -> Bool {
+        targetAncestors.contains(PathNormalizer.fold(PathClassifier.stripTrailingSlash(normalizedPath)))
     }
 }
 
@@ -1727,14 +2223,19 @@ final class LinkWatchingSink: EventSink, @unchecked Sendable {
 struct LinkFollowingResolver: SymlinkResolver {
     private let real = RealpathSymlinkResolver()
 
+    /// Missing directories a dangling link's target may lie below.
+    static let maxMissingComponents = 16
+
     func resolve(_ path: String) -> String? {
         real.resolve(path) ?? LinkFollowingResolver.danglingTarget(path)
     }
 
     /// Where writing through the link at `path` creates its file: the link text (relative to the
-    /// link's directory) followed through at most 8 links to a name that does not exist, in a directory
-    /// that does (its real path). nil when `path` is not a link, for a loop, or when the target's
-    /// directory is missing too.
+    /// link's directory) followed through at most 8 links to a name that does not exist, below the real
+    /// path of its deepest existing directory. Directories missing on the way are kept as spelled (a
+    /// later `mkdir -p` makes them; DaemonCore re-reads the target then). nil when `path` is not a link,
+    /// for a loop, when something on the way is not a directory, or when a missing part is `..`
+    /// (where it leads depends on what is made there).
     static func danglingTarget(_ path: String) -> String? {
         var link = path
         for _ in 0..<8 {
@@ -1750,39 +2251,294 @@ struct LinkFollowingResolver: SymlinkResolver {
                 continue
             }
             // Read before any Foundation call can change it.
-            let missing = errno == ENOENT
-            let name = (next as NSString).lastPathComponent
-            guard missing, !name.isEmpty, name != ".", name != "..",
-                  let dir = RealpathSymlinkResolver().resolve(TrustedDirectory.parent(of: next)) else { return nil }
-            return dir == "/" ? "/" + name : dir + "/" + name
+            guard errno == ENOENT else { return nil }
+            // The missing tail, up to the deepest directory that exists.
+            var missing: [String] = []
+            var head = next
+            while true {
+                let name = (head as NSString).lastPathComponent
+                guard !name.isEmpty, name != "..", head != "/", missing.count < maxMissingComponents else { return nil }
+                if name != "." { missing.insert(name, at: 0) }
+                head = TrustedDirectory.parent(of: head)
+                if lstat(head, &st) == 0 { break }
+                guard errno == ENOENT else { return nil }
+            }
+            guard !missing.isEmpty, let dir = RealpathSymlinkResolver().resolve(head) else { return nil }
+            return (dir == "/" ? "" : dir) + "/" + missing.joined(separator: "/")
         }
         return nil
     }
 
-    /// RealpathSymlinkResolver's bounded walk (links to directories are reported, not entered), with
-    /// dangling links included.
     func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] {
-        var out: [(String, String)] = []
+        LinkInventory.resolved(LinkFollowingResolver.links(under: dir, maxDepth: maxDepth, maxEntries: maxEntries).links,
+                               below: dir, resolver: self)
+    }
+
+    /// The links below `dir`, breadth first and in name order, so the same tree gives the same links
+    /// even past the caps, and links near the top are found first. Links to directories are reported,
+    /// not entered. Looks at no more than `maxEntries` entries, `maxDepth` levels down; `visited` says
+    /// how many it looked at.
+    static func links(under dir: String, maxDepth: Int, maxEntries: Int) -> (links: [String], visited: Int) {
+        var out: [String] = []
         var visited = 0
-        func walk(_ d: String, _ depth: Int) {
-            guard depth <= maxDepth, let entries = try? FileManager.default.contentsOfDirectory(atPath: d) else { return }
-            for name in entries {
-                visited += 1
-                if visited > maxEntries { return }
-                let p = d.hasSuffix("/") ? d + name : d + "/" + name
-                var st = stat()
-                guard lstat(p, &st) == 0 else { continue }
-                switch st.st_mode & S_IFMT {
-                case S_IFLNK:
-                    if let target = resolve(p), !target.hasPrefix(dir + "/") && target != dir { out.append((p, target)) }
-                case S_IFDIR:
-                    walk(p, depth + 1)
-                default:
-                    break
+        var level = [dir]
+        var depth = 1
+        while !level.isEmpty && depth <= maxDepth && visited < maxEntries {
+            var next: [String] = []
+            for d in level {
+                guard visited < maxEntries, let stream = opendir(d) else { continue }
+                // The file type comes with the entry on APFS and HFS+: no lstat per file. A directory
+                // is read whole and sorted, so where the budget ends does not depend on the order the
+                // file system returns entries in; only one with more than `maxEntries` entries is read
+                // in part, in that order.
+                var entries: [(name: String, type: Int32)] = []
+                while entries.count < maxEntries, let e = readdir(stream) {
+                    var entry = e.pointee
+                    let name = withUnsafeBytes(of: &entry.d_name) { raw in
+                        String(cString: raw.baseAddress!.assumingMemoryBound(to: CChar.self))
+                    }
+                    if name == "." || name == ".." { continue }
+                    entries.append((name, Int32(entry.d_type)))
+                }
+                closedir(stream)
+                entries.sort { $0.name < $1.name }
+                for (name, reported) in entries {
+                    guard visited < maxEntries else { break }
+                    visited += 1
+                    let p = d.hasSuffix("/") ? d + name : d + "/" + name
+                    var type = reported
+                    if type == DT_UNKNOWN {
+                        var st = stat()
+                        guard lstat(p, &st) == 0 else { continue }
+                        switch st.st_mode & S_IFMT {
+                        case S_IFLNK: type = DT_LNK
+                        case S_IFDIR: type = DT_DIR
+                        default: break
+                        }
+                    }
+                    if type == DT_LNK { out.append(p) } else if type == DT_DIR { next.append(p) }
                 }
             }
+            level = next
+            depth += 1
         }
-        walk(dir, 1)
-        return out
+        return (out, visited)
+    }
+}
+
+/// The links the classifier follows inside the directories it searches for them
+/// (PathClassifier.walksForLinks): what the last full walk of those directories found, plus links file
+/// events showed since, at any depth (files-9). A classifier rebuild after a link change re-reads only
+/// these, so it costs in proportion to the number of links, not to the size of the directories. The
+/// full walk (`walkBudget` entries in all, but at least `minimumEntriesPerDirectory` for each
+/// directory) runs at start, at every periodic rediscovery, and after events were lost. A rebuild
+/// searches a directory again only when it was not searched yet or its real path changed since (it,
+/// or a directory above it, was made a link: what the walk found there is somewhere else now),
+/// sharing `walkBudget` the same way. Thread-safe.
+final class LinkInventory: @unchecked Sendable {
+    /// Entries one full walk looks at, over every directory (each also stops at
+    /// PathClassifier.linkWalkMaxEntries).
+    static let walkBudget = 100_000
+    /// Entries every directory may look at even when the others used up `walkBudget`: the directories
+    /// are walked in catalog order, and the last ones (a custom path) still need a share.
+    static let minimumEntriesPerDirectory = 2_000
+
+    /// Entries a walk of one directory looks at, out of `budget` left.
+    static func share(of budget: Int, maxEntries: Int) -> Int {
+        min(maxEntries, max(minimumEntriesPerDirectory, budget))
+    }
+
+    /// Links remembered from file events (the oldest are forgotten first).
+    static let maxReported = 1024
+    /// Links one classifier follows: each one adds monitored prefixes, mute paths and prefilter needles.
+    static let maxFollowed = 4096
+
+    private let lock = NSLock()
+    /// Folded directory → the links the last walk found below it, and `roots(of:)` the directory then.
+    private var walked: [String: (links: [String], roots: [String])] = [:]
+    /// Links file events showed, oldest first, with their folded paths.
+    private var reported: [(path: String, key: String)] = []
+    private var reportedKeys = Set<String>()
+    /// Folded searched directories and their real paths: only links below one are kept from events.
+    private var roots = Set<String>()
+    /// Bumped by every full walk: what a rebuild read before one is not written back over it.
+    private var generation = 0
+    private var _fullWalks = 0
+
+    /// Tests: how many full walks ran.
+    var fullWalks: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _fullWalks
+    }
+
+    /// Searches `dirs` again, in order, sharing `budget` (each keeps `minimumEntriesPerDirectory`), and
+    /// forgets what was found before. Call it outside the daemon's locks: it reads the disk.
+    func walk(_ dirs: [String], budget: Int = LinkInventory.walkBudget) {
+        var found: [String: (links: [String], roots: [String])] = [:]
+        var roots: [String] = []
+        var budget = budget
+        for d in dirs {
+            let key = PathNormalizer.fold(d)
+            guard found[key] == nil else { continue }
+            let dirRoots = LinkInventory.roots(of: d)
+            let r = LinkFollowingResolver.links(under: d, maxDepth: PathClassifier.linkWalkMaxDepth,
+                                                maxEntries: LinkInventory.share(of: budget, maxEntries: PathClassifier.linkWalkMaxEntries))
+            budget -= r.visited
+            found[key] = (r.links, dirRoots)
+            roots += dirRoots
+        }
+        let foundKeys = Set(found.values.flatMap(\.links).map(PathNormalizer.fold))
+        lock.lock()
+        walked = found
+        self.roots = Set(roots)
+        generation += 1
+        // What the walk found itself, and what is no longer below a searched directory, is not kept.
+        forgetReported { r in foundKeys.contains(r.key) || !roots.contains { r.key.hasPrefix($0 + "/") } }
+        _fullWalks += 1
+        lock.unlock()
+    }
+
+    /// Links a file event showed (normalized paths: a link created, or the links below a directory moved
+    /// or copied in).
+    func report(_ links: [String]) {
+        guard !links.isEmpty else { return }
+        lock.lock()
+        for p in links {
+            let key = PathNormalizer.fold(p)
+            // Elsewhere (a link at a catalog path or an ancestor) the rebuild resolves it anyway.
+            guard isBelowRoot(key), reportedKeys.insert(key).inserted else { continue }
+            reported.append((p, key))
+        }
+        let over = reported.count - LinkInventory.maxReported
+        if over > 0 {
+            reported.prefix(over).forEach { reportedKeys.remove($0.key) }
+            reported.removeFirst(over)
+        }
+        lock.unlock()
+        if over > 0 { Log.warning("links: more than \(LinkInventory.maxReported) links reported since the last full walk; forgot the \(over) oldest") }
+    }
+
+    /// Under `lock`: strictly below a searched directory (folded key).
+    private func isBelowRoot(_ key: String) -> Bool {
+        var ancestor = ""
+        for component in PathNormalizer.components(key).dropLast() {
+            ancestor += "/" + component
+            if roots.contains(ancestor) { return true }
+        }
+        return false
+    }
+
+    /// Under `lock`.
+    private func forgetReported(where gone: ((path: String, key: String)) -> Bool) {
+        reported.removeAll { r in
+            guard gone(r) else { return false }
+            reportedKeys.remove(r.key)
+            return true
+        }
+    }
+
+    /// The links below `dir` with their targets now, for the classifier: what the last walk found there
+    /// (walking it now if it has not been, or if its real path changed since), plus reported links below
+    /// it, below its real path too (spelled below `dir`). Links that are gone are forgotten. At most
+    /// `limit`.
+    func links(under dir: String, maxDepth: Int, maxEntries: Int, limit: Int,
+               resolver: LinkFollowingResolver = LinkFollowingResolver()) -> [(link: String, target: String)] {
+        var budget = LinkInventory.walkBudget
+        return links(under: dir, maxDepth: maxDepth, maxEntries: maxEntries, limit: limit, resolver: resolver, budget: &budget)
+    }
+
+    /// `budget`: entries a walk of `dir` may still look at, shared by the directories one classifier
+    /// build walks (each keeps `minimumEntriesPerDirectory`). A walk it cut short is not kept (the next
+    /// build walks again).
+    func links(under dir: String, maxDepth: Int, maxEntries: Int, limit: Int, resolver: LinkFollowingResolver,
+               budget: inout Int) -> [(link: String, target: String)] {
+        guard limit > 0 else { return [] }
+        let key = PathNormalizer.fold(dir)
+        let roots = LinkInventory.roots(of: dir)
+        lock.lock()
+        let known = walked[key].flatMap { $0.roots == roots ? $0.links : nil }
+        let reportedNow = reported
+        let readGeneration = generation
+        lock.unlock()
+        func isLink(_ p: String) -> Bool {
+            var st = stat()
+            return lstat(p, &st) == 0 && (st.st_mode & S_IFMT) == S_IFLNK
+        }
+        var complete = true
+        let listed: [String]
+        if let known {
+            listed = known
+        } else {
+            let cap = LinkInventory.share(of: budget, maxEntries: maxEntries)
+            let r = LinkFollowingResolver.links(under: dir, maxDepth: maxDepth, maxEntries: cap)
+            budget -= r.visited
+            complete = cap == maxEntries || r.visited < cap
+            listed = r.links
+        }
+        let found = listed.filter(isLink)
+        var candidates = found
+        var seen = Set(found.map(PathNormalizer.fold))
+        var gone = Set<String>()
+        let dirComponents = PathNormalizer.components(dir)
+        for r in reportedNow {
+            guard let root = roots.first(where: { r.key.hasPrefix($0 + "/") }) else { continue }
+            guard isLink(r.path) else { gone.insert(r.key); continue }
+            // Folding keeps the number of components: the tail below the root, spelled below `dir`.
+            let tail = PathNormalizer.components(r.path).dropFirst(PathNormalizer.components(root).count)
+            let spelled = "/" + (dirComponents + tail).joined(separator: "/")
+            if seen.insert(PathNormalizer.fold(spelled)).inserted { candidates.append(spelled) }
+        }
+        lock.lock()
+        if generation == readGeneration {
+            if complete { walked[key] = (found, roots) }
+            self.roots.formUnion(roots)
+        }
+        forgetReported { gone.contains($0.key) }
+        lock.unlock()
+        if candidates.count > limit {
+            Log.warning("links: following only \(LinkInventory.maxFollowed) links; \(candidates.count - limit) below \(dir) are not followed")
+        }
+        return LinkInventory.resolved(Array(candidates.prefix(limit)), below: dir, resolver: resolver)
+    }
+
+    /// Folded `dir` and its real path: the two spellings of what is below it.
+    static func roots(of dir: String) -> [String] {
+        let key = PathNormalizer.fold(PathClassifier.stripTrailingSlash(dir))
+        guard let real = RealpathSymlinkResolver().resolve(dir) else { return [key] }
+        let realKey = PathNormalizer.fold(PathClassifier.stripTrailingSlash(real))
+        return realKey == key ? [key] : [key, realKey]
+    }
+
+    /// `links` with their targets, leaving out links that lead back inside `dir` (whichever way it is
+    /// spelled) and links that do not resolve.
+    static func resolved(_ links: [String], below dir: String, resolver: LinkFollowingResolver) -> [(link: String, target: String)] {
+        let roots = LinkInventory.roots(of: dir)
+        return links.compactMap { p in
+            guard let target = resolver.resolve(p) else { return nil }
+            let t = PathNormalizer.fold(target)
+            if roots.contains(where: { t == $0 || t.hasPrefix($0 + "/") }) { return nil }
+            return (p, target)
+        }
+    }
+}
+
+/// The resolver one classifier build uses: LinkFollowingResolver, with the links below each searched
+/// directory read from the LinkInventory, at most LinkInventory.maxFollowed in all. Directories the
+/// inventory walks anew share LinkInventory.walkBudget.
+final class InventoryLinkResolver: SymlinkResolver, @unchecked Sendable {
+    private let inventory: LinkInventory
+    private let resolver = LinkFollowingResolver()
+    private var followed = 0
+    private var budget = LinkInventory.walkBudget
+
+    init(_ inventory: LinkInventory) { self.inventory = inventory }
+
+    func resolve(_ path: String) -> String? { resolver.resolve(path) }
+
+    func symlinks(under dir: String, maxDepth: Int, maxEntries: Int) -> [(link: String, target: String)] {
+        let found = inventory.links(under: dir, maxDepth: maxDepth, maxEntries: maxEntries,
+                                    limit: LinkInventory.maxFollowed - followed, resolver: resolver, budget: &budget)
+        followed += found.count
+        return found
     }
 }

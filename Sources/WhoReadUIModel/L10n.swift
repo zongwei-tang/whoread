@@ -12,10 +12,22 @@ public enum L: String, CaseIterable, Sendable {
     case appName, modeMonitoring, modeEnforcing, modePaused, modeError, unreadAlertsFormat, openWindow
     case pauseMonitoring, resumeMonitoring, enforcement, enforcementOn, enforcementOff, enforcementInactiveFormat
     case killSwitchAdmin, quit, daemonUnreachable, recentAlerts, noAlerts
+    case killSwitchAdminPrompt
     // Ask mode: open questions (menu bar, Alerts tab, notifications)
     case asksTitle, asksWaitingFormat, asksMoreFormat, askDeniedIn, askNotHeld
     case askAllowOnce, askAlwaysAllow, askDeny, askAlwaysDeny, askTrustApple
-    case askAllowNotPermittedFormat, askGone, askAgentsFormat
+    case askAllowNotPermittedFormat, askGone, askAgentsFormat, askPathHidden, asksCannotReadFormat
+    case askCoversFormat, alertCoversFormat
+    case answerRuleLimit, answerNotSavedFormat, answerNoReply, alertNotPermittedFormat
+    case answerAlertsNotUpdatedFormat, answerReplyUnreadable
+    // What cannot be read (limited view)
+    case limitedViewFormat, limitedAskPaths, notShownFormat, cannotReadFormat
+    case partAlerts, partLive, partSummaries, partRules, partSettings, partCatalog, partAgents
+    // Not recognised by the dev LaunchDaemon, or not reached at all
+    case notRecognisedFormat, notRecognisedAsks, notShownNotRecognisedFormat, errUnavailableDevDaemon
+    case notRecognisedNativeFormat, errNotPermittedNotRecognised, alertNotRecognisedFormat, askAllowNotRecognisedFormat
+    // Monitor-only mode (the dev LaunchDaemon with eslogger)
+    case blockingUnavailableNote
     // Tabs
     case tabLive, tabAlerts, tabApps, tabFiles, tabAgents, tabRules, tabSettings
     // Columns & common
@@ -27,8 +39,10 @@ public enum L: String, CaseIterable, Sendable {
     case detected, notDetected, search, refresh, save, revert, add, remove, delete, cancel, done, close
     // Live
     case showSystemNoise, pauseFeed, resumeFeed, liveEmpty
+    case liveSkippedNote
     // Alerts
     case markAllRead, unreadOnly, statusUnread, statusRead, statusResolved, alertsEmpty, pathsSeen
+    case alertsCappedFormat
     // Agents / apps / files
     case agentsEmpty, appsEmpty, filesEmpty
     // Rules
@@ -36,17 +50,21 @@ public enum L: String, CaseIterable, Sendable {
     case targetCategory, targetSeverity, targetPath, subjectSigned, subjectUnsigned, subjectApp, subjectAnyNonOwner
     case subjectAgentChain, exceptOwners, includePlatformBinaries, accessRead, accessWrite, accessAny
     case actionAllow, actionDeny, actionAlert, rulesEnforcementOffNote, ruleExceptionsFormat, rulesEmpty
-    case ruleChainNoAgent, ruleChainAgentsFormat
+    case ruleChainNoAgent, ruleChainAgentsFormat, ruleChainUnknownStarter
     // Settings
     case setMonitoredPaths, setProjectRoots, setProjectRootsNote, setAsk, setAskNote, setTrustApple, setTrustAppleNote
     case setRetention, setRetentionDays, setDetailDays, setNotifications, setNotificationsEnabled, setMinSeverity
     case setNotifyWouldBlock, setEnforcement, setEnforcementMaster, setEnforcementNote, setLatency, setReaddir
-    case slowResponsesFormat, slowMissesFormat, slowP99Format, uncleanStopFormat
+    case slowResponsesFormat, slowMissesFormat, slowP99Format, uncleanStopFormat, authDroppedDeniedFormat, authDroppedAllowedFormat
     case setLanguage, setLanguageSystem, setCoalesce, setSaved, setPermissionNeeded
+    // Settings → General: open at login
+    case setGeneral, setOpenAtLogin, setOpenAtLoginNote, loginItemNeedsApproval, loginItemFailedFormat, openLoginItemsSettings
     // Onboarding
     case onbTitle, onbIntro, onbFDATitle, onbFDABody, onbFDAButton, onbExtTitle, onbExtBody, onbExtButton
     case onbExtApprove, onbDaemonTitle, onbDaemonBody, onbAllSet, onbWaiting, onbDone, onbFailedFormat, onbContinue
     case onbOpenLoginItems, onbRestartRequired, openSetup
+    // Onboarding in monitor-only mode
+    case onbExtNotAvailableBody, onbFDABodyDaemonFormat, onbCopyPath, onbCopied, onbDaemonBodyMonitorOnly
     // Notifications
     case notifTitle, notifBlockedTitle, notifUncleanStopTitle, notifRuleNotBlockingTitle, notifAskTitle, notifAskFailedTitle
     // Enforcement inactive reasons and caveats
@@ -55,6 +73,7 @@ public enum L: String, CaseIterable, Sendable {
     // Rule editor
     case ruleName, ruleSigningID, ruleTeamID, ruleNoTeamID, ruleProgramPath, ruleCdhash, ruleAgentsNote
     case rulePathNotMonitored, ruleBlockAppFormat
+    case ruleAllowReadFormat, ruleAllowWriteFormat, ruleAllowUseFormat, ruleAllowOnceSuffix
     case ruleErrCategory, ruleErrPath, ruleErrSigningID, ruleErrTeamID, ruleErrProgramPath, ruleErrCdhash, ruleErrApp
     case tplBlockAgentsCritical, tplAlertAgentsHigh, tplDenyNonOwnerSSH
     // Catalog editing (Settings → Monitored paths)
@@ -67,7 +86,8 @@ public enum L: String, CaseIterable, Sendable {
     case opOpen, opClose, opRename, opClone, opCopyfile, opLink, opUnlink, opTruncate, opExchangedata, opReaddir, opCreate
     case opSetmode, opSetowner, opSetacl, opMount
     // Errors
-    case errNotPermitted, errUnavailable, errVersionMismatchFormat, errDaemonFormat, errAdminFormat
+    case errNotPermitted, errUnavailable, errVersionMismatchFormat, errDaemonFormat, errAdminFormat, errNotConsoleUser
+    case errNoAnswer
 }
 
 public enum L10n {
@@ -98,6 +118,8 @@ public enum L10n {
         .enforcementOff: ("Off", "关"),
         .enforcementInactiveFormat: ("Not active: %@", "未生效：%@"),
         .killSwitchAdmin: ("Turn enforcement off now (administrator)…", "立即关闭拦截（需要管理员密码）…"),
+        .killSwitchAdminPrompt: ("WhoRead needs an administrator's password to change its kill-switch file (enforcement stays off while the file exists).",
+                                 "WhoRead 需要管理员密码来修改紧急关闭文件（该文件存在时拦截保持关闭）。"),
         .quit: ("Quit WhoRead", "退出 WhoRead"),
         .daemonUnreachable: ("Cannot reach the WhoRead daemon", "无法连接 WhoRead 守护进程"),
         .recentAlerts: ("Recent alerts", "最近告警"),
@@ -113,9 +135,64 @@ public enum L10n {
         .askDeny: ("Deny", "拒绝"),
         .askAlwaysDeny: ("Always deny", "始终拒绝"),
         .askTrustApple: ("Allow all Apple programs", "允许所有苹果程序"),
-        .askAllowNotPermittedFormat: ("Not allowed: only the signed WhoRead app or an administrator can allow (this build is not signed). In Terminal: %@", "没有权限：只有已签名的 WhoRead 应用或管理员才能允许（当前版本未签名）。请在终端运行：%@"),
-        .askGone: ("This question is no longer open (answered elsewhere or expired).", "这个问题已经关闭（已在别处回答或已过期）。"),
+        .askAllowNotPermittedFormat: ("Not allowed: the WhoRead monitor does not recognise this app as the signed WhoRead app, and only that app or an administrator can allow. The question is still open. In Terminal: %@",
+                                      "没有权限：WhoRead 监控程序没有把这个应用识别为已签名的 WhoRead 应用，只有该应用或管理员才能允许。问题仍然保留。请在终端运行：%@"),
+        .askGone: ("This question is no longer open: it was answered elsewhere, expired, or the WhoRead monitor restarted. If the program tries again, you will be asked again.",
+                   "这个问题已经关闭：已在别处回答、已过期，或 WhoRead 监控程序已重启。如果程序再次尝试访问，会再次询问你。"),
+        .answerRuleLimit: ("Not saved: WhoRead keeps at most 512 rules and that limit is reached, so nothing changed and the question or alert stays open. Delete rules you no longer need in the Rules tab, then answer again (Deny still works).",
+                           "未保存：WhoRead 最多保存 512 条规则，现已达到上限，所以没有任何改变，问题或告警仍然保留。请在「规则」标签中删除不再需要的规则，然后再回答（「拒绝」仍然可用）。"),
+        .answerNotSavedFormat: ("Your answer applies now, but WhoRead could not save it (%@). After the WhoRead monitor restarts you may be asked again.",
+                                "你的回答已经生效，但 WhoRead 无法保存它（%@）。WhoRead 监控程序重启后可能会再次询问你。"),
+        .answerNoReply: ("No reply from the WhoRead daemon: your answer may not have been taken. If the question is still listed, answer it again.",
+                         "WhoRead 守护进程没有回应：你的回答可能没有生效。如果问题仍在列表中，请再回答一次。"),
+        .answerAlertsNotUpdatedFormat: ("Your answer applies now, but WhoRead could not mark its alerts as handled (%@). They may still be listed as open.",
+                                        "你的回答已经生效，但 WhoRead 无法把相关告警标记为已处理（%@）。它们可能仍显示为未处理。"),
+        .answerReplyUnreadable: ("The WhoRead daemon's reply could not be read (it runs another version): your answer may or may not have been taken. Update WhoRead or restart the daemon, then look at the question again.",
+                                 "无法读取 WhoRead 守护进程的回复（它运行的是另一个版本）：你的回答可能已经生效，也可能没有。请更新 WhoRead 或重启守护进程，然后再查看这个问题。"),
+        .alertNotPermittedFormat: ("Not permitted: the WhoRead monitor does not recognise this app as the signed WhoRead app, and this needs that app or an administrator. In Terminal: %@",
+                                   "没有权限：WhoRead 监控程序没有把这个应用识别为已签名的 WhoRead 应用，这项操作需要该应用或管理员。请在终端运行：%@"),
         .askAgentsFormat: ("AI agent in the chain: %@", "调用链中有 AI agent：%@"),
+        .askCoversFormat: ("Allow once (10 min) and Always allow cover: %@.", "「允许一次（10 分钟）」和「始终允许」适用于：%@。"),
+        .alertCoversFormat: ("Always allow covers: %@.", "「始终允许」适用于：%@。"),
+        .askPathHidden: ("(file path hidden: only the signed WhoRead app or sudo can see it)", "（文件路径已隐藏：只有已签名的 WhoRead 应用或 sudo 可以查看）"),
+        .asksCannotReadFormat: ("Open questions cannot be read: %@", "无法读取等待回答的问题：%@"),
+
+        .limitedViewFormat: ("Limited view: the WhoRead monitor does not recognise this app as the signed WhoRead app, so it does not show it %@. Questions still arrive and you can deny them here. Allowing, and everything else, needs the signed WhoRead app or sudo in Terminal (for example: sudo whoread asks).",
+                             "受限视图：WhoRead 监控程序没有把这个应用识别为已签名的 WhoRead 应用，因此不向它提供%@。问题仍会出现，你可以在这里拒绝。允许访问以及其他内容需要已签名的 WhoRead 应用，或在终端使用 sudo（例如：sudo whoread asks）。"),
+        .limitedAskPaths: ("the file paths in questions", "问题中的文件路径"),
+        .notShownFormat: ("Not shown here: %@. The WhoRead monitor shows them only to the signed WhoRead app, or with sudo in Terminal (%@).",
+                          "这里不显示%@：WhoRead 监控程序只把它们提供给已签名的 WhoRead 应用，或在终端用 sudo 查看（%@）。"),
+        .cannotReadFormat: ("Could not read %@: %@", "无法读取%@：%@"),
+        .partAlerts: ("alerts", "告警"),
+        .partLive: ("the live feed", "实时记录"),
+        .partSummaries: ("the app, file and AI agent history", "应用、文件和 AI agent 的历史记录"),
+        .partRules: ("the rules", "规则"),
+        .partSettings: ("the settings", "设置"),
+        .partCatalog: ("the monitored paths", "监控路径"),
+        .partAgents: ("the list of AI agents", "AI agent 列表"),
+
+        // %@: the parts not shown (`L10n.alternatives`).
+        .notRecognisedFormat: ("WhoRead is not recognised by the background service, so it cannot show %@ here. Run scripts/install.sh again: this happens when the app was rebuilt or replaced after installing.",
+                               "WhoRead 未被后台服务识别，因此这里无法显示%@。请重新运行 scripts/install.sh：在安装之后重新构建或替换了应用时会出现这种情况。"),
+        .notRecognisedAsks: ("Questions still arrive, without their file paths, and you can deny them here; allowing needs sudo in Terminal (for example: sudo whoread asks).",
+                             "问题仍会出现（不含文件路径），你可以在这里拒绝；允许访问需要在终端使用 sudo（例如：sudo whoread asks）。"),
+        .notShownNotRecognisedFormat: ("Not shown here: %@, as the background service does not recognise this app (see the notice above). In Terminal: %@",
+                                       "这里不显示%@，因为后台服务没有识别出这个应用（见上方提示）。在终端中：%@"),
+        .errUnavailableDevDaemon: ("WhoRead cannot reach its background service. If it is installed and running (check with: sudo launchctl print system/com.whoread.daemon), it may be refusing this app: run scripts/install.sh again, which is needed when the app was rebuilt or replaced after installing.",
+                                   "WhoRead 无法连接它的后台服务。如果后台服务已安装并在运行（可用 sudo launchctl print system/com.whoread.daemon 检查），它可能拒绝了这个应用：请重新运行 scripts/install.sh，在安装之后重新构建或替换了应用时需要这样做。"),
+        // %@: the parts not shown. The native source runs only in a VM with SIP disabled, which scripts/install.sh
+        // does not set up (it installs the eslogger source, and needs Xcode).
+        .notRecognisedNativeFormat: ("WhoRead is not recognised by the background service, so it cannot show %@ here. That service runs the native monitor: install it again with this app, sudo scripts/install-dev-daemon.sh native --app WhoRead.app (it recognises only the app it was installed with).",
+                                     "WhoRead 未被后台服务识别，因此这里无法显示%@。这个后台服务使用 native 监控方式：请指定这个应用重新安装它，sudo scripts/install-dev-daemon.sh native --app WhoRead.app（它只识别安装时指定的应用）。"),
+        // Refusals while the dev LaunchDaemon does not recognise this app: the notice says why and how to fix it.
+        .errNotPermittedNotRecognised: ("Not permitted: the background service does not recognise this app (see the notice about it), and changes that weaken protection need an app it recognises, or sudo.",
+                                        "没有权限：后台服务没有识别出这个应用（见相关提示），而削弱保护的修改需要被它识别的应用，或 sudo。"),
+        .alertNotRecognisedFormat: ("Not permitted: the background service does not recognise this app (see the notice about it), and this needs an app it recognises, or an administrator. In Terminal: %@",
+                                    "没有权限：后台服务没有识别出这个应用（见相关提示），这项操作需要被它识别的应用或管理员。请在终端运行：%@"),
+        .askAllowNotRecognisedFormat: ("Not allowed: the background service does not recognise this app (see the notice about it), and only an app it recognises or an administrator can allow. The question is still open. In Terminal: %@",
+                                       "没有权限：后台服务没有识别出这个应用（见相关提示），只有被它识别的应用或管理员才能允许。问题仍然保留。请在终端运行：%@"),
+        .blockingUnavailableNote: ("Blocking is not available: WhoRead monitors with Apple's eslogger here, which cannot block. Blocking needs a signed release of WhoRead.",
+                                   "无法拦截：这里 WhoRead 使用 Apple 的 eslogger 监控，eslogger 无法拦截。拦截需要已签名的 WhoRead 正式版。"),
 
         .tabLive: ("Live", "实时"),
         .tabAlerts: ("Alerts", "告警"),
@@ -170,6 +247,8 @@ public enum L10n {
         .pauseFeed: ("Pause feed", "暂停滚动"),
         .resumeFeed: ("Resume feed", "继续滚动"),
         .liveEmpty: ("No sensitive file access yet.", "还没有敏感文件访问。"),
+        .liveSkippedNote: ("More accesses came at once than the live feed reads: some are not listed here. Every one is recorded; in Terminal: sudo whoread events",
+                           "一次到来的访问超过了实时列表能读取的数量，有些没有列在这里。每一次访问都已记录；在终端里运行：sudo whoread events"),
 
         .markAllRead: ("Mark all read", "全部标为已读"),
         .unreadOnly: ("Unread only", "只看未读"),
@@ -178,6 +257,8 @@ public enum L10n {
         .statusResolved: ("Handled", "已处理"),
         .alertsEmpty: ("No alerts. WhoRead only alerts on unusual access.", "没有告警。WhoRead 只在出现异常时提醒。"),
         .pathsSeen: ("Paths", "涉及路径"),
+        .alertsCappedFormat: ("Only the %ld most recently updated are listed here, of %ld. In Terminal, %@ lists them all.",
+                              "这里只列出最近更新的 %ld 条，共 %ld 条。在终端里运行 %@ 可以列出全部。"),
 
         .agentsEmpty: ("No AI agent has touched a sensitive file yet.", "还没有 AI agent 碰过敏感文件。"),
         .appsEmpty: ("No app has touched a sensitive file yet.", "还没有应用碰过敏感文件。"),
@@ -213,6 +294,7 @@ public enum L10n {
         .rulesEmpty: ("No rules.", "没有规则。"),
         .ruleChainNoAgent: ("only without an AI agent in the chain", "仅限调用链中没有 AI agent"),
         .ruleChainAgentsFormat: ("only with these AI agents in the chain: %@", "仅限调用链中的这些 AI agent：%@"),
+        .ruleChainUnknownStarter: (" (also when who started the program is unknown)", "（启动者未知时也适用）"),
 
         .setMonitoredPaths: ("Monitored paths", "监控路径"),
         .setProjectRoots: ("Project roots", "Project roots"),
@@ -238,10 +320,22 @@ public enum L10n {
         .setCoalesce: ("Merge repeated alerts within (minutes)", "合并多少分钟内的重复告警"),
         .setSaved: ("Saved", "已保存"),
         .setPermissionNeeded: ("This change needs administrator rights.", "这项修改需要管理员权限。"),
+        .setGeneral: ("General", "通用"),
+        .setOpenAtLogin: ("Open at login", "登录时打开"),
+        .setOpenAtLoginNote: ("Opens the menu bar app when you log in. The background service keeps monitoring either way.",
+                              "登录时打开菜单栏应用。无论是否打开，后台服务都会继续监控。"),
+        .loginItemNeedsApproval: ("WhoRead is not allowed to open at login. Turn it on in System Settings → General → Login Items.",
+                                  "WhoRead 未被允许在登录时打开。请在「系统设置 → 通用 → 登录项」中打开它。"),
+        .loginItemFailedFormat: ("Open at login could not be changed: %@", "无法更改「登录时打开」：%@"),
+        .openLoginItemsSettings: ("Open Login Items Settings", "打开登录项设置"),
         .slowResponsesFormat: ("Slow responses: %@. Enforcement stays as you set it.", "响应变慢：%@。拦截保持你的设置。"),
         .slowMissesFormat: ("%ld missed kernel deadlines", "错过内核期限 %ld 次"),
         .slowP99Format: ("p99 %@ ms (warning above %@ ms)", "p99 %@ 毫秒（超过 %@ 毫秒提醒）"),
-        .uncleanStopFormat: ("The monitor stopped unexpectedly while it could block (%@). Enforcement stays as you set it.", "监控程序在可拦截状态下意外停止（%@）。拦截保持你的设置。"),
+        .uncleanStopFormat: ("The monitor stopped unexpectedly (%@). Enforcement stays as you set it.", "监控程序意外停止（%@）。拦截保持你的设置。"),
+        .authDroppedDeniedFormat: ("The kernel dropped %ld file accesses from a full queue and denied them. Which program and file is not known, so they are not in the events.",
+                                   "内核因队列已满丢弃了 %ld 次文件访问并拒绝了它们。无法得知是哪个程序和文件，所以事件里没有它们。"),
+        .authDroppedAllowedFormat: ("The kernel dropped %ld file accesses from a full queue and allowed them. Which program and file is not known, so they are not in the events.",
+                                    "内核因队列已满丢弃了 %ld 次文件访问并放行了它们。无法得知是哪个程序和文件，所以事件里没有它们。"),
 
         .onbTitle: ("Welcome to WhoRead", "欢迎使用 WhoRead"),
         .onbIntro: ("WhoRead shows which app read your SSH keys, cloud credentials, browser data and other sensitive files — and who started it. Everything stays on this Mac. File contents are never read.", "WhoRead 告诉你哪个应用读了你的 SSH 密钥、云凭证、浏览器数据等敏感文件，以及是谁启动了它。所有数据只留在这台 Mac 上，从不读取文件内容。"),
@@ -262,6 +356,16 @@ public enum L10n {
         .onbOpenLoginItems: ("Open Login Items & Extensions", "打开「登录项与扩展」"),
         .onbRestartRequired: ("Restart your Mac to finish activating the extension.", "重启 Mac 以完成扩展激活。"),
         .openSetup: ("Open setup…", "打开设置向导…"),
+        .onbExtNotAvailableBody: ("Not available in this build: blocking needs a signed release of WhoRead with Apple's Endpoint Security entitlement. Until then WhoRead monitors without blocking: it records and alerts.",
+                                  "此版本不可用：拦截需要带有 Apple Endpoint Security 授权的已签名 WhoRead 正式版。在此之前，WhoRead 只监控、不拦截：它会记录并提醒。"),
+        // The steps of scripts/install.sh: a rebuilt whoreadd is another program to macOS, so an earlier
+        // install's entry goes first; /usr/bin/eslogger is its fallback when whoreadd alone is not enough.
+        .onbFDABodyDaemonFormat: ("macOS requires Full Disk Access for the program that monitors file access. Here that is WhoRead's background service, not this app. If whoreadd is in the list already (from an earlier install), select it and click − first. Then click + under the list (enter your password if asked), press ⌘⇧G, paste %@, press Return, click Open, and make sure the switch next to whoreadd is on. If it is on and monitoring still does not start, add /usr/bin/eslogger the same way and switch it on too.",
+                                  "macOS 要求监控文件访问的程序拥有完全磁盘访问权限。这里需要授权的是 WhoRead 的后台服务，而不是这个应用。如果列表里已经有 whoreadd（以前装过），先选中它，点 − 删掉。然后点列表下面的 +（如果要求，输入密码），按 ⌘⇧G，粘贴 %@，按回车，再点「打开」，并确认 whoreadd 旁边的开关是打开的。如果开关已经打开，监控仍然没有开始，请用同样的方法再添加 /usr/bin/eslogger，并打开它的开关。"),
+        .onbCopyPath: ("Copy path", "拷贝路径"),
+        .onbCopied: ("Copied", "已拷贝"),
+        .onbDaemonBodyMonitorOnly: ("WhoRead records which apps touch your sensitive files and alerts you about unusual access. This build does not block.",
+                                    "WhoRead 会记录哪些应用碰了你的敏感文件，并在出现异常访问时提醒你。此版本不会拦截。"),
 
         .notifTitle: ("WhoRead", "WhoRead"),
         .notifBlockedTitle: ("WhoRead blocked an access", "WhoRead 拦截了一次访问"),
@@ -285,6 +389,11 @@ public enum L10n {
         .ruleAgentsNote: ("None selected means any AI agent.", "不选表示任意 AI agent。"),
         .rulePathNotMonitored: ("This path is not monitored yet: saving the rule adds it to the Custom category.", "这个路径尚未被监控：保存规则时会把它加入「自定义」类别。"),
         .ruleBlockAppFormat: ("Block %@ from %@", "拦截 %@ 访问 %@"),
+        // The rules "allow once" and "always allow" save (DaemonCore.answerRuleEdit), by the access they allow.
+        .ruleAllowReadFormat: ("Allow %@ to read %@", "允许 %@ 读取 %@"),
+        .ruleAllowWriteFormat: ("Allow %@ to write %@", "允许 %@ 写入 %@"),
+        .ruleAllowUseFormat: ("Allow %@ to use %@", "允许 %@ 使用 %@"),
+        .ruleAllowOnceSuffix: (" (10 minutes)", "（10 分钟）"),
         .ruleErrCategory: ("Choose a category.", "请选择类别。"),
         .ruleErrPath: ("The path must start with / or ~/.", "路径必须以 / 或 ~/ 开头。"),
         .ruleErrSigningID: ("Enter a signing ID.", "请填写 signing ID。"),
@@ -334,11 +443,15 @@ public enum L10n {
         .opSetacl: ("change ACL", "修改 ACL"),
         .opMount: ("mount over", "挂载覆盖"),
 
-        .errNotPermitted: ("Not permitted. Changes that weaken protection need the WhoRead app or sudo.", "没有权限：削弱保护的修改需要 WhoRead 应用或 sudo。"),
+        .errNotPermitted: ("Not permitted: the WhoRead monitor does not recognise this app as the signed WhoRead app, and changes that weaken protection need that app or sudo.",
+                           "没有权限：WhoRead 监控程序没有把这个应用识别为已签名的 WhoRead 应用，而削弱保护的修改需要该应用或 sudo。"),
         .errUnavailable: ("The WhoRead daemon is not running.", "WhoRead 守护进程没有运行。"),
         .errVersionMismatchFormat: ("The WhoRead app and daemon versions differ (%@). Update or restart the daemon.", "WhoRead 应用与守护进程版本不一致（%@）。请更新或重启守护进程。"),
         .errDaemonFormat: ("The daemon refused: %@", "守护进程拒绝了请求：%@"),
         .errAdminFormat: ("Administrator action failed: %@", "管理员操作失败：%@"),
+        .errNoAnswer: ("No answer from the WhoRead daemon.", "WhoRead 守护进程没有响应。"),
+        .errNotConsoleUser: ("The WhoRead monitor serves only the user logged in at the screen (and administrators). This app runs as another user, so it cannot show or answer questions. Use the WhoRead app of the user at the screen, or sudo whoread asks.",
+                             "WhoRead 监控程序只为当前在屏幕前登录的用户（以及管理员）服务。这个应用以其他用户身份运行，无法显示或回答问题。请使用屏幕前那个用户的 WhoRead 应用，或运行 sudo whoread asks。"),
     ]
 
     public static func mode(_ m: DaemonMode, _ language: Language = current) -> String {
@@ -379,14 +492,21 @@ public enum L10n {
         }
     }
 
+    /// The event's decision, and its note when it has one (`EventNote`).
     public static func decision(_ e: AnalyzedEvent, _ language: Language = current) -> String {
-        if e.isBenign { return t(.decBenign, language) }
-        switch e.decision {
-        case .observed: return t(.decObserved, language)
-        case .allowed: return t(.decAllowed, language)
-        case .denied: return t(.decDenied, language)
-        case .wouldDeny: return t(.decWouldDeny, language)
+        let text: String
+        if e.isBenign {
+            text = t(.decBenign, language)
+        } else {
+            switch e.decision {
+            case .observed: text = t(.decObserved, language)
+            case .allowed: text = t(.decAllowed, language)
+            case .denied: text = t(.decDenied, language)
+            case .wouldDeny: text = t(.decWouldDeny, language)
+            }
         }
+        guard let note = e.note else { return text }
+        return text + (language == .zhHans ? "，" : ", ") + EventNote.describe(note, language: language)
     }
 
     public static func kind(_ k: ResponsibleEntity.Kind, _ language: Language = current) -> String {
@@ -416,6 +536,38 @@ public enum L10n {
         }
     }
 
+    /// What a poll reads, as named in "not shown" and "could not read" notes.
+    public static func partName(_ part: SnapshotPart, _ language: Language = current) -> String {
+        switch part {
+        case .alerts: return t(.partAlerts, language)
+        case .live: return t(.partLive, language)
+        case .summaries: return t(.partSummaries, language)
+        case .rules: return t(.partRules, language)
+        case .settings: return t(.partSettings, language)
+        case .catalog: return t(.partCatalog, language)
+        case .agents: return t(.partAgents, language)
+        }
+    }
+
+    /// "a, b or c" ("a、b、c"): a list of things none of which can be shown.
+    static func alternatives(_ items: [String], _ language: Language) -> String {
+        guard language == .en, let last = items.last, items.count > 1 else { return items.joined(separator: "、") }
+        return items.dropLast().joined(separator: ", ") + " or " + last
+    }
+
+    /// The command that shows the same data in Terminal.
+    public static func partCommand(_ part: SnapshotPart) -> String {
+        switch part {
+        case .alerts: return "sudo whoread alerts"
+        case .live: return "sudo whoread tail"
+        case .summaries: return "sudo whoread apps"
+        case .rules: return "sudo whoread rules"
+        case .settings: return "whoread settings"
+        case .catalog: return "whoread catalog"
+        case .agents: return "whoread agents"
+        }
+    }
+
     /// Localized name of a built-in rule template (`Rule.template`).
     public static func templateName(_ template: String?, _ language: Language = current) -> String? {
         switch template {
@@ -439,24 +591,92 @@ public enum L10n {
         }
     }
 
-    /// What to show when the daemon did not take an answer. An allow refused for lack of privilege
-    /// (an unsigned build, not root) says how to give it from Terminal instead.
-    public static func answerError(_ e: IPCError, askID: Int64, action: AlertAction, _ language: Language = current) -> String {
+    /// What to show when the daemon did not take an answer to a question. An allow refused for lack
+    /// of privilege (not recognised as the signed app, not root) says how to give it from Terminal.
+    /// `notRecognised`: the dev LaunchDaemon does not recognise this app, and the notice about it says why
+    /// (`AppModel.notRecognisedText`): a dev install has no signed app to point at.
+    public static func answerError(_ e: IPCError, askID: Int64, action: AlertAction, notRecognised: Bool = false,
+                                   _ language: Language = current) -> String {
+        if isNotConsoleUser(e) { return t(.errNotConsoleUser, language) }
         switch e.code {
         case .notPermitted where AskAnswers.isAllow(action):
-            return f(.askAllowNotPermittedFormat, "sudo whoread ask \(askID) \(AskAnswers.cliVerb(action))", language: language)
+            return f(notRecognised ? .askAllowNotRecognisedFormat : .askAllowNotPermittedFormat,
+                     "sudo whoread ask \(askID) \(AskAnswers.cliVerb(action))", language: language)
+        // Denying is open to the console user: refused for a reason of its own (the stored rules could
+        // not be loaded), which the daemon's message gives. Not "this app is not recognised".
+        case .notPermitted:
+            return f(.errDaemonFormat, DisplayText.escaped(e.message, limit: 1000), language: language)
         case .notFound:
             return t(.askGone, language)
         default:
-            return message(for: e, language)
+            return answerOutcome(e, language) ?? message(for: e, language)
+        }
+    }
+
+    /// The same for an answer given on an alert (Alerts tab, alert banners; `whoread alert` words).
+    /// `kind`: the alert's kind, when known ("deny" on a question's alert is open to the console user).
+    public static func alertActionError(_ e: IPCError, alertID: Int64, action: AlertAction, kind: AlertKind? = nil,
+                                        notRecognised: Bool = false, _ language: Language = current) -> String {
+        if isNotConsoleUser(e) { return t(.errNotConsoleUser, language) }
+        if e.code == .notPermitted {
+            // "Block from now on", and "deny" on a question's alert, strengthen protection: open to the
+            // console user, so refused for a reason of its own.
+            if action == .blockFromNowOn || (action == .keepBlocking && kind == .ask) {
+                return f(.errDaemonFormat, DisplayText.escaped(e.message, limit: 1000), language: language)
+            }
+            return f(notRecognised ? .alertNotRecognisedFormat : .alertNotPermittedFormat,
+                     "sudo whoread alert \(alertID) \(alertCLIWord(action))", language: language)
+        }
+        return answerOutcome(e, language) ?? message(for: e, language)
+    }
+
+    /// The daemon serves only root and the user at the console: this app runs as another user. Every
+    /// request is refused then, whatever it is (ServiceHandler.authorize words it so).
+    static func isNotConsoleUser(_ e: IPCError) -> Bool {
+        e.code == .notPermitted && e.message.hasPrefix("only root or the console user")
+    }
+
+    /// `whoread alert ID WORD`.
+    static func alertCLIWord(_ a: AlertAction) -> String {
+        switch a {
+        case .allowOnce: return "allow-once"
+        case .alwaysAllow: return "always-allow"
+        case .keepBlocking: return "keep-blocking"
+        case .blockFromNowOn: return "block"
+        case .ignore: return "ignore"
+        case .trustApplePrograms: return "trust-apple"
+        }
+    }
+
+    /// Outcomes of an answer that a plain "refused" would misreport: the rule limit (nothing changed),
+    /// a rule or setting applied but not saved (it took effect), its alerts not marked handled (it took
+    /// effect), no reply or a reply this app cannot read (it may or may not have). The daemon's
+    /// messages are matched as DaemonCore words them (pinned by tests).
+    static func answerOutcome(_ e: IPCError, _ language: Language) -> String? {
+        switch e.code {
+        case .invalid where e.message.hasPrefix("too many rules"):
+            return t(.answerRuleLimit, language)
+        case .internalError where e.message.contains("applied but not saved"):
+            return f(.answerNotSavedFormat, DisplayText.escaped(e.message, limit: 300), language: language)
+        case .internalError where e.message.hasPrefix("answer applied, but its alerts could not be updated"):
+            return f(.answerAlertsNotUpdatedFormat, DisplayText.escaped(e.message, limit: 300), language: language)
+        case .unavailable:
+            return t(.answerNoReply, language)
+        // The daemon never answers a change with this code: the reply did not decode.
+        case .versionMismatch:
+            return t(.answerReplyUnreadable, language)
+        default:
+            return nil
         }
     }
 
     /// What to show for a failed request. Daemon messages are English; known codes get a
-    /// translated sentence.
-    public static func message(for e: IPCError, _ language: Language = current) -> String {
+    /// translated sentence. `notRecognised`: as for `answerError`.
+    public static func message(for e: IPCError, notRecognised: Bool = false, _ language: Language = current) -> String {
         switch e.code {
-        case .notPermitted: return t(.errNotPermitted, language)
+        case .notPermitted:
+            if isNotConsoleUser(e) { return t(.errNotConsoleUser, language) }
+            return t(notRecognised ? .errNotPermittedNotRecognised : .errNotPermitted, language)
         case .unavailable: return t(.errUnavailable, language)
         // The daemon's message can quote names and paths: one escaped line.
         case .versionMismatch: return f(.errVersionMismatchFormat, DisplayText.escaped(e.message, limit: 1000), language: language)

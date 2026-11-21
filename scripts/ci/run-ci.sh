@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REPORT="${1:?usage: run-ci.sh REPORT_FILE}"
 LOGS="$ROOT/build/ci-logs"
 mkdir -p "$LOGS"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 FAILED=0
 : > "$REPORT"
 {
@@ -36,7 +36,13 @@ stage() {
   else echo "## $name: FAIL (exit $rc, $((end - start)) s)" >> "$REPORT"; FAILED=1; fi
   {
     grep -E "$filter" "$log" | grep -v '^ *|' | awk '!seen[$0]++' | head -150
-    if [ $rc -ne 0 ]; then echo "--- last 40 lines"; tail -40 "$log"; fi
+    if [ $rc -ne 0 ]; then
+      # Compiler and linker diagnostics with their context (undefined symbols, the failing command).
+      echo "--- diagnostics"
+      grep -n -B3 -A15 -E "error:|Undefined symbols|ld: |duplicate symbol|clang: error|fatal error" "$log" | head -250
+      echo "--- last 40 lines"
+      tail -40 "$log"
+    fi
     echo
   } >> "$REPORT"
 }
@@ -59,6 +65,13 @@ stage vm-harness-selftest "^FAIL|passed," bash scripts/vm/selftest.sh
 stage app-bundle "^FAIL|failure|error" scripts/dev/sc-app-test.sh
 # Monitor-only facts the runner can show without Full Disk Access (listing events needs no root).
 stage eslogger-events "." eslogger --list-events
+# Last: installs WhoRead system-wide with scripts/install.sh (passwordless sudo), checks it, removes it.
+# Only on CI (or with WHOREAD_CI_INSTALL=1): elsewhere it would replace and remove the Mac's own WhoRead.
+if [ "${CI:-}" = true ] || [ "${WHOREAD_CI_INSTALL:-}" = 1 ]; then
+  stage install-acceptance "^(PASS|FAIL|SKIP|INCOMPLETE)|passed,|^      " bash scripts/ci/install-acceptance.sh
+else
+  printf '## install-acceptance: SKIP (not on CI: it installs and removes WhoRead system-wide; WHOREAD_CI_INSTALL=1 runs it)\n\n' >> "$REPORT"
+fi
 
 {
   echo "OVERALL: $([ $FAILED -eq 0 ] && echo PASS || echo FAIL)"

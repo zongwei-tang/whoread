@@ -1,8 +1,8 @@
 # WhoRead
 
-**看清 Mac 上是哪个 app、哪个 AI agent 在读你的密钥，并且拦住它。**
+**看清 Mac 上是哪个 app、哪个 AI agent 在读你的密钥。**
 
-WhoRead 盯住存放凭证和隐私数据的文件：SSH 密钥、云服务和开发工具的令牌、浏览器 Cookie、密码管理器、聊天记录等。每一次访问，它都会告诉你是哪个程序、由哪个 app 或 AI agent 启动、发生在什么时候。程序第一次碰这些文件时，它可以先问你；你说不行，它就拦下。
+WhoRead 盯住存放凭证和隐私数据的文件：SSH 密钥、云服务和开发工具的令牌、浏览器 Cookie、密码管理器、聊天记录等。每一次访问，它都会告诉你是哪个程序、由哪个 app 或 AI agent 启动、发生在什么时候。签名发布版还能在程序第一次碰这些文件时先问你，你说不行就拦下；签名发布版暂未推出，在那之前 WhoRead 只记录和提醒，不会询问，也不会拦截。
 
 所有数据只留在你的 Mac 上。WhoRead 从不读取文件内容，也从不联网。
 
@@ -21,8 +21,8 @@ macOS 会在 app 打开桌面、文稿、下载文件夹之前询问你，但读
 - **谁、读了什么、什么时候。** 每次访问敏感文件都会记录：程序本身、它的代码签名、启动它的完整进程链，以及要为它负责的 app 或 AI agent。
 - **内置 44 个类别**，可以修改：SSH、AWS、gcloud、Azure、Kubernetes、Docker、npm、PyPI、git 和 GitHub 凭证、GnuPG、钥匙串、浏览器资料、密码管理器、信息、微信、Telegram、Signal、邮件、通讯录、日历、照片、shell 历史、云盘、iPhone 备份、外接磁盘、各 AI 编程工具的会话记录，以及你添加的项目文件夹里的 `.env`、`*.pem`、`*.key`。也可以添加自己的路径和类别。
 - **认识 AI agent。** 能识别 Claude Code、Codex CLI、Gemini CLI、opencode、aider、Cursor，以及 Claude 和 ChatGPT 桌面版，包括它们启动的所有程序。
-- **先问你。** 开启拦截后，程序第一次碰受保护的文件、又没有规则能决定时，这次访问会先等着，同时弹出通知：*允许一次*、*始终允许*、*拒绝*、*始终拒绝*。你的选择会存成规则。来不及回答就当作拒绝。
-- **正常的使用者不打扰。** `ssh` 读 SSH 密钥、Chrome 读自己的 Cookie 属于正常情况，不会问你，除非是 AI agent 启动的。聚焦、时间机器、iCloud 等系统服务永远不会被问。
+- **先问你**（仅签名发布版）。开启拦截后，程序第一次碰受保护的文件、又没有规则能决定时，这次访问会先等着，同时弹出通知：*允许一次*、*始终允许*、*拒绝*、*始终拒绝*。你的选择会存成规则。来不及回答就当作拒绝。
+- **正常的使用者不打扰。** `ssh` 读 SSH 密钥、Chrome 读自己的 Cookie 属于正常情况，不会问你，除非是 AI agent 启动的，或者 WhoRead 没看到是谁启动的：后台服务启动前就开着的程序会被当成「不知道是谁启动的」，直到你重新打开它们（终端新开一个标签页就行）。聚焦、时间机器、iCloud 等系统服务永远不会被问。
 - **规则**可以对某个类别、某个严重级别或某个路径执行允许、拒绝或提醒，作用于某个程序、某个 app、所有非正常使用者，或者**所有由 AI agent 启动的程序**。
 - **AI agent 关不掉自己的看门狗。** 关闭拦截、允许访问、放宽规则都需要你的密码或 WhoRead app。拦截永远不会被自动关闭。
 - **菜单栏 app**：实时动态、提醒、应用、文件、AI agent、规则、设置，提供中英文界面；另有 `whoread` 命令行工具。
@@ -30,26 +30,21 @@ macOS 会在 app 打开桌面、文稿、下载文件夹之前询问你，但读
 ## 系统要求
 
 - macOS 14 Sonoma 或更新版本。
-- 安装后台服务需要管理员权限。
+- 用来编译的 Xcode（App Store 免费下载，装好后打开一次）。
+- 管理员密码，用来安装后台服务。
 - 拦截功能依靠 Endpoint Security 系统扩展，只能在签名发布版里运行。签名发布版暂未推出，在那之前 WhoRead 以**只监控模式**运行：记录和提醒，但不拦截。
 
 ## 开始使用
 
-编译并安装后台服务（只监控模式，使用 macOS 自带的 `eslogger`）：
-
 ```bash
 git clone https://github.com/zongwei-tang/whoread.git
 cd whoread
-swift build -c release
-sudo scripts/install-dev-daemon.sh eslogger
+scripts/install.sh
 ```
 
-然后给后台服务完全磁盘访问权限：**系统设置 → 隐私与安全性 → 完全磁盘访问权限 → + → ⌘⇧G →** `/usr/local/libexec/whoreadd`，再重启它：
+安装脚本会编译 WhoRead，问一次你的密码，然后安装后台服务、`whoread` 命令和菜单栏 app。接着它会打开「系统设置」，请你给后台服务 `/usr/local/libexec/whoreadd` 打开**完全磁盘访问权限**（每一步都会在屏幕上提示，路径已经帮你复制好）。最后它检查各部分能否正常通信，并启动菜单栏 app。app 第一次打开时，请允许它发送通知。
 
-```bash
-sudo launchctl kickstart -k system/com.whoread.daemon
-whoread status
-```
+更新到新版本：`git pull`，再运行一次 `scripts/install.sh`。新编译的 WhoRead 在 macOS 看来是另一个程序，所以要在完全磁盘访问权限里先选中旧的 `whoreadd` 点 - 删掉，再用 + 重新添加 `/usr/local/libexec/whoreadd`；如果监控还没开始，再用同样的方法添加 `/usr/bin/eslogger`。需要时脚本会显示这些步骤。
 
 ## 常用命令
 
@@ -89,8 +84,8 @@ sudo whoread catalog add-path ssh ~/keys/   # 再保护一个文件夹
 ## 卸载
 
 ```bash
-sudo scripts/uninstall-dev-daemon.sh          # 保留历史记录
-sudo scripts/uninstall-dev-daemon.sh --purge  # 连历史记录一起删除
+scripts/uninstall.sh          # 保留历史记录
+scripts/uninstall.sh --purge  # 连历史记录一起删除
 ```
 
 ## 文档

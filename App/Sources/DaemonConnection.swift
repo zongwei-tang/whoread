@@ -1,4 +1,3 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
 import AppKit
 import Foundation
 import Observation
@@ -7,6 +6,12 @@ import WhoReadIPC
 import WhoReadUIModel
 
 /// Talks to the daemon over XPC, polls it, and applies snapshots to the model on the main thread.
+///
+/// Two connections, each with its own queue and timer. The questions' connection reads the open
+/// questions (every second, every 250 ms while any is open) and carries the answers. The other one
+/// polls the status and history and carries every other change. The daemon serves each connection's
+/// messages one at a time, so a slow history read (a store busy writing a burst of events) never
+/// delays a question or an answer, and a refused one never hides them.
 @MainActor
 @Observable
 final class DaemonConnection {
@@ -16,11 +21,25 @@ final class DaemonConnection {
     var onboarding = OnboardingModel()
     var lastActionError: String?
     private(set) var machServiceName: String
+    /// Status, history and every change other than answers.
     @ObservationIgnored private var client: XPCClient
+    /// The open questions and the answers to them.
+    @ObservationIgnored private var askClient: XPCClient
     @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private var timerInterval: TimeInterval = 0
+    @ObservationIgnored private var askTimer: Timer?
+    /// Held while the polls must stay on time (`keepPollsTimely`).
+    @ObservationIgnored private var timelyActivity: NSObjectProtocol?
+    @ObservationIgnored private var askTimerInterval: TimeInterval = 0
     @ObservationIgnored private var schedule = PollSchedule()
+    /// The views on screen: full polls read the summaries only while one shows them.
+    @ObservationIgnored private var views = PollViews()
     @ObservationIgnored private var inFlight = false
+    @ObservationIgnored private var askInFlight = false
+    /// Reopen a connection the daemon did not take for the app (a wrong guess when it was accepted).
+    @ObservationIgnored private var recovery = ConnectionRecovery()
+    @ObservationIgnored private var askRecovery = ConnectionRecovery()
+    /// Whether the daemon serves the current questions' connection as the app (nil: not known yet).
+    @ObservationIgnored private var askClientServedAsApp: Bool?
     /// A full refresh was asked for while a poll was running: run it right after.
     @ObservationIgnored private var pendingFull = false
     /// Send `.hello` with the next poll: first poll, reconnect, new daemon instance.
@@ -35,6 +54,7 @@ final class DaemonConnection {
     /// Question banners left by a previous run of the app are withdrawn after the first poll.
     @ObservationIgnored private var staleAsksWithdrawn = false
     @ObservationIgnored private let queue = DispatchQueue(label: "whoread.app.ipc")
+    @ObservationIgnored private let askQueue = DispatchQueue(label: "whoread.app.asks")
 
     init() {
         // Not `client = XPCClient(machServiceName: machServiceName)`: with @Observable that reads
@@ -42,6 +62,8 @@ final class DaemonConnection {
         let name = DaemonConnection.resolveServiceName()
         machServiceName = name
         client = XPCClient(machServiceName: name)
+        askClient = XPCClient(machServiceName: name)
+        model.viaExtension = (name == DaemonConnection.extensionServiceName)
     }
 
     /// The system extension's Mach service from Info.plist (nil when the build has none).
@@ -53,11 +75,12 @@ final class DaemonConnection {
     }
 
     /// The running daemon writes its service name; otherwise the app's Info.plist (system
-    /// extension), otherwise the dev LaunchDaemon default.
+    /// extension), otherwise the dev LaunchDaemon default. The written name counts only when root
+    /// alone could have written it: a name someone else left there could lead the app to another
+    /// service (macos-4).
     static func resolveServiceName() -> String {
-        if let s = try? String(contentsOfFile: WhoReadPaths.dataDirectory + "/mach-service", encoding: .utf8) {
-            let name = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !name.isEmpty { return name }
+        if let name = try? TrustedFile.machServiceName(inDataDirectory: WhoReadPaths.dataDirectory) {
+            return name
         }
         return extensionServiceName ?? WhoReadPaths.machServiceName
     }
@@ -66,29 +89,47 @@ final class DaemonConnection {
     var connectedViaExtension: Bool { machServiceName == DaemonConnection.extensionServiceName }
 
     func start() {
+        pollAsks()
         poll(full: true)
-        armTimer()
+        armTimers()
     }
 
-    /// Polls every second, every 250 ms while questions are open; re-armed when that changes.
-    private func armTimer() {
+    /// Status and history every second; the questions every second, every 250 ms while any is open
+    /// (that timer is re-armed when it changes). Both fire on the main run loop in its common modes
+    /// (`PollTimer`), so also while a menu is open or a window is resized: the daemon holds an access
+    /// for a question only while the app has read the questions in the last 5 seconds.
+    private func armTimers() {
+        keepPollsTimely(model.needsTimelyPolls)
+        if timer == nil {
+            timer = PollTimer.repeating(every: PollSchedule.idleInterval) { [weak self] in
+                MainActor.assumeIsolated { self?.timerFired() }
+            }
+        }
         let interval = model.pollInterval
-        guard timer == nil || interval != timerInterval else { return }
-        timer?.invalidate()
-        timerInterval = interval
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.timerFired() }
+        guard askTimer == nil || interval != askTimerInterval else { return }
+        askTimer?.invalidate()
+        askTimerInterval = interval
+        askTimer = PollTimer.repeating(every: interval) { [weak self] in
+            MainActor.assumeIsolated { self?.pollAsks() }
+        }
+    }
+
+    /// While questions can be asked (enforcement active) or are open, App Nap must not stretch the polls
+    /// past the daemon's 5 seconds: a menu bar app with no window open is a candidate. Monitor-only
+    /// installations do not hold it (nothing waits for an answer, and it costs battery).
+    private func keepPollsTimely(_ timely: Bool) {
+        if timely, timelyActivity == nil {
+            timelyActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                   reason: "Reading WhoRead's questions in time")
+        } else if !timely, let activity = timelyActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            timelyActivity = nil
         }
     }
 
     private func timerFired() {
         // Until settings arrive, every poll is full: notifications are planned only with settings.
-        switch schedule.kind(now: Date(), openAsks: model.asks.count, needsFull: model.settings == nil) {
-        case .full: poll(full: true)
-        // Only between successful polls: a handshake or an error is left to the fast poll.
-        case .asks where !needsHello && model.lastError == nil: pollAsks()
-        case .fast, .asks: poll(full: false)
-        }
+        poll(full: schedule.kind(now: Date(), needsFull: model.settings == nil) == .full)
     }
 
     func poll(full: Bool) {
@@ -104,8 +145,13 @@ final class DaemonConnection {
         let cursor = model.liveCursor
         let benign = model.showSystemNoise
         let hello = needsHello
+        // Every second only the alerts that changed; every 10 s (and after a change) the whole list.
+        let alertsSince = full ? nil : model.alertsSince
+        let summaries = views.needsSummaries
+        let unread = views.needsUnreadAlerts(unreadOnly: model.alertsUnreadOnly)
         queue.async {
-            let snapshot = SnapshotFetcher.fetch(client, liveAfter: cursor, includeBenign: benign, full: full, hello: hello)
+            let snapshot = SnapshotFetcher.fetch(client, liveAfter: cursor, includeBenign: benign, full: full, hello: hello,
+                                                 alertsSince: alertsSince, summaries: summaries, unreadAlerts: unread)
             Task { @MainActor in
                 self.inFlight = false
                 self.received(snapshot)
@@ -114,48 +160,106 @@ final class DaemonConnection {
         }
     }
 
-    /// Only the open questions (the 250 ms ticks between fast polls): answered ones disappear and
-    /// their banners are withdrawn without fetching the alerts four times a second.
+    /// A view that needs more than the fast poll appeared or disappeared (`PollViews`). One that needs
+    /// the summaries (or the unread alerts on their own) is filled at once, not at the next poll.
+    func setShown(_ view: PollViews.View, _ shown: Bool) {
+        let before = views
+        views.set(view, shown: shown)
+        let unreadOnly = model.alertsUnreadOnly
+        if views.needsSummaries && !before.needsSummaries {
+            poll(full: true)
+        } else if views.needsUnreadAlerts(unreadOnly: unreadOnly) && !before.needsUnreadAlerts(unreadOnly: unreadOnly) {
+            poll(full: false)
+        }
+    }
+
+    /// The open questions, on their own connection: answered ones disappear and their banners are
+    /// withdrawn within a quarter second, whatever the status and history poll is doing.
     private func pollAsks() {
-        guard !inFlight else { return }
-        inFlight = true
-        let client = self.client
-        queue.async {
-            let asks = SnapshotFetcher.fetchAsks(client)
+        guard !askInFlight else { return }
+        askInFlight = true
+        let client = askClient
+        let check = askClientServedAsApp == nil
+        askQueue.async {
+            let poll = SnapshotFetcher.fetchAsks(client)
+            // Once per connection, before any question needs an "allow" on it; only after a read that
+            // was answered (a daemon that does not answer would make an answer queued here wait twice).
+            var served: Bool?
+            if check, case .asks = poll { served = SnapshotFetcher.isServedAsApp(client) }
             Task { @MainActor in
-                self.inFlight = false
-                if let asks {
-                    self.model.apply(response: .asks(asks))
-                    self.planAsks()
-                    self.armTimer()
-                }
-                if self.pendingFull { self.poll(full: true) }
+                self.askInFlight = false
+                if let served, client === self.askClient { self.askClientServedAsApp = served }
+                self.received(asks: poll)
             }
+        }
+    }
+
+    private func received(asks poll: AskPoll) {
+        model.apply(asks: poll)
+        if case .failed(let e) = poll {
+            // Banners stay: the questions may still be open, and a refused answer says so.
+            if e.code == .unavailable {
+                // The next message may reach a new daemon instance: a new decision whether this is the app.
+                askClientServedAsApp = nil
+                reresolveService()
+            }
+            // A reply this app cannot read: the next poll's handshake gives the reason in words.
+            if e.code == .versionMismatch, model.versionProblem == nil { needsHello = true }
+        } else {
+            planAsks()
+            // Paths hidden, or the check refused: the daemon did not take this connection for the app.
+            let refused = model.asksPathsHidden || askClientServedAsApp == false
+            if askRecovery.shouldReconnect(now: Date(), refused: refused) { reconnect(questions: true) }
+        }
+        armTimers()
+    }
+
+    /// Re-resolves the service: the system extension may have started after us.
+    private func reresolveService() {
+        let name = DaemonConnection.resolveServiceName()
+        guard name != machServiceName else { return }
+        machServiceName = name
+        model.viaExtension = connectedViaExtension
+        reconnect(questions: false)
+        reconnect(questions: true)
+    }
+
+    /// A new connection (a new decision whether it is the app). The old one is closed after what
+    /// was already queued on it: an answer or a change in flight is not cut off.
+    private func reconnect(questions: Bool) {
+        let fresh = XPCClient(machServiceName: machServiceName)
+        let old: XPCClient
+        if questions {
+            old = askClient
+            askClient = fresh
+            askClientServedAsApp = nil
+            askQueue.async { old.invalidate() }
+        } else {
+            old = client
+            client = fresh
+            queue.async { old.invalidate() }
         }
     }
 
     private func received(_ snapshot: Snapshot) {
         if snapshot.error?.code == .unavailable {
             needsHello = true
-            // Re-resolve: the system extension may have started after us.
-            let name = DaemonConnection.resolveServiceName()
-            if name != machServiceName {
-                machServiceName = name
-                client.invalidate()
-                client = XPCClient(machServiceName: name)
-            }
+            reresolveService()
         } else if snapshot.handshake != nil {
             needsHello = false
-        } else if snapshot.error?.code == .versionMismatch, model.versionProblem == nil {
+        } else if model.versionProblem == nil,
+                  snapshot.error?.code == .versionMismatch || snapshot.failures.values.contains(where: { $0.code == .versionMismatch }) {
             // An answer this app cannot read, from a daemon it has not greeted (replaced between
             // two polls): the handshake gives the reason in words instead of a decoder dump.
             needsHello = true
         }
         model.apply(snapshot)
         if model.daemonRestarts != daemonRestarts {
-            // Another daemon instance (maybe another version): handshake again.
+            // Another daemon instance (maybe another version): handshake again, and check again whether
+            // it takes the questions' connection for the app.
             daemonRestarts = model.daemonRestarts
             needsHello = true
+            askClientServedAsApp = nil
         }
         L10n.current = model.language
         if registeredLanguage != model.language {
@@ -163,12 +267,18 @@ final class DaemonConnection {
             registeredLanguage = model.language
             NotificationManager.shared.registerCategories(language: model.language)
         }
-        armTimer()
+        armTimers()
+        // History refused: the daemon did not take this connection for the app (or this is not the
+        // signed app; then the retries back off to every 10 minutes).
+        if recovery.shouldReconnect(now: Date(), refused: snapshot.refusedRecordedRead) { reconnect(questions: false) }
         guard snapshot.error == nil else { return }
         if let status = model.status { planNotices(status) }
-        planAsks()
         if let settings = model.settings {
-            for n in planner.plan(model.alerts, settings: settings.notifications, formatter: model.formatter) {
+            // Only when this poll read the alerts (nil when refused or failed): the first read seeds. The
+            // whole list as listed now, not only what changed since the last fast poll: the planner
+            // forgets alerts the list no longer has.
+            for n in planner.plan(snapshot.alerts == nil ? nil : model.alerts, settings: settings.notifications,
+                                  formatter: model.formatter, agentName: model.agentName) {
                 NotificationManager.shared.post(n)
             }
         }
@@ -190,8 +300,11 @@ final class DaemonConnection {
     /// One banner per open question; banners of questions no longer open are withdrawn.
     private func planAsks() {
         // The daemon lists at most 200 questions; a capped reply must not withdraw banners.
-        let complete = model.asks.count < 200 && (model.status?.pendingAsks ?? 0) <= model.asks.count
-        let plan = planner.plan(asks: model.asks, formatter: model.formatter, complete: complete, agentName: model.agentName)
+        let complete = model.asksListComplete
+        // Before the first full poll, category and AI agent names are not known yet: such banners are
+        // replaced once they are.
+        let plan = planner.plan(asks: model.asks, formatter: model.formatter, complete: complete, agentName: model.agentName,
+                                namesKnown: model.catalog != nil && model.agents != nil)
         NotificationManager.shared.remove(asks: plan.remove)
         for n in plan.post { NotificationManager.shared.post(n) }
         if complete && !staleAsksWithdrawn {
@@ -201,22 +314,33 @@ final class DaemonConnection {
     }
 
     /// Runs a request off the main thread, applies the daemon's answer, then refreshes.
-    /// `failed` describes a refusal (default: `L10n.message(for:)`) and may act on it.
-    private func run(_ work: @escaping @Sendable (XPCClient) throws -> IPCResponse,
+    /// `failed` describes a refusal (default: `AppModel.actionError`) and may act on it. `questions`: on
+    /// the questions' connection (an answer), never queued behind a history read.
+    private func run(_ work: @escaping @Sendable (XPCClient) throws -> IPCResponse, questions: Bool = false,
                      failed: ((IPCError) -> String)? = nil, then: (() -> Void)? = nil) {
-        let client = self.client
-        queue.async {
+        let client = questions ? askClient : self.client
+        (questions ? askQueue : queue).async {
             var response: IPCResponse?
             var failure: IPCError?
-            do { response = try work(client) } catch let e as IPCError { failure = e } catch { failure = IPCError(.internalError, "\(error)") }
+            do {
+                response = try work(client)
+            } catch let e as IPCError {
+                failure = e
+            } catch let e as DecodingError {
+                // A reply in a shape this app does not know: another version, not a refusal.
+                failure = SnapshotFetcher.ipcError(e)
+            } catch {
+                failure = IPCError(.internalError, "\(error)")
+            }
             Task { @MainActor in
                 if let failure {
-                    self.lastActionError = failed?(failure) ?? L10n.message(for: failure)
+                    self.lastActionError = failed?(failure) ?? self.model.actionError(failure)
                 } else {
                     self.lastActionError = nil
                     if let response { self.model.apply(response: response) }
                     then?()
                 }
+                if questions { self.pollAsks() }
                 self.poll(full: true)
             }
         }
@@ -227,27 +351,61 @@ final class DaemonConnection {
     }
 
     /// `fromNotification`: the user answered a banner, so explain there if "block from now on"
-    /// saved a rule that cannot block right now.
+    /// saved a rule that cannot block right now. A question's alert is answered like the question, on
+    /// the questions' connection.
     func act(on alert: Int64, _ action: AlertAction, fromNotification: Bool = false) {
-        perform(.alertAction(alertID: alert, action: action)) {
+        let kind = model.alert(id: alert)?.kind
+        run({ try $0.call(.alertAction(alertID: alert, action: action)) }, questions: kind == .ask, failed: { e in
+            // The rule limit, an answer applied but not saved, no reply: said as such, not "refused".
+            let text = self.model.alertActionError(e, alertID: alert, action: action, kind: kind)
+            if fromNotification {
+                NotificationManager.shared.post(SystemNotice(identifier: "whoread.alert-failed-\(alert)",
+                                                             title: L10n.t(.notifAskFailedTitle), body: text), tab: .alerts)
+            }
+            return text
+        }) {
             guard fromNotification, action == .blockFromNowOn, let caveat = self.model.enforcementCaveat else { return }
             NotificationManager.shared.post(SystemNotice(identifier: "whoread.rule-not-blocking-\(alert)",
                                                          title: L10n.t(.notifRuleNotBlockingTitle), body: caveat), tab: .rules)
         }
     }
 
-    /// Answers an ask-mode question. Allowing needs the signed app (or root): an unsigned build is
-    /// refused, and the error says how to allow from Terminal instead. `fromNotification`: the user
-    /// answered a banner, so a refusal is posted as a notice too (the menu may not be open).
+    /// Answers an ask-mode question, on the questions' connection (never queued behind a history
+    /// read). Allowing needs the signed app (or root): an unrecognised build is refused, and the error
+    /// says how to allow from Terminal instead. `fromNotification`: the user answered a banner, so a
+    /// refusal is posted as a notice too (the menu may not be open).
     func answer(ask id: Int64, _ action: AlertAction, fromNotification: Bool = false) {
-        run({ try $0.call(.answerAsk(id: id, action: action)) }, failed: { e in
-            let text = L10n.answerError(e, askID: id, action: action)
-            if fromNotification {
-                NotificationManager.shared.post(SystemNotice(identifier: "whoread.ask-failed-\(id)",
-                                                             title: L10n.t(.notifAskFailedTitle), body: text), tab: .alerts)
+        let client = askClient
+        askQueue.async {
+            var response: IPCResponse?
+            var failure: IPCError?
+            do { response = try client.call(.answerAsk(id: id, action: action)) } catch { failure = SnapshotFetcher.ipcError(error) }
+            Task { @MainActor in
+                if let failure {
+                    let text = self.model.answerError(failure, askID: id, action: action)
+                    self.lastActionError = text
+                    // Allowing refused: this connection may not have been taken for the app.
+                    if failure.code == .notPermitted, AskAnswers.isAllow(action),
+                       self.askRecovery.shouldReconnect(now: Date(), refused: true) {
+                        self.reconnect(questions: true)
+                    }
+                    if fromNotification {
+                        NotificationManager.shared.post(SystemNotice(identifier: "whoread.ask-failed-\(id)",
+                                                                     title: L10n.t(.notifAskFailedTitle), body: text), tab: .alerts)
+                    }
+                } else {
+                    self.lastActionError = nil
+                    if let response {
+                        // The questions still open: the answered one's banner is withdrawn now.
+                        self.model.apply(response: response)
+                        self.planAsks()
+                    }
+                }
+                self.pollAsks()
+                // An answer saves a rule (or a setting) and settles alerts.
+                self.poll(full: true)
             }
-            return text
-        })
+        }
     }
 
     /// The "trust all Apple programs" switch: its own request on the daemon's current settings (not
@@ -266,10 +424,7 @@ final class DaemonConnection {
     /// the engine changes exceptions and use counts on its own, and the model's copy can be up to
     /// 10 s old. `then` runs only if the daemon accepted the rule.
     func save(rule: Rule, then: (() -> Void)? = nil) {
-        run({ client in
-            let current = try client.rules().first { $0.id == rule.id }
-            return try client.call(.upsertRule(rule.keepingDaemonState(of: current)))
-        }, then: then)
+        run({ try RuleSave.save(rule, with: $0) }, then: then)
     }
 
     /// The rule row's switch: flips `enabled` on the daemon's current copy, nothing else.
@@ -320,30 +475,30 @@ final class DaemonConnection {
     }
 
     private func enableEnforcement() {
-        if model.status?.killSwitchFilePresent == true {
-            // The UI's own fallback (or `whoread kill-switch engage`) left the file: remove it.
-            guard runAsAdministrator("/bin/rm -f '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") else { return }
+        guard model.status?.killSwitchFilePresent == true else { return perform(.setEnforcement(enabled: true)) }
+        // The UI's own fallback (or `whoread kill-switch engage`) left the file: remove it.
+        runAsAdministrator("/bin/rm -f '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") { done in
+            if done { self.perform(.setEnforcement(enabled: true)) }
         }
-        perform(.setEnforcement(enabled: true))
     }
 
-    /// Kill switch #3 (file) from the UI: asks for an administrator password via AppleScript.
+    /// Kill switch #3 (file) from the UI: asks for an administrator password (the system's dialog).
     func engageKillSwitchWithAdminRights() {
-        _ = runAsAdministrator("/usr/bin/touch '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'")
+        runAsAdministrator("/usr/bin/touch '\(DaemonConnection.quoted(WhoReadPaths.killSwitchFile))'") { _ in
+            self.poll(full: true)
+        }
     }
 
     private static func quoted(_ path: String) -> String { path.replacingOccurrences(of: "'", with: "") }
 
-    /// Returns false (and sets `lastActionError`, unless the user cancelled) on failure.
-    private func runAsAdministrator(_ command: String) -> Bool {
-        var error: NSDictionary?
-        NSAppleScript(source: "do shell script \"\(command)\" with administrator privileges")?.executeAndReturnError(&error)
-        guard let error else { return true }
-        // -128: the user cancelled the password prompt.
-        if (error[NSAppleScript.errorNumber] as? Int) != -128 {
-            lastActionError = L10n.f(.errAdminFormat, (error[NSAppleScript.errorMessage] as? String) ?? "\(error)")
+    /// Runs `command` as an administrator in osascript (`AdminShell`), off the main thread: the
+    /// questions are still read, and the menu still answers, while the password dialog is open.
+    /// `then` gets whether it ran; on a failure other than a cancelled dialog, `lastActionError` says why.
+    private func runAsAdministrator(_ command: String, then: @escaping @MainActor @Sendable (Bool) -> Void) {
+        AdminShell.run(command, prompt: L10n.t(.killSwitchAdminPrompt, model.language)) { [weak self] outcome in
+            if case .failed(let message) = outcome { self?.lastActionError = L10n.f(.errAdminFormat, message) }
+            then(outcome == .done)
         }
-        return false
     }
 
     func openFullDiskAccessSettings() {

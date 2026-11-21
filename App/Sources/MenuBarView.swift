@@ -1,4 +1,3 @@
-// NOT YET COMPILED (see WhoReadApp.swift).
 import SwiftUI
 import WhoReadCore
 import WhoReadIPC
@@ -17,19 +16,29 @@ struct MenuBarView: View {
                 Text(L10n.f(.errVersionMismatchFormat, problem)).font(.caption).foregroundStyle(.red)
             }
             Divider()
+            // Questions first, whatever the status poll says: they are read on their own connection.
+            if !model.asks.isEmpty {
+                openAsks
+                Divider()
+            } else if let problem = model.asksProblemText {
+                Text(problem).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Divider()
+            }
             if model.connected, let status = model.liveStatus {
-                if !model.asks.isEmpty {
-                    openAsks
-                    Divider()
+                // Not recognised by the background service: what is missing and how to fix it, for as
+                // long as it lasts (through the extension: what only the signed app sees).
+                if let notice = model.accessNotice {
+                    NoticeText(text: notice).font(.callout)
                 }
                 quickToggles(status)
                 Divider()
                 recentAlerts
             } else if model.connected {
-                // The daemon answers but its state cannot be read (another version): no stale
-                // switches, but enforcement can still be turned off.
+                // The daemon answers but its state cannot be read (another version, another user): no
+                // stale switches, but enforcement can still be turned off.
                 if model.versionProblem == nil, let e = model.lastError {
-                    Text(L10n.message(for: e)).font(.caption).foregroundStyle(.red)
+                    Text(model.connectionProblemText ?? L10n.message(for: e)).font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Button(L10n.t(.killSwitchAdmin)) { connection.engageKillSwitchWithAdminRights() }
                     .font(.caption)
@@ -37,7 +46,9 @@ struct MenuBarView: View {
                     Text(err).font(.caption).foregroundStyle(.red)
                 }
             } else {
-                Text(L10n.t(.errUnavailable)).foregroundStyle(.secondary)
+                // The dev daemon may be refusing this very app (a rebuilt one): the text says so.
+                Text(model.unreachableText ?? L10n.t(.errUnavailable)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                 Button(L10n.t(.openSetup)) {
                     NavigationState.shared.showOnboarding = true
                     open(.live)
@@ -75,14 +86,21 @@ struct MenuBarView: View {
                 get: { status.monitoringPaused },
                 set: { connection.setPaused($0) }))
             // Shows what is in effect: off after the kill-switch file. Never switched off automatically.
+            // Monitor-only: cannot be turned on, and says why (turning it off always works).
             Toggle(L10n.t(.enforcement), isOn: Binding(
                 get: { model.enforcementSwitchOn },
                 set: { connection.setEnforcement($0) }))
-            if let inactive = model.enforcementInactiveText {
+                .disabled(!model.enforcementSwitchUsable)
+            if let unavailable = model.blockingUnavailableText {
+                Text(unavailable).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if let inactive = model.enforcementInactiveText {
                 Text(inactive).font(.caption).foregroundStyle(.orange)
             }
             if let slow = model.slowResponsesText {
                 Text(slow).font(.caption).foregroundStyle(.orange)
+            }
+            if let dropped = model.kernelDropsText {
+                Text(dropped).font(.caption).foregroundStyle(.orange)
             }
             if status.enforcementActive {
                 Button(L10n.t(.killSwitchAdmin)) { connection.engageKillSwitchWithAdminRights() }
@@ -95,11 +113,12 @@ struct MenuBarView: View {
         }
     }
 
-    /// Questions waiting for an answer, those about to be denied first, with the answers as buttons.
+    /// Questions waiting for an answer, with the answers as buttons. Each keeps its place while it is
+    /// open (`AppModel.listedAsks`): a click never lands on another question's buttons.
     private var openAsks: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(L10n.t(.asksTitle)).font(.subheadline.weight(.semibold))
-            ForEach(Array(model.asksByUrgency.prefix(3))) { ask in
+            ForEach(Array(model.listedAsks.prefix(3))) { ask in
                 AskRow(ask: ask)
             }
             if model.asks.count > 3 {
@@ -116,7 +135,10 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(L10n.t(.recentAlerts)).font(.subheadline.weight(.semibold))
             let alerts = model.alerts.prefix(5)
-            if alerts.isEmpty {
+            // Refused or not read: never "No alerts".
+            if let note = model.unavailableNote(.alerts) {
+                Text(note).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            } else if alerts.isEmpty {
                 Text(L10n.t(.noAlerts)).foregroundStyle(.secondary)
             }
             ForEach(Array(alerts)) { alert in

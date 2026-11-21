@@ -8,6 +8,9 @@ public struct Classification: Hashable, Sendable, Codable {
     public var prefix: String
     /// Path below the prefix; empty when the path is the prefix itself.
     public var relativePath: String
+    /// The path is in the category only because a link the classifier followed leads into one of its
+    /// prefixes (anyone can make such a link in their own files).
+    public var viaLink: Bool = false
 }
 
 /// One concrete prefix after `~` expansion and symlink resolution.
@@ -106,7 +109,8 @@ public final class PathClassifier: @unchecked Sendable {
                     // Links inside a dotfile directory (dotfile managers: ~/.aws/credentials -> ~/dotfiles/…):
                     // ES reports the resolved path, so the target must be monitored too.
                     if PathClassifier.walksForLinks(clean, homes: normalizer.homeDirectories) {
-                        for (link, target) in symlinks.symlinks(under: clean, maxDepth: 3, maxEntries: 2000) {
+                        for (link, target) in symlinks.symlinks(under: clean, maxDepth: PathClassifier.linkWalkMaxDepth,
+                                                                maxEntries: PathClassifier.linkWalkMaxEntries) {
                             let t = PathClassifier.stripTrailingSlash(normalizer.normalize(target))
                             if PathClassifier.isMonitorableTarget(t)
                                 && PathClassifier.isUsableLinkTarget(t, inside: clean, homes: normalizer.homeDirectories) {
@@ -152,6 +156,29 @@ public final class PathClassifier: @unchecked Sendable {
             let home = PathNormalizer.fold(stripTrailingSlash(h))
             return p.hasPrefix(home + "/.")
         }
+    }
+
+    /// How deep and how many entries a search for links goes in one directory (`SymlinkResolver`).
+    /// Agent and editor data nests deeper than dotfile managers do (`~/.codex/sessions/YYYY/MM/DD`);
+    /// the daemon also follows links that file events show, at any depth.
+    public static let linkWalkMaxDepth = 8
+    public static let linkWalkMaxEntries = 20_000
+
+    /// The directories `init` searches for links, in the order it does: every expanded catalog path
+    /// (project roots for that category) that `walksForLinks` accepts, each once.
+    public static func linkWalkDirectories(catalog: Catalog, normalizer: PathNormalizer, projectRoots: [String]) -> [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        for category in catalog.categories where category.enabled {
+            for pattern in category.kind == .projectRoots ? projectRoots : category.paths {
+                for expanded in normalizer.expand(pattern) {
+                    let clean = stripTrailingSlash(expanded)
+                    guard clean != "/" && !clean.isEmpty, walksForLinks(clean, homes: normalizer.homeDirectories) else { continue }
+                    if seen.insert(PathNormalizer.fold(clean)).inserted { out.append(clean) }
+                }
+            }
+        }
+        return out
     }
 
     /// A link target that may become a monitored prefix: never the root, a home, or a directory
@@ -282,6 +309,11 @@ public final class PathClassifier: @unchecked Sendable {
         classify(normalized: normalizer.normalize(rawPath), truncated: truncated)
     }
 
+    /// Every category of a raw path (normalizes first); see `classifications(normalized:)`.
+    public func classifications(_ rawPath: String, truncated: Bool = false) -> [Classification] {
+        classifications(normalized: normalizer.normalize(rawPath), truncated: truncated)
+    }
+
     /// Terminals along the path, deepest first, with the depth (component count) at which each ends.
     private func terminals(_ folded: [String]) -> [(node: TrieNode, depth: Int)] {
         var node = root
@@ -312,17 +344,41 @@ public final class PathClassifier: @unchecked Sendable {
     /// - A project root inside another prefix (a cloud folder) keeps its `.env` (it wins ties), but a
     ///   project root inside `~/.aws` does not turn the credentials there into project-secrets/high
     ///   files.
+    ///
+    /// This is the category the path is named by. A path inside nested prefixes also belongs to the
+    /// other categories that accept it: `classifications` returns them all, and analysis and rules use
+    /// every one.
     public func classify(normalized path: String, truncated: Bool = false) -> Classification? {
+        memberships(path, truncated: truncated, all: false).first
+    }
+
+    /// Every category whose prefix contains the path and whose patterns accept it, each once at its
+    /// most severe prefix. The first is the category the path is named by (`classify`; unless it is
+    /// there only through a link, its owners also own some of the others, see `owns`); the others
+    /// follow most severe first, then deepest prefix first, then catalog order. An SSH key in a custom
+    /// folder inside `~/.ssh` is ssh/critical and custom/high: ssh rules keep covering it, and the
+    /// custom category's rules cover it too. Nothing is demoted or dropped, so a rule or an answer
+    /// about one category never decides another.
+    public func classifications(normalized path: String, truncated: Bool = false) -> [Classification] {
+        memberships(path, truncated: truncated, all: true)
+    }
+
+    /// `classify` first; with `all`, then every other category that accepts the path (see
+    /// `classifications`).
+    private func memberships(_ path: String, truncated: Bool, all: Bool) -> [Classification] {
         let originalComponents = PathNormalizer.components(path)
         let folded = PathNormalizer.components(PathNormalizer.fold(path))
         // Case folding can change component content but never the "/" count (scalar split).
-        guard originalComponents.count == folded.count else { return nil }
+        guard originalComponents.count == folded.count else { return [] }
         let lastComponent = originalComponents.last ?? ""
         func better(_ a: Classification, _ b: Classification) -> Bool {
             if a.severity != b.severity { return a.severity > b.severity }
             return (categoryOrder[a.categoryID] ?? 0) < (categoryOrder[b.categoryID] ?? 0)
         }
 
+        var primary: Classification?
+        // Every acceptance, deepest prefix first (only with `all`).
+        var found: [(c: Classification, depth: Int)] = []
         // The best classification by prefixes that only add severity, so far (deeper ones first).
         var additive: (c: Classification, depth: Int, winsTies: Bool)?
         for (match, depth) in terminals(folded) {
@@ -338,15 +394,18 @@ public final class PathClassifier: @unchecked Sendable {
                     severity = effectiveSeverity(spec: spec, relativePath: relative, fileName: lastComponent)
                 }
                 if let severity {
+                    let viaLink = match.viaLinkOnly.contains(categoryID)
                     let c = Classification(categoryID: categoryID, severity: severity,
-                                           prefix: match.terminalPath ?? "", relativePath: relative)
-                    if let winsTies = addsSeverityOnly(spec, viaLink: match.viaLinkOnly.contains(categoryID)) {
+                                           prefix: match.terminalPath ?? "", relativePath: relative, viaLink: viaLink)
+                    if all { found.append((c, depth)) }
+                    if let winsTies = addsSeverityOnly(spec, viaLink: viaLink) {
                         if bestAdditive.map({ better(c, $0.c) }) ?? true { bestAdditive = (c, winsTies) }
                     } else if best.map({ better(c, $0) }) ?? true {
                         best = c
                     }
                 }
             }
+            guard primary == nil else { continue }
             // A shallower one replaces a deeper one unless the deeper one is more severe (or as severe
             // and winning ties).
             if let b = bestAdditive {
@@ -356,12 +415,37 @@ public final class PathClassifier: @unchecked Sendable {
             if let best {
                 // On the same prefix, only a more severe one wins.
                 if let a = additive, a.c.severity > best.severity || (a.winsTies && a.depth > depth && a.c.severity == best.severity) {
-                    return a.c
+                    primary = a.c
+                } else {
+                    primary = best
                 }
-                return best
+                if !all { break }
             }
         }
-        return additive?.c
+        guard let first = primary ?? additive?.c else { return [] }
+        guard all, found.count > 1 else { return [first] }
+        // Each category once, at its most severe prefix (ties: the deepest, found first); through a
+        // link only when no prefix of the category itself holds the path.
+        var others: [(c: Classification, depth: Int)] = []
+        var head = first
+        for f in found {
+            if f.c.categoryID == head.categoryID {
+                head.severity = max(head.severity, f.c.severity)
+                head.viaLink = head.viaLink && f.c.viaLink
+            } else if let i = others.firstIndex(where: { $0.c.categoryID == f.c.categoryID }) {
+                let viaLink = others[i].c.viaLink && f.c.viaLink
+                if f.c.severity > others[i].c.severity { others[i] = f }
+                others[i].c.viaLink = viaLink
+            } else {
+                others.append(f)
+            }
+        }
+        others.sort { a, b in
+            if a.c.severity != b.c.severity { return a.c.severity > b.c.severity }
+            if a.depth != b.depth { return a.depth > b.depth }
+            return (categoryOrder[a.c.categoryID] ?? 0) < (categoryOrder[b.c.categoryID] ?? 0)
+        }
+        return [head] + others.map(\.c)
     }
 
     /// nil for a prefix that classifies what is below it whatever shallower prefixes say (a standard
@@ -478,6 +562,29 @@ public final class PathClassifier: @unchecked Sendable {
     public func isOwner(_ process: ProcessRecord, of categoryID: String) -> Bool {
         guard let spec = categoriesByID[categoryID] else { return false }
         return spec.owners.contains { $0.matches(process) }
+    }
+
+    /// Whether an owner counts as owner of `category` for a path that belongs to it: an owner of the
+    /// category itself, or of the category the path is named by (`naming`, see
+    /// `ownerLendingCategory`) when `category` is not more severe or has no owners of its own (a
+    /// volume, a custom folder). Chrome reading its cookies in a home on an external volume, or ssh its
+    /// config there, owns the volume side too; ssh is no owner of a critical aws file that a medium ssh
+    /// path was added inside. `isOwner` takes a category ID (callers cache it).
+    public func owns(_ category: TargetCategory, namedBy naming: TargetCategory?, isOwner: (String) -> Bool) -> Bool {
+        if isOwner(category.id) { return true }
+        guard let naming, naming.id != category.id else { return false }
+        guard naming.severity >= category.severity || categoriesByID[category.id]?.owners.isEmpty == true else { return false }
+        return isOwner(naming.id)
+    }
+
+    /// The category whose owners `owns` lets own a path's other categories: the first of
+    /// `classifications` (at the severity the caller judges it), when the path has several and is not
+    /// in that one only through a link. Anyone can link a folder of theirs into `~/.aws`; that must not
+    /// make the aws CLI an owner of what is in that folder.
+    public static func ownerLendingCategory(_ classifications: [Classification], judgedAs categories: [TargetCategory]) -> TargetCategory? {
+        guard categories.count > 1, let first = classifications.first, !first.viaLink,
+              categories[0].id == first.categoryID else { return nil }
+        return categories[0]
     }
 
     /// Which categories have at least one existing prefix. `exists` is injected (the daemon stats as root).
