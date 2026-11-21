@@ -114,6 +114,34 @@ final class DisplayTextTests: XCTestCase {
         }
     }
 
+    /// C1-vs16-spoof, round 6: an unassigned code point is no space, mark or default-ignorable
+    /// character, so it was kept as it was, and the system fonts draw some of them as blanks with a
+    /// width (U+181A falls back to a glyph one em wide with no outline). "Terminal" + 20 × U+181A +
+    /// "SSH keys" (36 scalars, within the cap) showed as Terminal, a long blank, SSH keys: a fake CLI
+    /// column. APFS refuses such a file name; a disk image formatted otherwise does not.
+    func testUnassignedCodePointsAreEscaped() {
+        // Blank in the system fonts (Mongolian, Yi, Hebrew presentation forms, Thai), then
+        // noncharacters, which stay unassigned for good.
+        for u: Unicode.Scalar in ["\u{181A}", "\u{181F}", "\u{1879}", "\u{18AB}", "\u{A48D}", "\u{FB0F}", "\u{E00}",
+                                  "\u{FFFE}", "\u{FFFF}", "\u{10FFFF}"] {
+            let hex = String(u.value, radix: 16)
+            XCTAssertEqual(u.properties.generalCategory, .unassigned, "\(hex) is assigned in these Unicode tables: test another one")
+            XCTAssertTrue(DisplayText.isHidden(u), hex)
+        }
+        let padded = "Terminal" + String(repeating: "\u{181A}", count: 20) + "SSH keys"
+        XCTAssertEqual(padded.unicodeScalars.count, 36, "nothing is cut by the cap")
+        XCTAssertEqual(DisplayText.name(padded), "Terminal" + String(repeating: "\\u{181a}", count: 6) + "…",
+                       "escaped, so the cap counts what is shown")
+        XCTAssertEqual(DisplayText.name(DisplayText.name(padded)), DisplayText.name(padded))
+        XCTAssertEqual(DisplayText.escaped("a\u{181A}b\u{FB0F}c\u{E00}d\u{FFFF}"), "a\\u{181a}b\\u{fb0f}c\\u{e00}d\\u{ffff}")
+        XCTAssertEqual(DisplayText.path("~/\u{A48D}\u{A48D}/id_ed25519"), "~/\\u{a48d}\\u{a48d}/id_ed25519")
+        // The assigned characters next to them stay: Mongolian digit nine and letter a, the last Yi
+        // syllable, Thai ko kai.
+        for kept in ["\u{1819}\u{1820}", "\u{A48C}", "\u{E01}"] {
+            XCTAssertEqual(DisplayText.name(kept), kept)
+        }
+    }
+
     func testLongPathsKeepTheirFileName() {
         let path = "~/" + String(repeating: "deep/", count: 60) + "id_ed25519"
         let shown = DisplayText.path(path)
