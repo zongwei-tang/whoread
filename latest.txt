@@ -1,5 +1,5 @@
-commit: 9d6b49a9918019917a7322915f3c1ce2b4ec99b7
-run: https://github.com/zongwei-tang/whoread/actions/runs/44859203564
-macos-15: OVERALL: FAIL
-macos-latest: OVERALL: FAIL
-xcode-27: OVERALL: FAIL
+commit: b28aad383417ce7334fdc87e80e90bbf37eece36
+run: https://github.com/zongwei-tang/whoread/actions/runs/44862410893
+macos-15: OVERALL: PASS
+macos-latest: OVERALL: PASS
+xcode-27: OVERALL: PASS
