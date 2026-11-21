@@ -13,12 +13,15 @@ import Foundation
 ///   proper ancestor of a prefix (a symlink planted at `~/.config`), through the ancestor test. A
 ///   `new_path` destination is a create another ES client denied (nothing was created): the parser
 ///   ignores it, so it gets no rule of its own
-/// - `close` with `"modified":false` → drop
+/// - `close` with `"modified":false` → drop, unless it says `"was_mapped_writable":true` (possibly
+///   changed through a writable mapping: the parser decides, EsloggerParser)
 /// - any JSON string starting with a monitored prefix (or, on a create line, equal to an ancestor),
 ///   plain or under `/System/Volumes/Data` (ASCII case-insensitive, `/` or `\/` escaped, `"`, `\` and control
-///   characters JSON-escaped) → parse. A non-ASCII path is spelled with each component in NFC and in
-///   NFD (`spellings`); one with letters that have case (é and É are other bytes, and the scan folds
-///   only ASCII) is matched by its longest ASCII fragment instead
+///   characters JSON-escaped) → parse. A non-ASCII path is spelled in every canonically equivalent
+///   form of its components (`spellings`: each composed character composed or not); one whose forms
+///   cannot be listed (letters that have case, since é and É are other bytes and the scan folds only
+///   ASCII; spellings NFC and NFD never write, such as U+FA10 for 塚) is matched by its longest ASCII
+///   fragment instead, and such an ancestor lets every create through
 /// - lines containing `\u` escapes → parse (non-ASCII paths may be escaped)
 ///
 /// False positives only cost a parse; false negatives would lose events, so every rule errs open.
@@ -33,6 +36,8 @@ public final class LinePrefilter: @unchecked Sendable {
         case prefix = 5
         case escape = 6
         case create = 7
+        /// `"was_mapped_writable":true`: an unmodified close that may still have changed the file.
+        case mappedWritable = 8
         /// A JSON string equal to an ancestor of a prefix: only matters on a create line.
         case ancestor = 9
     }
@@ -58,27 +63,72 @@ public final class LinePrefilter: @unchecked Sendable {
     static let maxSpellings = 8
 
     /// Every byte spelling of `path` that exact needles must cover, or nil when they cannot be listed.
-    /// An ASCII path is its only spelling (the scan folds ASCII case). APFS keeps a name in the normal
-    /// form it was created in, and the folders of one path can come from different programs (Finder
-    /// and Terminal differ): so every combination of each component in NFC and in NFD, up to
-    /// `maxSpellings`. None when a non-ASCII character has case variants: APFS ignores case, but é and
-    /// É are other bytes, so the spellings in which a path can be reported cannot be listed.
+    /// An ASCII path is its only spelling (the scan folds ASCII case). APFS finds a name by any
+    /// canonically equivalent spelling and keeps the one it was created with, and the folders of one
+    /// path can come from different programs (Finder and Terminal differ): so every combination of
+    /// each component's spellings (`componentSpellings`), up to `maxSpellings`.
     static func spellings(_ path: String) -> [String]? {
         if path.utf8.allSatisfy({ $0 < 0x80 }) { return [path] }
         var out = [""]
         for (i, scalars) in path.unicodeScalars.split(separator: "/", omittingEmptySubsequences: false).enumerated() {
             let component = String(String.UnicodeScalarView(scalars))
-            var forms: [String] = []
-            for form in [component, component.precomposedStringWithCanonicalMapping, component.decomposedStringWithCanonicalMapping] {
-                if form.unicodeScalars.contains(where: { !$0.isASCII && $0.properties.changesWhenCaseMapped }) { return nil }
-                // By bytes: String equality would take NFC and NFD for one.
-                if !forms.contains(where: { $0.utf8.elementsEqual(form.utf8) }) { forms.append(form) }
-            }
-            guard out.count * forms.count <= maxSpellings else { return nil }
+            guard let forms = componentSpellings(component, limit: maxSpellings / out.count) else { return nil }
             out = out.flatMap { head in forms.map { i == 0 ? $0 : head + "/" + $0 } }
         }
         return out
     }
+
+    /// Every byte spelling of one path component canonically equivalent to it, at most `limit`, or nil
+    /// when they cannot be listed. ASCII is its own only spelling (as for an ASCII path). Otherwise: the
+    /// component in NFC, with each character that NFC composes from a letter and one mark (が from か
+    /// and U+3099) composed or decomposed, in every combination (one name can be half NFC, half NFD).
+    /// Nil when a non-ASCII character has case variants (APFS ignores case, but é and É are other
+    /// bytes, and the scan folds only ASCII), or when other spellings exist that NFC and NFD never
+    /// write: a character NFC never produces can stand for its decomposition (U+FA10 for 塚, U+095B for
+    /// ज़, U+FB2A for שׁ), two marks in a row can come in either order or partly composed (shadda typed
+    /// before fatha), and a character composed from more than a letter and one mark has partly composed
+    /// spellings (Hangul: 하 with a final ᆫ for 한; Foundation's NFC even leaves that one as it is).
+    static func componentSpellings(_ component: String, limit: Int) -> [String]? {
+        if component.utf8.allSatisfy({ $0 < 0x80 }) { return [component] }
+        let nfc = component.precomposedStringWithCanonicalMapping
+        let nfd = Array(component.decomposedStringWithCanonicalMapping.unicodeScalars)
+        let all = Array(component.unicodeScalars) + Array(nfc.unicodeScalars) + nfd
+        if all.contains(where: { !$0.isASCII && $0.properties.changesWhenCaseMapped }) { return nil }
+        func isMark(_ s: Unicode.Scalar) -> Bool { s.properties.canonicalCombiningClass.rawValue != 0 }
+        if zip(nfd, nfd.dropFirst()).contains(where: { isMark($0) && isMark($1) }) { return nil }
+        for i in nfd.indices {
+            if let decompositions = excludedDecompositions[nfd[i]], decompositions.contains(where: { nfd[i...].starts(with: $0) }) {
+                return nil
+            }
+        }
+        var out = [String.UnicodeScalarView()]
+        for scalar in nfc.unicodeScalars {
+            let parts = String(Character(scalar)).decomposedStringWithCanonicalMapping.unicodeScalars
+            var forms = [String.UnicodeScalarView([scalar])]
+            if parts.count > 1 {
+                guard parts.count == 2, let mark = parts.last, isMark(mark), out.count * 2 <= limit else { return nil }
+                forms.append(parts)
+            }
+            out = out.flatMap { head in forms.map { head + $0 } }
+        }
+        return out.map { String($0) }
+    }
+
+    /// The canonical decompositions of the characters NFC never produces (Full_Composition_Exclusion:
+    /// singletons such as U+FA10 → U+585A, composition exclusions such as U+095B → U+091C U+093C),
+    /// keyed by their first scalar: where one occurs, the excluded character is another spelling.
+    /// Those of ASCII alone (U+212A KELVIN SIGN for K) are left out: ASCII is matched as it is, as in an
+    /// ASCII path. Built once, on the first non-ASCII component.
+    static let excludedDecompositions: [Unicode.Scalar: [[Unicode.Scalar]]] = {
+        var table: [Unicode.Scalar: [[Unicode.Scalar]]] = [:]
+        for value in UInt32(0x80)...0x10FFFF {
+            guard let scalar = Unicode.Scalar(value), scalar.properties.isFullCompositionExclusion else { continue }
+            let d = Array(String(Character(scalar)).decomposedStringWithCanonicalMapping.unicodeScalars)
+            guard let first = d.first, d != [scalar], !d.allSatisfy(\.isASCII) else { continue }
+            table[first, default: []].append(d)
+        }
+        return table
+    }()
 
     /// Needle for a prefix whose spellings cannot be listed (`spellings`): its longest ASCII fragment,
     /// which every spelling contains (given in NFC); over-matching just costs a parse.
@@ -142,6 +192,8 @@ public final class LinePrefilter: @unchecked Sendable {
         add("\"close\":", .close)
         add("\"modified\":false", .notModified)
         add("\"modified\": false", .notModified)
+        add("\"was_mapped_writable\":true", .mappedWritable)
+        add("\"was_mapped_writable\": true", .mappedWritable)
         add("\\u", .escape)
         for prefix in prefixes {
             if let listed = LinePrefilter.spellings(prefix) {
@@ -200,7 +252,7 @@ public final class LinePrefilter: @unchecked Sendable {
         func has(_ t: Tag) -> Bool { seen & (1 << t.rawValue) != 0 }
         if has(.lifecycle) || has(.multiPath) { return .parse }
         if has(.create) && (has(.ancestor) || parseAllCreates) { return .parse }
-        if has(.close) && has(.notModified) { return .drop }
+        if has(.close) && has(.notModified) && !has(.mappedWritable) { return .drop }
         if has(.prefix) || has(.escape) || parseAllFileEvents { return .parse }
         return .drop
     }
