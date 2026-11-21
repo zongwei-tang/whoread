@@ -156,9 +156,12 @@ final class DaemonTests: XCTestCase {
         deny.id = "new-deny"
         deny.enabled = true
         XCTAssertNoThrow(try client.call(.upsertRule(deny)))
-        // Weakening is refused.
+        // Weakening is refused. (A settings update that changes nothing, or only turns trust in Apple
+        // programs off, is not a weakening: ipc-3.)
+        var quieter = Settings()
+        quieter.notifications.enabled = false
         for request: IPCRequest in [.setEnforcement(enabled: false), .setPaused(true), .deleteRule(id: "new-deny"),
-                                    .updateSettings(Settings()), .resetCatalog, .restartLearning,
+                                    .updateSettings(quieter), .resetCatalog, .restartLearning,
                                     .upsertRule(RuleTemplates.blockAgentsFromCritical())] {
             guard case .error(let e) = try client.send(request) else { return XCTFail("\(request) was allowed") }
             XCTAssertEqual(e.code, .notPermitted, "\(request)")
