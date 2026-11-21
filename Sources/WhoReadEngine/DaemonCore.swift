@@ -21,6 +21,9 @@ public struct DaemonConfiguration: Sendable {
     public var replayRealtime = false
     /// Overrides home discovery (tests, replay of fixtures recorded under /Users/alice).
     public var homeDirectories: [String]?
+    /// A user's home directory: the only one a client without sudo or the app may extend monitoring to
+    /// (`DaemonCore.ensureMonitored`, ipc-2). The user database by default; tests give synthetic homes.
+    public var homeOf: @Sendable (uid_t) -> String? = { DaemonConfiguration.userDatabaseHome($0) }
     public var killSwitchPath: String?
     /// macOS XPC listener.
     public var machServiceName: String?
@@ -48,6 +51,16 @@ public struct DaemonConfiguration: Sendable {
     public var linkFullWalkInterval: TimeInterval = 30
 
     public init() {}
+
+    /// `uid`'s home directory in the user database (getpwuid_r), nil when it has none.
+    public static func userDatabaseHome(_ uid: uid_t) -> String? {
+        var entry = passwd()
+        var found: UnsafeMutablePointer<passwd>?
+        var buffer = [CChar](repeating: 0, count: 16 * 1024)
+        guard getpwuid_r(uid, &entry, &buffer, buffer.count, &found) == 0, found != nil, let dir = entry.pw_dir else { return nil }
+        let home = String(cString: dir)
+        return home.hasPrefix("/") ? home : nil
+    }
 
     public var resolvedKillSwitchPath: String {
         killSwitchPath ?? (dataDirectory as NSString).appendingPathComponent("disable-enforcement")
@@ -327,6 +340,19 @@ public final class DaemonCore: @unchecked Sendable {
     private var _homes: [String]
     private let normalizerBox: LockedBox<PathNormalizer>
     private var lastRetention = Date.distantPast
+    /// Guarded by `lock`: the stored settings this build could not read in full (daemon-5). The values it
+    /// could not read (dotted paths, "*" for the whole blob) use their defaults, `storedSettings` is the
+    /// blob they are kept from when the settings are saved, and `settingsBase` what this build used for
+    /// them (a user change of one of them is saved as such).
+    private var unreadableSettings: Set<String> = []
+    private var storedSettings: Data?
+    private var settingsBase = Settings()
+    /// Guarded by `lock`: retention settings whose stored values could not be read and are not kept in the
+    /// stored blob (the whole blob was unreadable, "*"): retention waits until one of them is set again
+    /// (daemon-5), after the settings were saved anew and the daemon restarted too (`retentionHoldKey`).
+    private var retentionHold: Set<String> = []
+    /// Settings a period of retention depends on: while one is unreadable, retention waits.
+    static let retentionSettings: Set<String> = ["*", "retentionDays", "detailDays"]
     private var lastRediscovery = Date()
     /// Guarded by `lock`: the tree's agent generation last saved (`persistAgentAncestry`).
     private var savedAgentGeneration: UInt64?
@@ -358,6 +384,13 @@ public final class DaemonCore: @unchecked Sendable {
     /// no trips any more (ask mode); a leftover value is removed at start.
     static let legacyTripKey = "enforcement_trip_reason"
     static let uncleanStopKey = "unclean_stop"
+    /// The stored settings blob as it was when this build could not read all of it (daemon-5).
+    static let settingsBackupKey = "settings_backup"
+    /// Store key: the approvals an older build made for both access kinds were narrowed (daemon-1), once.
+    static let approvalsNarrowedKey = "baseline_approvals_narrowed"
+    /// Store key: the retention settings stored last could not be read (daemon-5), so retention waits
+    /// until they are set again, also after the stored settings were saved anew and the daemon restarted.
+    static let retentionHoldKey = "settings_retention_hold"
     /// Marks rules made by "block from now on" (the app localizes their names).
     public static let blockFromNowOnTemplate = "block-from-now-on"
     /// Marks allow rules made from answers to ask-mode questions ("allow once", "always allow").
@@ -423,7 +456,36 @@ public final class DaemonCore: @unchecked Sendable {
         }
         _data = data
 
-        let settings = (try? store.settings()) ?? Settings()
+        // A stored value this build cannot read (a newer build's, after going back to an older checkout)
+        // takes its default and keeps every other setting; the blob is backed up and saved settings keep
+        // that value (daemon-5). Rules get the same care (rules_backup).
+        let loaded: SettingsLoad
+        do {
+            loaded = try store.loadSettings()
+        } catch {
+            Log.error("settings could not be read (\(error)); the defaults apply until settings are saved")
+            loaded = SettingsLoad(settings: Settings(), unreadable: ["*"])
+        }
+        let settings = loaded.settings
+        if !loaded.unreadable.isEmpty, let raw = loaded.raw {
+            try? store.setValue(raw, forKey: DaemonCore.settingsBackupKey)
+            let what = loaded.unreadable == ["*"] ? "the stored settings" : "stored settings " + loaded.unreadable.joined(separator: ", ")
+            let retention = !DaemonCore.retentionSettings.isDisjoint(with: loaded.unreadable)
+                ? "; retention waits until the retention settings are set again" : ""
+            Log.error("\(what) could not be read by this version: defaults apply (a copy of the stored settings is kept as "
+                      + "\(DaemonCore.settingsBackupKey), and saving keeps the values it could not read)\(retention)")
+        }
+        unreadableSettings = Set(loaded.unreadable)
+        storedSettings = loaded.raw
+        settingsBase = settings
+        // A whole blob that could not be read holds retention until its settings are set (saveSettings);
+        // so does a hold saved before, when the blob was saved anew.
+        var hold: Set<String> = loaded.unreadable.contains("*") ? DaemonCore.retentionSettings.subtracting(["*"]) : []
+        if let saved = try? store.value(forKey: DaemonCore.retentionHoldKey) {
+            hold.formUnion((try? JSONDecoder().decode([String].self, from: saved)) ?? Array(DaemonCore.retentionSettings.subtracting(["*"])))
+            Log.warning("retention waits: the retention settings stored before could not be read; set them again to resume it")
+        }
+        retentionHold = hold
         _homes = config.homeDirectories ?? HomeDirectories.discover()
         normalizerBox = LockedBox(PathNormalizer(homeDirectories: _homes))
         detector = AgentDetector(catalog: data.agents)
@@ -468,6 +530,9 @@ public final class DaemonCore: @unchecked Sendable {
         }
         baseline = Baseline(learningStartedAt: learningStart, learningDuration: settings.learningDays * 86400,
                             entries: (try? store.loadBaseline()) ?? [])
+        // Only on rules that were read (or a fresh store's): without them nothing tells what an older build's
+        // approvals answered.
+        if rulesOK { DaemonCore.narrowLegacyApprovals(baseline, rules: ruleList, store: store) }
 
         coalescer = AlertCoalescer(window: settings.coalesceMinutes * 60, nextID: ((try? store.maxAlertID()) ?? 0) + 1)
         if let open = try? store.alerts(AlertQuery(since: now.addingTimeInterval(-settings.coalesceMinutes * 60), limit: 1000)) {
@@ -655,9 +720,10 @@ public final class DaemonCore: @unchecked Sendable {
 
     static let maxListedAsks = 200
 
-    /// A settings update whose only change is turning "trust Apple programs" off (strengthening).
+    /// A settings update whose only change is turning "trust Apple programs" off (strengthening). Also
+    /// when it is off already: then it changes nothing (an idempotent `settings set trust-apple off`, ipc-3).
     static func onlyTurnsOffAppleTrust(_ new: Settings, current: Settings) -> Bool {
-        guard current.trustApplePrograms, !new.trustApplePrograms else { return false }
+        guard !new.trustApplePrograms else { return false }
         var c = current
         c.trustApplePrograms = false
         // Enforcement and pause are taken from the current settings by updateSettings anyway.
@@ -862,19 +928,49 @@ public final class DaemonCore: @unchecked Sendable {
 
     /// Marks the open `ask` alerts an answer settles as resolved (privileged answers only).
     private func resolveAskAlerts(answering scope: AnswerScope, action: AlertAction, except: Int64? = nil) throws {
-        writer.flush()
+        writer.flushNow()
         let open = try store.alerts(AlertQuery(statuses: [.unread, .read], limit: 10_000))
         let settled = open.filter { $0.kind == .ask && $0.id != except && scope.settles(AnswerScope($0), action: action) }
-        guard !settled.isEmpty else { return }
-        let updated = settled.map { a -> Alert in
-            var a = a
-            a.status = .resolved
-            a.resolution = action
-            return a
+        try setAlertStatus(settled, to: .resolved, resolution: action)
+    }
+
+    /// Gives the alerts the user acted on (`acted`, as read from the store) a new status, each only if it
+    /// did not escalate since (daemon-3): one that did (the same app now writing a key, say) stays unread,
+    /// to be seen. The eslogger reader keeps ingesting meanwhile, so the change is made on the coalescer's
+    /// open copy and queued while no event can be merged in between; that is all the ingestion lock is
+    /// held for (every file event waits on it). An alert whose window closed takes no event any more: its
+    /// last snapshot, if still queued, is written first, then its stored copy is read again and changed.
+    /// Never a copy read earlier written over a newer one. Returns the alerts changed.
+    @discardableResult
+    private func setAlertStatus(_ acted: [Alert], to status: AlertStatus, resolution: AlertAction?) throws -> [Alert] {
+        guard !acted.isEmpty else { return [] }
+        let (open, closed) = pipeline.whileIngestionHeld { () -> ([Alert], [Alert]) in
+            var open: [Alert] = []
+            var closed: [Alert] = []
+            for (seen, change) in zip(acted, coalescer.setStatus(of: acted, to: status, resolution: resolution)) {
+                switch change {
+                case .changed(let a): open.append(a)
+                case .escalated: continue
+                case .notOpen: closed.append(seen)
+                }
+            }
+            // It replaces an older snapshot the writer may hold, and is retried if the write fails.
+            if !open.isEmpty { writer.enqueue(alerts: open) }
+            return (open, closed)
         }
-        try store.upsert(updated)
-        writer.enqueue(alerts: updated)
-        for a in updated { coalescer.updateStatus(alertID: a.id, status: .resolved, resolution: action) }
+        try writer.flushOrThrow()
+        guard !closed.isEmpty else { return open }
+        var current: [Int64: Alert] = [:]
+        for a in try store.alerts(ids: closed.map(\.id)) { current[a.id] = a }
+        var changed: [Alert] = []
+        for seen in closed {
+            guard var a = current[seen.id], a.firstEventID == seen.firstEventID else { continue }
+            a.status = status
+            a.resolution = resolution
+            changed.append(a)
+        }
+        if !changed.isEmpty { try store.upsert(changed) }
+        return open + changed
     }
 
     /// Releases the held accesses "trust Apple programs" now allows (the setting was just turned on).
@@ -990,8 +1086,8 @@ public final class DaemonCore: @unchecked Sendable {
     /// question.
     public func apply(action: AlertAction, toAlert id: Int64, peer: IPCPeer, privileged: Bool = true) throws {
         mutation.lock(); defer { mutation.unlock() }
-        writer.flush()
-        guard var alert = try store.alert(id: id) else { throw IPCError(.notFound, "no alert #\(id)") }
+        writer.flushNow()
+        guard let alert = try store.alert(id: id) else { throw IPCError(.notFound, "no alert #\(id)") }
         let now = Date()
         let scope = AnswerScope(alert)
         let r = alert.responsible
@@ -1035,7 +1131,11 @@ public final class DaemonCore: @unchecked Sendable {
                                                                createdAt: now))
             }
             try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
-            baseline.approve(responsibleKey: r.key, categoryID: alert.categoryID, at: now)
+            // What the alert covered, as the answer rule: a read approval does not answer a write (daemon-1).
+            // An AI agent's approval is its team's (ResponsibleEntity.baselineKey, attribution-2).
+            for kind in alert.accesses.kinds {
+                baseline.approve(responsibleKey: r.baselineKey, categoryID: alert.categoryID, access: kind, at: now)
+            }
             persistBaseline()
         case .blockFromNowOn, .trustApplePrograms:
             try answer(scope, action: action, peer: peer, privileged: privileged, now: now)
@@ -1047,13 +1147,11 @@ public final class DaemonCore: @unchecked Sendable {
             answered = false
         }
         if privileged {
-            alert.status = .resolved
-            alert.resolution = action
             do {
-                try store.upsert([alert])
-                // Replaces a stale snapshot the writer may have re-queued after a failed flush.
-                writer.enqueue(alerts: [alert])
-                coalescer.updateStatus(alertID: id, status: .resolved, resolution: action)
+                // The alert as read above, unless it escalated meanwhile (daemon-3).
+                if try setAlertStatus([alert], to: .resolved, resolution: action).isEmpty {
+                    Log.info("alert #\(id) escalated while \(action.rawValue) was applied: it stays unread")
+                }
                 if answered { try resolveAskAlerts(answering: scope, action: action, except: id) }
             } catch {
                 // "Ignore" (and "keep blocking" on a block) change nothing else: then nothing changed.
@@ -1076,17 +1174,12 @@ public final class DaemonCore: @unchecked Sendable {
     }
 
     public func markRead(_ ids: [Int64]?, peer: IPCPeer = .inProcess) throws {
-        writer.flush()
+        // As every other status change: one at a time, on what was read (an escalation since stays unread).
+        mutation.lock(); defer { mutation.unlock() }
+        writer.flushNow()
         Log.info("alerts \(ids.map { $0.map(String.init).joined(separator: ",") } ?? "all") marked read by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         let targets = try store.alerts(AlertQuery(statuses: [.unread], limit: 10_000)).filter { ids == nil || ids!.contains($0.id) }
-        let updated = targets.map { a -> Alert in
-            var a = a
-            a.status = .read
-            return a
-        }
-        try store.upsert(updated)
-        writer.enqueue(alerts: updated)
-        for a in updated { coalescer.updateStatus(alertID: a.id, status: .read, resolution: nil) }
+        try setAlertStatus(targets, to: .read, resolution: nil)
     }
 
     // MARK: - Rules
@@ -1264,10 +1357,15 @@ public final class DaemonCore: @unchecked Sendable {
         // only extend monitoring to its own files: inside a home or on an external volume, never
         // system paths (a deny rule there would block every user's processes once enforcement is on).
         // Checked on the spelling and on what it resolves to on disk, as the classifier follows links:
-        // `~/link -> /usr/lib` and `/Volumes/Macintosh HD/usr/lib` are system paths.
+        // `~/link -> /usr/lib` and `/Volumes/Macintosh HD/usr/lib` are system paths. Its own home is the
+        // peer's, never every home the daemon monitors (ipc-2): another user's folders are not its files
+        // (and `~/…` expands to every monitored home).
         if !privileged {
+            guard let euid = peer.euid, let home = config.homeOf(euid) else {
+                throw IPCError(.notPermitted, "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app")
+            }
             let resolver = RealpathSymlinkResolver()
-            let homeDirs = c.normalizer.homeDirectories
+            let homeDirs = [c.normalizer.normalize(home)]
             let homes = (homeDirs + homeDirs.compactMap(resolver.resolve)).map { h in PathNormalizer.fold(h.hasSuffix("/") ? h : h + "/") }
             func isOwn(_ path: String) -> Bool {
                 let k = PathNormalizer.fold(c.normalizer.normalize(path))
@@ -1278,7 +1376,13 @@ public final class DaemonCore: @unchecked Sendable {
                 return isOwn(resolved)
             }
             guard own else {
-                throw IPCError(.notPermitted, "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app")
+                var message = "\(p) is not monitored; adding it to the catalog needs sudo or the WhoRead app"
+                if p.hasPrefix("~/") && expanded.count > 1 {
+                    // `~/` is every monitored home here: the same path in the peer's own home is allowed.
+                    let mine = (home.hasSuffix("/") ? String(home.dropLast()) : home) + p.dropFirst()
+                    message += ". On this Mac ~/ stands for every user's home; for your own files write it as \(mine)"
+                }
+                throw IPCError(.notPermitted, message)
             }
         }
         var catalog = data.catalog
@@ -1341,6 +1445,11 @@ public final class DaemonCore: @unchecked Sendable {
     public func update(settings new: Settings, peer: IPCPeer, reenable: Bool = false) throws {
         mutation.lock(); defer { mutation.unlock() }
         let s = new.validated()
+        // Before anything is applied, the project roots this update adds (cli-1). Only those: roots stored
+        // before must neither block a kill switch or a pause (they come through here too) nor their removal.
+        for root in Set(s.projectRoots).subtracting(currentSettings.projectRoots).sorted() {
+            try checkProjectRoot(root)
+        }
         lock.lock()
         let old = settings
         settings = s
@@ -1374,11 +1483,107 @@ public final class DaemonCore: @unchecked Sendable {
             Log.info("settings changed (\(changed.joined(separator: ", "))) by pid \(peer.pid.map(String.init) ?? "?") uid \(peer.euid.map(String.init) ?? "?")")
         }
         do {
-            try store.saveSettings(s)
+            try saveSettings(s)
         } catch {
             Log.error("settings applied but not saved: \(error)")
             throw IPCError(.internalError, "settings applied but not saved: \(error)")
         }
+    }
+
+    /// Stores `s`. While the stored blob holds values this build could not read (daemon-5), each of them
+    /// is saved again as it was stored unless the user changed that setting: the build that wrote it
+    /// reads it back, and this one keeps using the default. Called under the mutation lock.
+    private func saveSettings(_ s: Settings) throws {
+        lock.lock()
+        let unreadable = unreadableSettings
+        let stored = storedSettings
+        let base = settingsBase
+        var hold = retentionHold
+        lock.unlock()
+        var blob = try JSONEncoder().encode(s)
+        var keep: Set<String> = []
+        let retention = DaemonCore.retentionSettings.subtracting(["*"])
+        if !unreadable.isEmpty || !hold.isEmpty,
+           var fresh = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],
+           let was = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(base)) as? [String: Any] {
+            func unchanged(_ keys: [String]) -> Bool {
+                DaemonCore.sameJSON(DaemonCore.jsonValue(keys, in: fresh), DaemonCore.jsonValue(keys, in: was))
+            }
+            if let stored, let old = try? JSONSerialization.jsonObject(with: stored) as? [String: Any] {
+                for path in unreadable where path != "*" {
+                    let keys = path.split(separator: ".").map(String.init)
+                    // Changed by the user: their value is saved.
+                    guard unchanged(keys), let value = DaemonCore.jsonValue(keys, in: old) else { continue }
+                    DaemonCore.setJSONValue(value, keys, in: &fresh)
+                    keep.insert(path)
+                }
+            }
+            // Nothing of a whole unreadable blob can be kept, but retention keeps waiting: this save may be a
+            // pause, a kill switch or a console user's, not the user setting the retention again. Setting one
+            // of its settings resumes it.
+            if unreadable.contains("*") { hold.formUnion(retention) }
+            if retention.contains(where: { !unchanged([$0]) }) { hold = [] }
+            if !keep.isEmpty { blob = try JSONSerialization.data(withJSONObject: fresh, options: [.sortedKeys]) }
+        }
+        // Settings that could not be read at the start were not backed up then: before they are replaced.
+        if unreadable.contains("*") && stored == nil, let current = try? store.value(forKey: "settings"),
+           (try? store.value(forKey: DaemonCore.settingsBackupKey)) == nil {
+            try store.setValue(current, forKey: DaemonCore.settingsBackupKey)
+        }
+        if !hold.isEmpty {
+            try store.setValue(try JSONEncoder().encode(hold.sorted()), forKey: DaemonCore.retentionHoldKey)
+        }
+        try store.setValue(blob, forKey: "settings")
+        if hold.isEmpty { try store.setValue(nil, forKey: DaemonCore.retentionHoldKey) }
+        lock.lock()
+        unreadableSettings = keep
+        storedSettings = keep.isEmpty ? nil : blob
+        settingsBase = s
+        retentionHold = hold
+        lock.unlock()
+    }
+
+    static func jsonValue(_ keys: [String], in object: [String: Any]) -> Any? {
+        guard let first = keys.first else { return nil }
+        guard keys.count > 1 else { return object[first] }
+        return (object[first] as? [String: Any]).flatMap { jsonValue(Array(keys.dropFirst()), in: $0) }
+    }
+
+    static func setJSONValue(_ value: Any, _ keys: [String], in object: inout [String: Any]) {
+        guard let first = keys.first else { return }
+        guard keys.count > 1 else {
+            object[first] = value
+            return
+        }
+        var inner = object[first] as? [String: Any] ?? [:]
+        setJSONValue(value, Array(keys.dropFirst()), in: &inner)
+        object[first] = inner
+    }
+
+    static func sameJSON(_ a: Any?, _ b: Any?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?): return (x as? NSObject)?.isEqual(y) ?? false
+        default: return false
+        }
+    }
+
+    /// A project root the classifier can monitor (absolute or `~/…`, see PathNormalizer.expand), spelled
+    /// without control characters, `.` or `..`, and not a whole disk, home or folder of homes (which
+    /// would make every .env, .pem and .key there "project secrets"). Refused as invalid, never dropped:
+    /// a root that monitors nothing must not look stored (cli-1).
+    func checkProjectRoot(_ p: String) throws {
+        guard DaemonCore.isCleanPath(p) else {
+            throw IPCError(.invalid, "project root \(p.debugDescription) contains control characters")
+        }
+        let components = PathNormalizer.components(p)
+        guard !components.contains("."), !components.contains("..") else {
+            throw IPCError(.invalid, "project root \(p) must not contain . or .. components")
+        }
+        guard !normalizer.expand(p).isEmpty else {
+            throw IPCError(.invalid, "project root \(p): use an absolute path or ~/…")
+        }
+        if let reason = tooBroad(p) { throw IPCError(.invalid, "project root \(p) is \(reason)") }
     }
 
     /// Read-modify-write of the settings under the mutation lock (two clients toggling different
@@ -1720,6 +1925,38 @@ public final class DaemonCore: @unchecked Sendable {
 
     // MARK: - Maintenance & status
 
+    /// daemon-1, once (`approvalsNarrowedKey`): approvals an older build made for both access kinds where
+    /// the "always allow" rule saved with them allowed one (`Baseline.narrowLegacyApprovals`). Saved before
+    /// it is marked done; a store that cannot be read or written leaves it for the next start.
+    static func narrowLegacyApprovals(_ baseline: Baseline, rules: [Rule], store: EventStore) {
+        do {
+            guard try store.value(forKey: approvalsNarrowedKey) == nil else { return }
+        } catch {
+            Log.error("could not read whether older approvals were narrowed: \(error)")
+            return
+        }
+        var answered: [String: (kinds: Set<AccessKind>, since: Date)] = [:]
+        for r in rules where r.template == askAnswerTemplate && r.action == .allow && r.expiresAt == nil {
+            guard case .category(let categoryID) = r.target, case .responsible(let key, _, _, _) = r.subject else { continue }
+            let kinds: Set<AccessKind> = r.access == .read ? [.read] : (r.access == .write ? [.write] : Set(AccessKind.allCases))
+            let k = key + "\u{0}" + categoryID
+            let earlier = answered[k]
+            answered[k] = (kinds.union(earlier?.kinds ?? []), min(r.createdAt, earlier?.since ?? r.createdAt))
+        }
+        let revoked = baseline.narrowLegacyApprovals { answered[$0 + "\u{0}" + $1] }
+        let dirty = baseline.takeDirty()
+        do {
+            if !dirty.isEmpty { try store.saveBaseline(dirty) }
+            try store.setValue(Data("1".utf8), forKey: approvalsNarrowedKey)
+            if revoked > 0 {
+                Log.info("baseline: \(revoked) approvals an older version made for an access kind its \"always allow\" did not cover were taken back")
+            }
+        } catch {
+            baseline.markDirty(dirty.map(\.0))
+            Log.error("could not save the narrowed approvals (\(error)); tried again at the next start")
+        }
+    }
+
     public func persistBaseline() {
         let dirty = baseline.takeDirty()
         guard !dirty.isEmpty else { return }
@@ -1822,7 +2059,15 @@ public final class DaemonCore: @unchecked Sendable {
         let forgotten = baseline.prune()
         if forgotten > 0 { Log.info("baseline: forgot \(forgotten) least recently seen unapproved entries (over the limit of \(baseline.maxUnapproved))") }
         persistBaseline()
-        if now.timeIntervalSince(lastRetention) > 3600 {
+        lock.lock()
+        let periodUnknown = !DaemonCore.retentionSettings.isDisjoint(with: unreadableSettings) || !retentionHold.isEmpty
+        lock.unlock()
+        if now.timeIntervalSince(lastRetention) > 3600 && periodUnknown {
+            // Never on a default period in place of one this build could not read: what it deletes is gone
+            // for good (daemon-5). Once an hour.
+            lastRetention = now
+            Log.warning("retention waits: the stored retention settings could not be read; set them again to resume it")
+        } else if now.timeIntervalSince(lastRetention) > 3600 {
             lastRetention = now
             let s = currentSettings
             writer.flush()

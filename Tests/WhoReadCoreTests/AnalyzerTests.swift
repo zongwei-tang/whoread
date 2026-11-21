@@ -12,7 +12,7 @@ final class BaselineTests: XCTestCase {
         XCTAssertEqual(b.entry(k)?.count, 2)
         XCTAssertEqual(b.entry(k)?.source, .learned)
         XCTAssertFalse(b.contains(BaselineKey(responsibleKey: k.responsibleKey, categoryID: "ssh", access: .write)))
-        b.approve(responsibleKey: k.responsibleKey, categoryID: "aws", at: at(3))
+        for kind in AccessKind.allCases { b.approve(responsibleKey: k.responsibleKey, categoryID: "aws", access: kind, at: at(3)) }
         XCTAssertTrue(b.isApproved(BaselineKey(responsibleKey: k.responsibleKey, categoryID: "aws", access: .write)))
         XCTAssertEqual(b.takeDirty().count, 3)
         XCTAssertEqual(b.takeDirty().count, 0)

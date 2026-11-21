@@ -37,9 +37,15 @@ public struct Snapshot: Sendable {
     public var status: DaemonStatus?
     /// nil: not read in this poll (refused, failed, or not part of it).
     public var alerts: [Alert]?
+    /// `alerts` holds only the alerts updated since then (nil: the whole list).
+    public var alertsSince: Date?
+    /// The unread alerts, read on their own ("Unread only"); nil when not read.
+    public var unreadAlerts: [Alert]?
     /// Live events after `liveAfter` (the cursor this poll was fetched with); nil when not read.
     public var newLive: [AnalyzedEvent]?
     public var liveAfter: Int64?
+    /// `newLive` was read with the folded system activity.
+    public var liveIncludesBenign = false
     public var summaries: [UsageSummary]?
     public var rules: [Rule]?
     public var settings: Settings?
@@ -80,9 +86,22 @@ public enum AskPoll: Equatable, Sendable {
 }
 
 public enum SnapshotFetcher {
+    /// The most live events one poll reads: the newest after the cursor.
+    public static let liveLimit = 500
+    /// The alerts listed: the most recently updated.
+    public static let alertLimit = 300
+
     /// Fast poll (every second): status, alerts, live tail. Full poll (every ~10 s, or after a change)
     /// adds settings, the catalog, agents, summaries and rules. `hello` starts with the version
     /// handshake, so a mismatched daemon is reported as such rather than as decoding errors.
+    ///
+    /// A fast poll reads only the alerts updated since `alertsSince` (`AppModel.alertsSince`; nil: the
+    /// whole list), so an idle app does not have the daemon read, decode and send 300 alerts every
+    /// second. A full poll always reads the whole list: marking alerts read or answering one does not
+    /// move their update time, so only a whole list shows such a change made by another program.
+    /// `summaries`: a full poll reads them only while a view shows them (`PollViews.needsSummaries`).
+    /// `unreadAlerts`: also the unread alerts on their own ("Unread only" in the Alerts tab), the most
+    /// recently updated of them: the list of every status may leave older unread ones out.
     ///
     /// Only the handshake and the status decide whether the daemon can be read at all. Every other
     /// read is tried on its own: the daemon refuses history to an app it does not recognise as the
@@ -90,9 +109,11 @@ public enum SnapshotFetcher {
     /// and that must not cost the settings, the catalog or anything else that is open to the user.
     /// A read that gets no answer at all (timed out, connection lost) ends the poll there: the reads
     /// after it would wait as long, and the next poll tries again. The questions are not read here.
-    public static func fetch(_ client: IPCClient, liveAfter: Int64?, includeBenign: Bool, full: Bool, hello: Bool = false) -> Snapshot {
+    public static func fetch(_ client: IPCClient, liveAfter: Int64?, includeBenign: Bool, full: Bool, hello: Bool = false,
+                             alertsSince: Date? = nil, summaries: Bool = true, unreadAlerts: Bool = false) -> Snapshot {
         var s = Snapshot()
         s.liveAfter = liveAfter
+        s.liveIncludesBenign = includeBenign
         do {
             if hello {
                 do {
@@ -125,15 +146,20 @@ public enum SnapshotFetcher {
             s.catalog = read(.catalog) { try client.catalog() }
             s.agents = read(.agents) { try client.agents() }
         }
-        s.alerts = read(.alerts) { try client.alerts(AlertQuery(limit: 300)) }
+        let since = full ? nil : alertsSince
+        s.alertsSince = since
+        s.alerts = read(.alerts) { try client.alerts(AlertQuery(since: since, limit: alertLimit)) }
+        if unreadAlerts {
+            s.unreadAlerts = read(.alerts) { try client.alerts(AlertQuery(statuses: [.unread], limit: alertLimit)) }
+        }
         s.newLive = read(.live) { () throws -> [AnalyzedEvent] in
-            guard case .events(let e) = try client.call(.live(afterID: liveAfter, limit: 500, includeBenign: includeBenign)) else {
+            guard case .events(let e) = try client.call(.live(afterID: liveAfter, limit: liveLimit, includeBenign: includeBenign)) else {
                 throw IPCError(.internalError, "unexpected response")
             }
             return e
         }
         if full {
-            s.summaries = read(.summaries) { try client.summaries(since: nil) }
+            if summaries { s.summaries = read(.summaries) { try client.summaries(since: nil) } }
             s.rules = read(.rules) { try client.rules() }
         }
         s.failures = failures
@@ -182,15 +208,39 @@ public struct LiveFeed: Sendable {
     public private(set) var events: [AnalyzedEvent] = []
     public private(set) var lastID: Int64?
     public var capacity = 2000
+    /// A batch read without the folded system activity moved the cursor past some of it: to show that
+    /// activity, the newest events are read again with it (`merge`).
+    public private(set) var missingBenign = false
+    /// A batch read after the cursor came full: the accesses between the cursor and its oldest event
+    /// were never read (one read returns the newest `SnapshotFetcher.liveLimit`).
+    public private(set) var skippedAccesses = false
 
     public init() {}
 
-    public mutating func append(_ new: [AnalyzedEvent]) {
+    /// `includesBenign`: the batch was read with the folded system activity. `full`: it was read after
+    /// the cursor and holds as many events as one read returns, so older ones after the cursor were left out.
+    public mutating func append(_ new: [AnalyzedEvent], includesBenign: Bool = true, full: Bool = false) {
         let fresh = new.filter { e in lastID.map { e.id > $0 } ?? true }.sorted { $0.id > $1.id }
         guard !fresh.isEmpty else { return }
         events.insert(contentsOf: fresh, at: 0)
         if events.count > capacity { events.removeLast(events.count - capacity) }
         lastID = max(lastID ?? 0, fresh.first!.id)
+        if !includesBenign { missingBenign = true }
+        if full { skippedAccesses = true }
+    }
+
+    /// Adds a batch read from the newest end with the folded system activity (it is shown now, and the
+    /// feed was read without it): the rows already listed stay, the folded activity among the newest
+    /// events is added in its place. `full`: the batch holds as many events as one read returns.
+    public mutating func merge(_ new: [AnalyzedEvent], full: Bool) {
+        missingBenign = false
+        guard let oldest = new.map(\.id).min(), let newest = new.map(\.id).max() else { return }
+        // Nothing read between the cursor and this batch.
+        if full, let last = lastID, oldest > last { skippedAccesses = true }
+        let listed = Set(events.map(\.id))
+        events = (events + new.filter { !listed.contains($0.id) }).sorted { $0.id > $1.id }
+        if events.count > capacity { events.removeLast(events.count - capacity) }
+        lastID = max(lastID ?? 0, newest)
     }
 
     public func visible(showSystemNoise: Bool) -> [AnalyzedEvent] {
@@ -288,7 +338,12 @@ public final class AppModel {
     public private(set) var status: DaemonStatus?
     public private(set) var connected = false
     public private(set) var lastError: IPCError?
+    /// The most recently updated alerts, of every status, as the daemon lists them (most recently
+    /// updated first, `SnapshotFetcher.alertLimit` at most). Notifications are planned on this list.
     public private(set) var alerts: [Alert] = []
+    /// The most recently updated unread alerts, read on their own while "Unread only" is on in the
+    /// Alerts tab (`PollViews.needsUnreadAlerts`): `alerts` may leave older unread ones out. nil until read.
+    public private(set) var unreadAlertList: [Alert]?
     /// Ask mode: questions waiting for an answer, oldest first. Set only from the questions' own
     /// connection (`apply(asks:)`, and the reply to an answer); empty while that cannot read them.
     public private(set) var asks: [AskRequest] = []
@@ -333,6 +388,8 @@ public final class AppModel {
         if let e = s.error {
             lastError = e
             connected = e.code != .unavailable
+            // The next daemon to answer may be another instance: its whole list first.
+            alertsListedWhole = false
             // The questions are not touched: they come from their own connection (`apply(asks:)`).
             // The handshake's message (just set) reads better than a decoder dump.
             if e.code == .versionMismatch, versionProblem == nil { versionProblem = DisplayText.escaped(e.message, limit: 1000) }
@@ -344,9 +401,16 @@ public final class AppModel {
         for part in SnapshotPart.allCases where s.read(part) { failures[part] = nil }
         failures.merge(s.failures) { $1 }
         // A refused or failed read keeps what was last read (shown with `unavailableNote`).
-        if let v = s.alerts { alerts = v }
-        // A batch fetched with an older cursor (the feed was reset meanwhile) is dropped.
-        if !feedPaused, s.liveAfter == live.lastID, let v = s.newLive { live.append(v) }
+        if let v = s.alerts {
+            if s.alertsSince != nil {
+                alerts = AppModel.merging(v, into: alerts)
+            } else {
+                alerts = v
+                alertsListedWhole = true
+            }
+        }
+        if let v = s.unreadAlerts { unreadAlertList = v }
+        if !feedPaused, let v = s.newLive { applyLive(v, after: s.liveAfter, includesBenign: s.liveIncludesBenign) }
         if let v = s.summaries { summaries = v }
         if let v = s.rules { rules = v }
         if let v = s.settings { setSettings(v) }
@@ -362,7 +426,7 @@ public final class AppModel {
         case .catalog(let v): catalog = v
         case .status(let v): setStatus(v)
         case .asks(let v):
-            asks = v
+            setAsks(v)
             asksError = nil
         default: break
         }
@@ -373,11 +437,24 @@ public final class AppModel {
     public func apply(asks poll: AskPoll) {
         switch poll {
         case .asks(let v):
-            asks = v
+            setAsks(v)
             asksError = nil
         case .failed(let e):
-            asks = []
+            setAsks([])
             asksError = e
+        }
+    }
+
+    private func applyLive(_ batch: [AnalyzedEvent], after cursor: Int64?, includesBenign: Bool) {
+        let full = batch.count >= SnapshotFetcher.liveLimit
+        if showSystemNoise && live.missingBenign {
+            // Shown now, and the feed was read without it: only the read from the newest end with it
+            // (`liveCursor` is nil until then) adds what came before the switch.
+            if cursor == nil && includesBenign { live.merge(batch, full: full) }
+        } else if cursor == live.lastID && (includesBenign || !showSystemNoise) {
+            // A batch fetched with an older cursor (the feed was reset meanwhile) is dropped, and so is
+            // one read without the folded activity once it is shown.
+            live.append(batch, includesBenign: includesBenign, full: cursor != nil && full)
         }
     }
 
@@ -386,6 +463,8 @@ public final class AppModel {
             // A new daemon instance may reuse event ids this feed has already shown (events it
             // served live but never flushed). Start over; the next poll gets its whole ring.
             live = LiveFeed()
+            // And alert ids (its alert table emptied by retention): its whole list before what changed.
+            alertsListedWhole = false
             daemonRestarts += 1
         }
         status = new
@@ -412,8 +491,32 @@ public final class AppModel {
         return d
     }
 
-    /// Where the next live poll should start.
-    public var liveCursor: Int64? { live.lastID }
+    /// Where the next fast poll's read of the alerts starts (`AlertQuery.since`): `alertsOverlap` before
+    /// the newest update listed, so an alert updated out of order (by an earlier event handled later)
+    /// is not missed; a full poll reads the whole list anyway. nil (the whole list) until a whole list
+    /// was read from this daemon instance.
+    public var alertsSince: Date? {
+        guard alertsListedWhole, let newest = alerts.map(\.updatedAt).max() else { return nil }
+        return newest.addingTimeInterval(-AppModel.alertsOverlap)
+    }
+
+    static let alertsOverlap: TimeInterval = 10
+
+    /// A whole list of alerts was read from the daemon instance that answers now.
+    private var alertsListedWhole = false
+
+    /// `alerts` after a read of the alerts updated since: their new copies replace the old ones, new
+    /// alerts are added, most recently updated first (as the daemon lists them), as many as it lists.
+    static func merging(_ changed: [Alert], into listed: [Alert]) -> [Alert] {
+        var byID: [Int64: Alert] = [:]
+        for a in listed { byID[a.id] = a }
+        for a in changed { byID[a.id] = a }
+        return Array(byID.values.sorted { ($0.updatedAt, $0.id) > ($1.updatedAt, $1.id) }.prefix(SnapshotFetcher.alertLimit))
+    }
+
+    /// Where the next live poll should start: from the newest end once the folded system activity is
+    /// shown and the feed was read without it ("Show folded system activity" shows what came before).
+    public var liveCursor: Int64? { showSystemNoise && live.missingBenign ? nil : live.lastID }
 
     /// `status` while it describes the running daemon: nil once that daemon answers in a protocol
     /// this app cannot read (another version replaced it), or no longer serves this app (it runs as
@@ -426,9 +529,10 @@ public final class AppModel {
         MenuBarState.make(status: liveStatus, connected: connected, openAsks: asks.count, language: language)
     }
 
-    /// Open questions as listed (menu bar, Alerts tab): those holding an access first, the one
-    /// denied soonest on top, then the others oldest first. The menu bar shows only the first few,
-    /// and old questions that hold nothing must not hide one that is about to be denied.
+    /// Open questions by urgency: those holding an access first, the one denied soonest on top, then
+    /// the others oldest first. The order questions are added to the list in (`listedAsks`): the menu
+    /// bar shows only the first few, and old questions that hold nothing must not hide one that is
+    /// about to be denied.
     public var asksByUrgency: [AskRequest] {
         asks.enumerated().sorted { a, b in
             switch (a.element.answerBy, b.element.answerBy) {
@@ -440,9 +544,43 @@ public final class AppModel {
         }.map(\.element)
     }
 
+    /// Open questions as listed (menu bar, Alerts tab). A question keeps its place while it is open: a
+    /// hold timing out or a new one (every few seconds while questions are open) never moves another
+    /// question's answer buttons under the pointer. Questions newly open are added after those already
+    /// listed, in `asksByUrgency` order; so are all of them when none was listed. The menu bar shows
+    /// the first three; each row shows when its access is denied, and every question has its banner.
+    public var listedAsks: [AskRequest] {
+        let byID = Dictionary(asks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return askOrder.compactMap { byID[$0] }
+    }
+
+    /// The ids of `listedAsks`, in order.
+    private var askOrder: [Int64] = []
+
+    private func setAsks(_ new: [AskRequest]) {
+        asks = new
+        let open = Set(new.map(\.id))
+        let kept = askOrder.filter { open.contains($0) }
+        let placed = Set(kept)
+        askOrder = kept + asksByUrgency.map(\.id).filter { !placed.contains($0) }
+    }
+
     /// How long until the next read of the questions: answered ones disappear (and their
     /// notifications are withdrawn) within a quarter second while any is open.
     public var pollInterval: TimeInterval { PollSchedule.interval(openAsks: asks.count) }
+
+    /// The polls must not be slowed down (App Nap): questions can be asked (enforcement is active, and the
+    /// daemon holds an access only while the questions were read in the last 5 seconds), or are open.
+    public var needsTimelyPolls: Bool { !asks.isEmpty || liveStatus?.enforcementActive == true }
+
+    /// The daemon lists at most this many questions (`DaemonCore.maxListedAsks`).
+    public static let maxListedAsks = 200
+
+    /// The last list of questions (a poll, or the reply to an answer) has every open one: only such a
+    /// list withdraws the banners of questions it leaves out. The daemon lists them all below its cap.
+    /// Not compared with `status.pendingAsks`: the status comes from the other connection and can be
+    /// old (an answer's reply arrives before it, a status read that fails keeps the last one).
+    public var asksListComplete: Bool { asks.count < AppModel.maxListedAsks }
 
     public var formatter: AlertFormatter {
         let homes = catalog?.homeDirectories ?? status?.homeDirectories ?? []
@@ -571,12 +709,15 @@ public final class AppModel {
     private var notRecognisedByDevDaemon: Bool { notRecognised && !viaExtension }
 
     /// The notice at the top of the menu bar window and the main window while the dev LaunchDaemon does
-    /// not recognise this app: what cannot be shown, and that scripts/install.sh fixes it. It stays as
-    /// long as the refusals do. Through the system extension, `limitedViewText` says it instead.
+    /// not recognise this app: what cannot be shown, and that scripts/install.sh fixes it. With the native
+    /// source (a VM with SIP disabled, which scripts/install.sh does not set up): installing that daemon
+    /// again with this app. It stays as long as the refusals do. Through the system extension,
+    /// `limitedViewText` says it instead.
     public var notRecognisedText: String? {
         guard notRecognisedByDevDaemon else { return nil }
         let missing = refusedParts.filter(\.isRecorded).map { L10n.partName($0, language) }
-        let text = L10n.f(.notRecognisedFormat, L10n.alternatives(missing, language), language: language)
+        let format: L = liveStatus?.source == .native ? .notRecognisedNativeFormat : .notRecognisedFormat
+        let text = L10n.f(format, L10n.alternatives(missing, language), language: language)
         // Questions need a source that can hold an access: they still arrive, and can be denied here.
         guard liveStatus?.sourceCanEnforce == true else { return text }
         return text + (language == .zhHans ? "" : " ") + L10n.t(.notRecognisedAsks, language)
@@ -585,6 +726,28 @@ public final class AppModel {
     /// The one notice about what the daemon withholds from this app (`notRecognisedText`, else
     /// `limitedViewText`): never both.
     public var accessNotice: String? { notRecognisedText ?? limitedViewText }
+
+    // A refused change (`DaemonConnection.run`), alert action (`act`) or answer to a question (`answer`),
+    // worded for this installation. While the dev LaunchDaemon does not recognise this app, a refusal for
+    // lack of privilege points at the notice that says why and how to fix it (`notRecognisedText`), not at
+    // "the signed WhoRead app", which a dev install does not have. Refusals for another reason (another
+    // user at the screen, the daemon's own reason for a change that strengthens protection) keep their
+    // words, and so does everything through the system extension (`limitedViewText` there).
+
+    /// A refused change (`DaemonConnection.run`).
+    public func actionError(_ e: IPCError) -> String {
+        L10n.message(for: e, notRecognised: notRecognisedByDevDaemon, language)
+    }
+
+    /// A refused alert action (`DaemonConnection.act`).
+    public func alertActionError(_ e: IPCError, alertID: Int64, action: AlertAction, kind: AlertKind?) -> String {
+        L10n.alertActionError(e, alertID: alertID, action: action, kind: kind, notRecognised: notRecognisedByDevDaemon, language)
+    }
+
+    /// A refused answer to a question (`DaemonConnection.answer`).
+    public func answerError(_ e: IPCError, askID: Int64, action: AlertAction) -> String {
+        L10n.answerError(e, askID: askID, action: action, notRecognised: notRecognisedByDevDaemon, language)
+    }
 
     /// Once a poll found the daemon unreachable: why nothing can be read. With the dev LaunchDaemon, also
     /// that it may be refusing this very app: when the client code requirement the installer pinned
@@ -672,8 +835,9 @@ public final class AppModel {
 
     // MARK: - Rules
 
-    /// Display name: built-in template names and "Block <app> from <category>" rules created by
-    /// alert actions (stored in English) are shown in the UI language.
+    /// Display name: built-in template names, "Block <app> from <category>" rules created by alert
+    /// actions, and the "Allow <app> to read <category> (10 minutes)" rules answers save (all stored in
+    /// English) are shown in the UI language. Any other name (one the user gave) is shown as it is.
     public func ruleName(_ r: Rule) -> String {
         if let t = r.template, let localized = L10n.templateName(t, language),
            r.name == nil || r.name == RuleTemplates.all.first(where: { $0.template == t })?.name {
@@ -686,6 +850,25 @@ public final class AppModel {
                 // The app part is the name the app gave itself when the rule was made.
                 let app = DisplayText.name(String(name.dropFirst(prefix.count).dropLast(suffix.count)))
                 return L10n.f(.ruleBlockAppFormat, app, DisplayText.name(category.resolve(language)), language: language)
+            }
+        }
+        // "Allow once" and "always allow" (also on an alert): named as DaemonCore.answerRuleEdit names them,
+        // the verb by the access the rule allows, "(10 minutes)" for allow once.
+        if let name = r.name, r.template == RuleTemplates.askAnswer, r.action == .allow, case .responsible = r.subject,
+           case .category(let id) = r.target, let category = catalog?.catalog.category(id)?.name {
+            let (verb, format): (String, L) = {
+                switch r.access {
+                case .read: return ("read", .ruleAllowReadFormat)
+                case .write: return ("write", .ruleAllowWriteFormat)
+                case .any: return ("use", .ruleAllowUseFormat)
+                }
+            }()
+            let prefix = "Allow ", suffix = " to \(verb) " + category.en
+            for (end, localizedEnd) in [(suffix + " (10 minutes)", L10n.t(.ruleAllowOnceSuffix, language)), (suffix, "")]
+            where name.hasPrefix(prefix) && name.hasSuffix(end) && name.count > prefix.count + end.count {
+                // The app part is the name the app gave itself when the rule was made.
+                let app = DisplayText.name(String(name.dropFirst(prefix.count).dropLast(end.count)))
+                return L10n.f(format, app, DisplayText.name(category.resolve(language)), language: language) + localizedEnd
             }
         }
         return DisplayText.escaped(r.name ?? r.id, limit: 2 * DisplayText.nameLimit + 40)
@@ -718,6 +901,11 @@ public final class AppModel {
 
     // MARK: - Tabs
 
+    /// Above the live feed while it is missing accesses: more came between two reads (or while the feed
+    /// was paused) than one read returns. They are recorded; the note names the command that lists them.
+    /// Shown until the feed starts over (a new daemon instance).
+    public var liveGapText: String? { live.skippedAccesses ? L10n.t(.liveSkippedNote, language) : nil }
+
     public var liveRows: [AnalyzedEvent] {
         let rows = live.visible(showSystemNoise: showSystemNoise)
         guard !searchText.isEmpty else { return rows }
@@ -746,14 +934,46 @@ public final class AppModel {
     /// The same for a question.
     public func answerTitle(_ action: AlertAction, for ask: AskRequest) -> String { answerTitle(action, for: ask.asAlert) }
 
+    /// The Alerts tab's list, newest first by when each alert was raised. Not in the daemon's order
+    /// (most recently updated first): a repeat merged into an alert would move it to the top, and every
+    /// row above it down, under the pointer, as often as once a second.
+    /// "Unread only": the unread alerts read on their own (also older ones the list of every status
+    /// leaves out), or those in that list until they are read.
     public var visibleAlerts: [Alert] {
-        alertsUnreadOnly ? alerts.filter { $0.status == .unread } : alerts
+        (alertsUnreadOnly ? unreadListed : alerts)
+            .sorted { ($0.createdAt, $0.id) > ($1.createdAt, $1.id) }
     }
 
-    /// Unread alerts: counted in the list while it is current, otherwise (refused, not answered) as the
-    /// status counts them, so the Alerts tab and the popover agree with the menu bar badge.
+    private var unreadListed: [Alert] { (unreadAlertList ?? alerts).filter { $0.status == .unread } }
+
+    /// An alert as listed: in the list of every status, or only in the unread alerts read on their own.
+    public func alert(id: Int64) -> Alert? {
+        alerts.first { $0.id == id } ?? unreadAlertList?.first { $0.id == id }
+    }
+
+    /// The daemon keeps alerts for the retention period (30 days by default); the list has the most
+    /// recently updated `SnapshotFetcher.alertLimit`.
+    static let allAlertsCommand = "sudo whoread alerts --limit 10000"
+    static let allUnreadAlertsCommand = "sudo whoread alerts --unread --limit 10000"
+
+    /// Under the Alerts tab's list while it leaves alerts out: how many it lists, of how many (as the
+    /// status counts them), and the command that lists them all. Only for a list the daemon cut at its
+    /// limit (below it, it lists them all); not while the list cannot be read (`unavailableNote` says so).
+    public var alertsCappedText: String? {
+        guard failures[.alerts] == nil, let s = liveStatus else { return nil }
+        guard (alertsUnreadOnly ? unreadAlertList ?? alerts : alerts).count >= SnapshotFetcher.alertLimit else { return nil }
+        let listed = alertsUnreadOnly ? unreadListed.count : alerts.count
+        let total = alertsUnreadOnly ? s.unreadAlerts : s.counts.alerts
+        guard total > listed else { return nil }
+        return L10n.f(.alertsCappedFormat, listed, total,
+                      alertsUnreadOnly ? AppModel.allUnreadAlertsCommand : AppModel.allAlertsCommand, language: language)
+    }
+
+    /// Unread alerts as the status counts them, all of them (as the menu bar badge does): the list has
+    /// only the most recently updated. Counted in the list only while the status does not describe the
+    /// running daemon.
     public var unreadCount: Int {
-        if failures[.alerts] != nil, let s = liveStatus { return s.unreadAlerts }
+        if let s = liveStatus { return s.unreadAlerts }
         return alerts.filter { $0.status == .unread }.count
     }
 

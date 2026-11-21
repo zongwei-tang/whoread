@@ -74,6 +74,13 @@ public final class Daemon: @unchecked Sendable {
         if lockFD >= 0 { close(lockFD) }
     }
 
+    /// What the seeded tree asks libproc: the parent of a process it has not seen, and, in maintenance,
+    /// whether a live node's process still runs (exits the event source lost; `ProcessTree.reconcileLiveness`).
+    static func useLibproc(_ tree: ProcessTree) {
+        tree.parentResolver = { ProcessSnapshot.record(pid: $0) }
+        tree.livenessProbe = { ProcessSnapshot.isRunning(pid: $0, startTime: $1) }
+    }
+
     public func start() throws {
         let config = core.config
         // Started again after stop(): take the lock back.
@@ -83,7 +90,7 @@ public final class Daemon: @unchecked Sendable {
             core.tree.seed(snapshot, at: Date())
             // libproc has no fork-time parent: the agents running processes had before the restart.
             core.restoreAgentAncestry()
-            core.tree.parentResolver = { ProcessSnapshot.record(pid: $0) }
+            Daemon.useLibproc(core.tree)
             Log.info("process tree seeded with \(snapshot.count) processes")
             schedule(every: 5) { [core] in core.persistAgentAncestry() }
         }

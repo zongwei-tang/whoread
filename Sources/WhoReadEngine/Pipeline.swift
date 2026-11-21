@@ -56,28 +56,47 @@ public final class LiveBuffer: @unchecked Sendable {
 public final class EventWriter: @unchecked Sendable {
     private let store: EventStore
     private let lock = NSLock()
+    /// Waiting events, oldest first, from `pendingStart` on: the ones before it were dropped over the
+    /// cap. Dropping moves the start instead of shifting the queue (daemon-4: at the cap, a removeFirst
+    /// moved all 100,000 waiting events, about 50 MB, on every enqueue, on the source's reader thread).
     private var pendingEvents: [AnalyzedEvent] = []
+    private var pendingStart = 0
     private var pendingAlerts: [Int64: Alert] = [:]
     private let maxPending: Int
     private let queue = DispatchQueue(label: "whoread.writer")
     private var timer: DispatchSourceTimer?
     private(set) var dropped: UInt64 = 0
     private(set) var lastError: String?
-    private var lastErrorReport = Date.distantPast
+    private var lastErrorReport: TimeInterval?
     private let errorReportInterval: TimeInterval
     /// Store errors, at most once per `errorReportInterval` (a full disk fails every flush).
     public var onError: ((Error) -> Void)?
+    /// Back-off after failed flushes (writer queue only): a store that keeps failing is retried at twice
+    /// the interval after each failure, at most every `maxRetryDelay`, not with the whole backlog on every
+    /// tick, nor on every read's `flush()` (the app polls alerts every second). An action's
+    /// `flushOrThrow()` and `stop()` still try at once. On the uptime clock (`uptime`): a wall clock set
+    /// back after a failure must not stop the writer for as long.
+    private var interval: TimeInterval = 0.25
+    private let maxRetryDelay: TimeInterval
+    private var failedFlushes = 0
+    private var retryAt: TimeInterval = 0
 
-    public init(store: EventStore, maxPending: Int = 100_000, errorReportInterval: TimeInterval = 10) {
+    private let uptime: @Sendable () -> TimeInterval
+
+    public init(store: EventStore, maxPending: Int = 100_000, errorReportInterval: TimeInterval = 10, maxRetryDelay: TimeInterval = 5,
+                uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.uptime = uptime
         self.store = store
         self.maxPending = maxPending
         self.errorReportInterval = errorReportInterval
+        self.maxRetryDelay = maxRetryDelay
     }
 
     public func start(interval: TimeInterval = 0.25) {
+        queue.sync { self.interval = interval }
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + interval, repeating: interval)
-        t.setEventHandler { [weak self] in self?.flushLocked() }
+        t.setEventHandler { [weak self] in self?.tick() }
         t.resume()
         timer = t
     }
@@ -85,7 +104,13 @@ public final class EventWriter: @unchecked Sendable {
     public func stop() {
         timer?.cancel()
         timer = nil
-        flush()
+        queue.sync { _ = flushLocked() }
+    }
+
+    /// A timer tick: a flush, unless backing off after failures.
+    private func tick() {
+        guard uptime() >= retryAt else { return }
+        _ = flushLocked()
     }
 
     public func enqueue(events: [AnalyzedEvent]) {
@@ -95,11 +120,15 @@ public final class EventWriter: @unchecked Sendable {
     }
 
     private func trimLocked() {
-        if pendingEvents.count > maxPending {
-            // Prefer keeping recent events; count what was lost.
-            let excess = pendingEvents.count - maxPending
-            pendingEvents.removeFirst(excess)
-            dropped += UInt64(excess)
+        let excess = pendingEvents.count - pendingStart - maxPending
+        guard excess > 0 else { return }
+        // Prefer keeping recent events; count what was lost.
+        pendingStart += excess
+        dropped += UInt64(excess)
+        // The dropped prefix goes once it is a tenth of the cap long: one shift per that many drops.
+        if pendingStart >= max(1, maxPending / 10) {
+            pendingEvents.removeFirst(pendingStart)
+            pendingStart = 0
         }
     }
 
@@ -108,20 +137,41 @@ public final class EventWriter: @unchecked Sendable {
         for a in alerts { pendingAlerts[a.id] = a }
     }
 
-    /// Synchronous flush (queries call this so they see everything processed so far).
+    /// Synchronous flush (queries call this so they see everything processed so far), unless backing off
+    /// after failures: then what is queued waits for the next try, as on a timer tick.
     public func flush() {
-        queue.sync { flushLocked() }
+        queue.sync {
+            guard uptime() >= retryAt else { return }
+            _ = flushLocked()
+        }
     }
 
-    private func flushLocked() {
+    /// A flush for a user's action: at once, also while backing off after failures (`flush()` waits then).
+    public func flushNow() {
+        queue.sync { _ = flushLocked() }
+    }
+
+    /// `flushNow()`, throwing when the queued alerts could not be written (they stay queued for the next one).
+    public func flushOrThrow() throws {
+        var failure: Error?
+        queue.sync { failure = flushLocked() }
+        if let failure { throw failure }
+    }
+
+    /// Returns why the alerts could not be written, if they could not.
+    private func flushLocked() -> Error? {
         lock.lock()
-        let events = pendingEvents
+        var events = pendingEvents
+        let droppedPrefix = pendingStart
         let alerts = Array(pendingAlerts.values)
         pendingEvents.removeAll(keepingCapacity: true)
+        pendingStart = 0
         pendingAlerts.removeAll(keepingCapacity: true)
         lock.unlock()
-        // The two writes fail independently. A failed one is put back and retried on the next tick
-        // (a failed transaction rolls back, so a retry cannot double-count summaries).
+        // Off the lock: the reader thread can enqueue meanwhile.
+        if droppedPrefix > 0 { events.removeFirst(droppedPrefix) }
+        // The two writes fail independently. A failed one is put back and retried later (a failed
+        // transaction rolls back, so a retry cannot double-count summaries).
         var failure: Error?
         var failedEvents: [AnalyzedEvent] = []
         var failedAlerts: [Alert] = []
@@ -137,18 +187,29 @@ public final class EventWriter: @unchecked Sendable {
             failure = error
             failedAlerts = alerts
         }
-        guard let failure else { return }
-        let now = Date()
+        guard let failure else {
+            failedFlushes = 0
+            retryAt = 0
+            return nil
+        }
+        let now = uptime()
+        failedFlushes += 1
+        retryAt = now + min(maxRetryDelay, interval * pow(2, Double(min(failedFlushes, 30))))
         lock.lock()
         lastError = "\(failure)"
-        pendingEvents.insert(contentsOf: failedEvents, at: 0)
-        trimLocked()
+        // In front of what arrived meanwhile, within the cap: the oldest go first, as in trimLocked.
+        let waiting = pendingEvents.count - pendingStart
+        let kept = max(0, min(failedEvents.count, maxPending - waiting))
+        dropped += UInt64(failedEvents.count - kept)
+        pendingEvents = Array(failedEvents.suffix(kept)) + pendingEvents[pendingStart...]
+        pendingStart = 0
         // A newer snapshot of the same alert queued meanwhile wins.
         for a in failedAlerts where pendingAlerts[a.id] == nil { pendingAlerts[a.id] = a }
-        let report = now.timeIntervalSince(lastErrorReport) >= errorReportInterval
+        let report = lastErrorReport.map { now - $0 >= errorReportInterval } ?? true
         if report { lastErrorReport = now }
         lock.unlock()
         if report { onError?(failure) }
+        return failedAlerts.isEmpty ? nil : failure
     }
 
     public var droppedCount: UInt64 {
@@ -211,6 +272,13 @@ public final class EventPipeline: EventSink, @unchecked Sendable {
         sourceState = state
         lock.unlock()
         onSourceState?(state)
+    }
+
+    /// Runs `body` while no file event is analysed or queued (the lock `receive` holds across both): an
+    /// action on alerts changes them in the coalescer and queues them with no merge in between (daemon-3).
+    public func whileIngestionHeld<T>(_ body: () throws -> T) rethrows -> T {
+        orderLock.lock(); defer { orderLock.unlock() }
+        return try body()
     }
 
     public var stats: (processed: UInt64, lastEventAt: Date?, source: SourceState) {

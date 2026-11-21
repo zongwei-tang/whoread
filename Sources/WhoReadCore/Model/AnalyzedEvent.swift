@@ -178,6 +178,11 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
     public var accesses: AccessSet
     /// First event's details, for the headline.
     public var firstPath: String
+    /// What was done to `firstPath` (the headline's verb); `accesses` is the whole window's, which an
+    /// answer covers. nil in alerts from before it was kept (daemon-8).
+    public var firstPathAccess: AccessSet?
+    /// The event that made the alert or last escalated it: every escalation moves it (clients notify
+    /// again on it), a merged repeat never does.
     public var firstEventID: Int64
     public var lastEventID: Int64
     /// Distinct paths seen (capped).
@@ -202,7 +207,8 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
                 responsible: ResponsibleEntity, categoryID: String, severity: Severity, count: Int, accesses: AccessSet,
                 firstPath: String, firstEventID: Int64, lastEventID: Int64, paths: [String], chain: [ChainLink],
                 agentID: String?, ruleID: String?, status: AlertStatus = .unread, resolution: AlertAction? = nil,
-                firstTime: Bool = false, appleProgram: Bool = false, chainAgents: [String]? = nil, ancestryKnown: Bool? = nil) {
+                firstTime: Bool = false, appleProgram: Bool = false, chainAgents: [String]? = nil, ancestryKnown: Bool? = nil,
+                firstPathAccess: AccessSet? = nil) {
         self.id = id
         self.kind = kind
         self.createdAt = createdAt
@@ -214,6 +220,7 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
         self.count = count
         self.accesses = accesses
         self.firstPath = firstPath
+        self.firstPathAccess = firstPathAccess
         self.firstEventID = firstEventID
         self.lastEventID = lastEventID
         self.paths = paths
@@ -231,7 +238,7 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, kind, createdAt, updatedAt, windowEndsAt, responsible, categoryID, severity, count, accesses, firstPath
         case firstEventID, lastEventID, paths, chain, agentID, ruleID, status, resolution, firstTime, appleProgram
-        case chainAgents, ancestryKnown
+        case chainAgents, ancestryKnown, firstPathAccess
     }
 
     public init(from decoder: Decoder) throws {
@@ -259,6 +266,7 @@ public struct Alert: Codable, Hashable, Sendable, Identifiable {
         appleProgram = try c.decodeIfPresent(Bool.self, forKey: .appleProgram) ?? false
         chainAgents = try c.decodeIfPresent([String].self, forKey: .chainAgents)
         ancestryKnown = try c.decodeIfPresent(Bool.self, forKey: .ancestryKnown)
+        firstPathAccess = try c.decodeIfPresent(AccessSet.self, forKey: .firstPathAccess)
     }
 
     /// The AI agents of the chain an answer on this alert is scoped to: the full chain's when known,

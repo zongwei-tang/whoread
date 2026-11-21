@@ -492,9 +492,11 @@ final class QuestionsUIModelTests: XCTestCase {
         XCTAssertEqual(m.answerTitle(.blockFromNowOn, for: alert),
                        "Block Terminal (any program run in it, except expected owners) from SSH keys from now on")
         XCTAssertEqual(m.answerTitle(.ignore, for: alert), "Ignore")
-        // An agent in the chain scopes it (as the daemon takes the agents from the alert's chain).
+        // An agent in the chain scopes it (as the daemon takes the agents from the alert: its whole chain's,
+        // Alert.scopeAgents; adjusted in round 5, app-10).
         alert.chain = [ChainLink(pid: 5, name: "claude", path: "/opt/homebrew/bin/claude", signingID: nil, teamID: nil,
                                  isPlatformBinary: false, agentID: "claude-code", argv: nil)]
+        alert.chainAgents = ["claude-code"]
         XCTAssertTrue(try XCTUnwrap(alert.allowCoverageLine(m.formatter, agentName: m.agentName)).hasSuffix("no AI agent other than Claude Code."))
         // A question's alert names allow once too; a handled alert offers nothing.
         alert.kind = .ask

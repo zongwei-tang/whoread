@@ -79,9 +79,16 @@ public final class NotificationPlanner: @unchecked Sendable {
         /// The coalescer moves it on every escalation (also a new access kind at the same level),
         /// never on a merged repeat.
         var firstEventID: Int64
+        /// No event merges into the alert (nor escalates it) from then on.
+        var windowEndsAt: Date
     }
 
+    /// Alerts remembered, so that merged repeats never notify again. Forgotten once the list no
+    /// longer has them and their window has been closed for `forgetAfterWindow`.
     private var notified: [Int64: Seen] = [:]
+    /// How long after its window closed an alert no longer listed is still remembered: an event
+    /// handled late merges into the window its own time falls in.
+    static let forgetAfterWindow: TimeInterval = 600
     private var seeded = false
     private let launchedAt: Date
     private var lastUncleanStop: String?
@@ -176,14 +183,22 @@ public final class NotificationPlanner: @unchecked Sendable {
     /// The unclean stop last reported (nil once a status showed none), for the app to keep.
     public var notifiedUncleanStop: String? { lastUncleanStop }
 
+    /// Alerts remembered as notified or seeded (tests).
+    var notifiedCount: Int { notified.count }
+
     /// The first plan only records alerts from before launch (no burst of old notifications);
     /// alerts raised since launch notify even if the daemon was unreachable until now.
     /// `alerts` nil: they were not read this time (refused, failed): nothing is planned or recorded, so
     /// the first read that succeeds still only records what is older than the launch.
+    /// `alerts` is the whole list as the daemon lists it (the most recently updated, of every status),
+    /// not only what changed: alerts it no longer has are forgotten once their window is long closed.
     public func plan(_ alerts: [Alert]?, settings: NotificationSettings, formatter: AlertFormatter,
                      agentName: (String) -> String = { $0 }) -> [PlannedNotification] {
         guard let alerts else { return [] }
-        defer { seeded = true }
+        defer {
+            seeded = true
+            forgetClosed(listed: alerts)
+        }
         var out: [PlannedNotification] = []
         for a in alerts.sorted(by: { $0.updatedAt < $1.updatedAt }) {
             // Same id, different creation time: the daemon reused the id (its alert table was
@@ -192,7 +207,7 @@ public final class NotificationPlanner: @unchecked Sendable {
             let isNew = previous == nil
             let escalated = previous.map { a.kind.priority > $0.kind.priority || a.firstEventID != $0.firstEventID } ?? false
             let kind = previous.map { $0.kind.priority >= a.kind.priority ? $0.kind : a.kind } ?? a.kind
-            notified[a.id] = Seen(createdAt: a.createdAt, kind: kind, firstEventID: a.firstEventID)
+            notified[a.id] = Seen(createdAt: a.createdAt, kind: kind, firstEventID: a.firstEventID, windowEndsAt: a.windowEndsAt)
             // Not updatedAt: repeats merged since launch move it on alerts notified before.
             guard isNew || escalated, seeded || a.createdAt >= launchedAt else { continue }
             // The question itself is notified (`plan(asks:)`), with the answers as buttons.
@@ -210,6 +225,19 @@ public final class NotificationPlanner: @unchecked Sendable {
                 actions: a.availableActions))
         }
         return out
+    }
+
+    /// Forgets alerts the list no longer has whose window closed `forgetAfterWindow` ago: nothing merges
+    /// into them or escalates them any more, so they do not come back to the list. Timed by the list's
+    /// newest update (the daemon's event times decide the windows), not by this Mac's clock. One that
+    /// left the list while its window is open (pushed out by a flood of newer alerts) is kept: a merged
+    /// repeat brings it back, and must not notify as new.
+    private func forgetClosed(listed alerts: [Alert]) {
+        guard let clock = alerts.map(\.updatedAt).max() else { return }
+        let listed = Set(alerts.map(\.id))
+        notified = notified.filter { id, seen in
+            listed.contains(id) || clock.timeIntervalSince(seen.windowEndsAt) < NotificationPlanner.forgetAfterWindow
+        }
     }
 
     /// The daemon's previous instance stopped uncleanly: while it could block (likely killed by the
@@ -275,6 +303,8 @@ public final class NotificationPlanner: @unchecked Sendable {
 /// Monitor-only mode (`isMonitorOnly`): the dev LaunchDaemon runs Apple's eslogger. There is no
 /// extension to install (a build without a team cannot install one), Full Disk Access goes to the
 /// daemon's executable rather than to the app, and onboarding completes without the extension.
+/// Which steps onboarding shows is decided by the build first (`showsMonitorOnly`): one that cannot
+/// install the extension shows those steps whether or not the daemon answers right now.
 public struct OnboardingModel: Equatable, Sendable {
     public enum StepState: Equatable, Sendable {
         case pending
@@ -312,10 +342,35 @@ public struct OnboardingModel: Equatable, Sendable {
         connected && !viaExtension && status?.source == .eslogger
     }
 
+    /// Onboarding shows the monitor-only steps (`extensionBody`, `fullDiskAccessBody`, `daemonBody`).
+    /// Decided by the build first. One that cannot install the system extension (`canInstallExtension`
+    /// false: it names no extension service, `DaemonConnection.extensionServiceName`, as the ad hoc build
+    /// scripts/install.sh makes) only ever uses the dev LaunchDaemon, so its steps stay the same while that
+    /// daemon is not running, restarting, or refusing this app: all three look like no answer to the app.
+    /// `status` is the last one read (kept while the daemon does not answer): only the native source (the
+    /// dev daemon in a VM with SIP disabled) can block, and then the usual steps apply. A build that can
+    /// install the extension: monitor-only while the daemon answers as the dev LaunchDaemon with eslogger.
+    public static func showsMonitorOnly(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool, canInstallExtension: Bool) -> Bool {
+        guard canInstallExtension else { return status?.source != .native }
+        return isMonitorOnly(status, connected: connected, viaExtension: viaExtension)
+    }
+
+    /// The Full Disk Access step names the daemon's executable (`fullDiskAccessBody(monitorOnly: true)`, with
+    /// a button that copies its path), not this app: always for a build that cannot install the extension,
+    /// which only uses the dev LaunchDaemon (whoreadd needs Full Disk Access with the native source too),
+    /// otherwise in monitor-only mode.
+    public static func fullDiskAccessGoesToDaemon(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool,
+                                                  canInstallExtension: Bool) -> Bool {
+        !canInstallExtension || isMonitorOnly(status, connected: connected, viaExtension: viaExtension)
+    }
+
     /// Done once the daemon answers through the extension's Mach service (or runs the native
     /// Endpoint Security source), even if the extension was approved before this launch. Not
-    /// available in monitor-only mode: nothing to install, monitoring runs without it.
-    public func extensionStepState(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool) -> StepState {
+    /// available in monitor-only mode: nothing to install, monitoring runs without it. Never offered by
+    /// a build that cannot install it (`showsMonitorOnly`), whatever this session's request did and
+    /// whether or not the daemon answers now; for such a build the native source last seen does its job.
+    public func extensionStepState(_ status: DaemonStatus?, connected: Bool, viaExtension: Bool, canInstallExtension: Bool) -> StepState {
+        guard canInstallExtension else { return status?.source == .native ? .done : .notAvailable }
         if connected, let s = status, viaExtension || s.source == .native { return .done }
         if OnboardingModel.isMonitorOnly(status, connected: connected, viaExtension: viaExtension) { return .notAvailable }
         return extensionState
@@ -327,7 +382,7 @@ public struct OnboardingModel: Equatable, Sendable {
     }
 
     /// The Full Disk Access step's text: in monitor-only mode it names the daemon's executable, which
-    /// needs it, not this app.
+    /// needs it, not this app (onboarding passes `fullDiskAccessGoesToDaemon`).
     public static func fullDiskAccessBody(monitorOnly: Bool, _ language: Language = L10n.current) -> String {
         monitorOnly ? L10n.f(.onbFDABodyDaemonFormat, daemonExecutablePath, language: language) : L10n.t(.onbFDABody, language)
     }
@@ -483,17 +538,23 @@ public struct RuleDraft: Equatable, Sendable {
         case .anyNonOwner: subject = .anyNonOwner
         case .agentChain: subject = .agentAncestor(agentIDs: agentIDs.isEmpty ? nil : agentIDs, exceptOwners: exceptOwners)
         }
-        // Editing keeps expiry, use count and creation time; a template only lends its provenance.
-        // The chain scope (not shown in the editor) is kept: an answer that allowed an app without an
-        // AI agent must not become an allow for that app driven by any agent once edited. So is whether
-        // it also covers chains whose starter is unknown.
+        // Editing keeps creation time; a template only lends its provenance. An allow keeps its chain
+        // scope (shown in the editor, not editable there): an answer that allowed an app without an AI agent must not
+        // become an allow for that app driven by any agent once edited. So is whether it also covers
+        // chains whose starter is unknown. A block or an alert made from an allow covers every chain
+        // (a scope would leave out exactly the chains with an AI agent), and is no longer an answer:
+        // expiry and use count go with the action, so a block made from "allow once" does not end, and
+        // is not deleted as an expired answer, 10 minutes later.
         let edited = id != nil && original?.id == id ? original : nil
+        let staysAllow = action == .allow && original?.action == .allow
+        let sameAction = edited?.action == action
+        let template = original?.template == RuleTemplates.askAnswer && !staysAllow ? nil : original?.template
         return Rule(id: id ?? UUID().uuidString, name: name.isEmpty ? nil : name, enabled: enabled, enforce: enforce,
                     target: target, subject: subject, access: access, action: action,
-                    includePlatformBinaries: includePlatformBinaries, expiresAt: edited?.expiresAt,
-                    remainingUses: edited?.remainingUses, createdAt: edited?.createdAt ?? now, template: original?.template,
-                    exceptions: exceptions, chainAgents: original?.chainAgents,
-                    coversUnknownAncestry: original?.coversUnknownAncestry ?? false)
+                    includePlatformBinaries: includePlatformBinaries, expiresAt: sameAction ? edited?.expiresAt : nil,
+                    remainingUses: sameAction ? edited?.remainingUses : nil, createdAt: edited?.createdAt ?? now, template: template,
+                    exceptions: exceptions, chainAgents: staysAllow ? original?.chainAgents : nil,
+                    coversUnknownAncestry: staysAllow && (original?.coversUnknownAncestry ?? false))
     }
 }
 
@@ -518,13 +579,16 @@ extension Rule {
     /// This rule as edited in the app, with what the daemon changes on its own taken from its
     /// current copy: exceptions (a used "allow once", an "always allow" from a banner), use count
     /// and expiry. The editor shows none of them, and the app's copy can be up to 10 s old.
-    /// Without a current copy (a new rule) it is saved as built.
+    /// Use count and expiry only while the action is the same: a block made from an "allow once"
+    /// answer does not end with it. Without a current copy (a new rule) it is saved as built.
     public func keepingDaemonState(of current: Rule?) -> Rule {
         guard let current else { return self }
         var r = self
         r.exceptions = current.exceptions
-        r.remainingUses = current.remainingUses
-        r.expiresAt = current.expiresAt
+        if current.action == action {
+            r.remainingUses = current.remainingUses
+            r.expiresAt = current.expiresAt
+        }
         return r
     }
 }

@@ -49,6 +49,7 @@ struct MainWindow: View {
 }
 
 struct LiveView: View {
+    @Environment(DaemonConnection.self) private var connection
     @Environment(AppModel.self) private var model
     @State private var selection: AnalyzedEvent.ID?
 
@@ -62,6 +63,11 @@ struct LiveView: View {
                 Button(model.feedPaused ? L10n.t(.resumeFeed) : L10n.t(.pauseFeed)) { model.feedPaused.toggle() }
             }
             UnavailableNote(part: .live)
+            // More accesses came at once than one read returns: say so, and where to see them all.
+            if let gap = model.liveGapText {
+                Text(gap).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if model.liveRows.isEmpty {
                 // Refused or not read: the note says so, not "no access yet".
                 if model.unavailableNote(.live) == nil {
@@ -85,6 +91,8 @@ struct LiveView: View {
                 }
             }
         }
+        // Shown with the folded system activity: read it now (from before the switch too), not at the next tick.
+        .onChange(of: model.showSystemNoise) { connection.poll(full: false) }
         // Process identity of the selected access (brief §1: pid, path, signing ID, team ID, platform flag).
         .inspector(isPresented: Binding(get: { selection != nil }, set: { if !$0 { selection = nil } })) {
             if let e = model.live.events.first(where: { $0.id == selection }) {
@@ -154,6 +162,10 @@ struct AlertsView: View {
                 Text(problem).foregroundStyle(.red).font(.callout)
             }
             UnavailableNote(part: .alerts)
+            // The list has the most recently updated alerts: say so when there are more, and how to see them.
+            if let capped = model.alertsCappedText {
+                Text(capped).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
             if model.visibleAlerts.isEmpty && model.asks.isEmpty {
                 // Refused or not read: the note says so, not "no alerts".
                 if model.unavailableNote(.alerts) == nil {
@@ -163,10 +175,11 @@ struct AlertsView: View {
                 }
             } else {
                 List {
-                    // Ask mode: questions waiting for an answer come first.
+                    // Ask mode: questions waiting for an answer come first. Rows keep their place while
+                    // open (questions) and when repeats merge (alerts): a click lands on the row aimed at.
                     if !model.asks.isEmpty {
                         Section(L10n.t(.asksTitle)) {
-                            ForEach(model.asksByUrgency) { ask in AskRow(ask: ask) }
+                            ForEach(model.listedAsks) { ask in AskRow(ask: ask) }
                         }
                     }
                     Section {
@@ -175,6 +188,9 @@ struct AlertsView: View {
                 }
             }
         }
+        // "Unread only" reads the unread alerts on their own while this tab is shown (also older ones).
+        .readsWhileShown(.alerts)
+        .onChange(of: model.alertsUnreadOnly) { connection.poll(full: false) }
     }
 }
 
@@ -225,6 +241,22 @@ struct AlertRow: View {
     }
 }
 
+/// While shown, full polls read the summaries this view shows (`PollViews`); hidden, they are not read.
+private struct ReadsWhileShown: ViewModifier {
+    @Environment(DaemonConnection.self) private var connection
+    let view: PollViews.View
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { connection.setShown(view, true) }
+            .onDisappear { connection.setShown(view, false) }
+    }
+}
+
+extension View {
+    func readsWhileShown(_ view: PollViews.View) -> some View { modifier(ReadsWhileShown(view: view)) }
+}
+
 struct AppsView: View {
     @Environment(AppModel.self) private var model
     var body: some View {
@@ -247,6 +279,7 @@ struct AppsView: View {
                 }
             }
         }
+        .readsWhileShown(.apps)
     }
 }
 
@@ -267,6 +300,7 @@ struct FilesView: View {
                 TableColumn(L10n.t(.colCount)) { r in Text("\(r.count)").monospacedDigit() }.width(min: 50, ideal: 60)
             }
         }
+        .readsWhileShown(.files)
     }
 }
 
@@ -292,5 +326,6 @@ struct AgentsView: View {
                 }
             }
         }
+        .readsWhileShown(.agents)
     }
 }

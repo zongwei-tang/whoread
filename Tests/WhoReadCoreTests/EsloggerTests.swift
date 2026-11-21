@@ -199,7 +199,8 @@ final class LinePrefilterTests: XCTestCase {
     func testNonASCIIPrefixUsesASCIIFragment() {
         XCTAssertEqual(LinePrefilter.needle(for: "/Users/alice/Work/项目"), "/Users/alice/Work/")
         XCTAssertNil(LinePrefilter.needle(for: "/项目"))
-        let all = LinePrefilter(prefixes: ["/项目"])
+        // Only a prefix that cannot be spelled exactly (letters with case) needs a fragment.
+        let all = LinePrefilter(prefixes: ["/Été"])
         XCTAssertEqual(all.verdict(#"{"event":{"open":{"file":{"path":"/tmp/x"}}}}"#), .parse, "no usable fragment: parse every file event")
     }
 
@@ -310,14 +311,15 @@ final class EsloggerIngestFixTests: XCTestCase {
         XCTAssertEqual(filter.verdict(npmrc), .parse)
         let docker = esLine(#""copyfile":{"target_dir":{"path":"/Users/alice/.docker"},"source":{"path":"/private/tmp/x"},"target_file":null,"target_name":"config.json"}"#)
         XCTAssertEqual(filter.verdict(docker), .parse)
+        // A create with a new_path destination is one an ES client denied: nothing was created.
         let create = esLine(#""create":{"destination_type":1,"destination":{"new_path":{"dir":{"path":"\/Users\/alice"},"filename":".npmrc","mode":384}},"acl":null}"#)
-        XCTAssertEqual(filter.verdict(create), .parse)
+        XCTAssertEqual(filter.verdict(create), .drop)
         // The parser joins dir + name and records a write of the new file.
         let f = fileEvent(npmrc)
         XCTAssertEqual(f?.operation, .copyfile)
         XCTAssertEqual(f?.targets.last?.path, "/Users/alice/.npmrc")
         XCTAssertEqual(f?.targets.last?.access, .write)
-        XCTAssertEqual(fileEvent(create)?.targets.map(\.path), ["/Users/alice/.npmrc"])
+        XCTAssertNil(fileEvent(create))
     }
 
     func testPrefixNeedlesAreAnchoredToStringStart() {
@@ -332,7 +334,7 @@ final class EsloggerIngestFixTests: XCTestCase {
         XCTAssertEqual(filter.verdict(esLine(#""open":{"fflag":1,"file":{"path":"/volumes/USB/x"}}"#)), .parse)
         XCTAssertEqual(filter.verdict(esLine(#""open":{"fflag":1,"file":{"path":"\/System\/Volumes\/Data\/Users\/alice\/.ssh\/id_rsa"}}"#)), .parse)
         XCTAssertEqual(filter.verdict(esLine(#""open":{"fflag":1,"file":{"path":"/System/Volumes/Data/Users/alice/.ssh/id_rsa"}}"#)), .parse)
-        // A non-ASCII prefix still matches by its (unanchored) ASCII fragment.
+        // A non-ASCII prefix matches too.
         let cjk = LinePrefilter(prefixes: ["/Users/alice/Work/项目"])
         XCTAssertEqual(cjk.verdict(esLine(#""open":{"fflag":1,"file":{"path":"\/Users\/alice\/Work\/"# + "项目" + #"\/a"}}"#)), .parse)
     }

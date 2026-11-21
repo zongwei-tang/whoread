@@ -18,7 +18,9 @@ import WhoReadIPC
 ///     app recognised: yes                                   | app recognised: no (<reason>)
 ///
 /// A stopped source's error and hint appear only when the daemon has them. The first step that fails
-/// ends the check: an unreachable daemon prints one line.
+/// ends the check: an unreachable daemon prints one line. With the dev LaunchDaemon, no answer to the
+/// handshake also says that it may be refusing this program (`refusalHint`): XPC drops each connection of
+/// an app its pinned client requirement does not admit, which looks like no answer.
 public struct SelfCheck: Equatable, Sendable {
     /// The exit status.
     public enum Outcome: Int32, Sendable {
@@ -61,7 +63,7 @@ public struct SelfCheck: Equatable, Sendable {
             }
             version = v
         } catch {
-            return end("daemon: unreachable (\(reason(error)))", .unreachable)
+            return end("daemon: unreachable (\(reason(error))\(viaExtension ? "" : refusalHint(error)))", .unreachable)
         }
         guard version == whoReadIPCVersion else {
             return end("daemon: unreachable (protocol mismatch: the daemon speaks protocol \(version), this app \(whoReadIPCVersion))",
@@ -84,10 +86,17 @@ public struct SelfCheck: Equatable, Sendable {
             _ = try client.rules()
             return end("app recognised: yes", .recognised)
         } catch let e as IPCError where e.code == .notPermitted && !L10n.isNotConsoleUser(e) {
-            let why = viaExtension
-                ? "the system extension does not take this program for the signed WhoRead app"
-                : "the daemon does not take this program for the WhoRead app it was installed with: if the app was rebuilt "
+            let why: String
+            if viaExtension {
+                why = "the system extension does not take this program for the signed WhoRead app"
+            } else if status.source == .native {
+                // A VM with SIP disabled: scripts/install.sh would install the eslogger source (and needs Xcode).
+                why = "the daemon does not take this program for the WhoRead app it was installed with: it runs the native "
+                    + "monitor, so install it again with this app, sudo scripts/install-dev-daemon.sh native --app WhoRead.app"
+            } else {
+                why = "the daemon does not take this program for the WhoRead app it was installed with: if the app was rebuilt "
                     + "or replaced after installing, run scripts/install.sh again"
+            }
             return end("app recognised: no (\(why))", .notRecognised)
         } catch {
             // No answer, or a reply this app cannot read: the daemon could not be asked, which is not a refusal.
@@ -104,6 +113,16 @@ public struct SelfCheck: Equatable, Sendable {
         if let error = s.sourceError { line += ": " + escaped(error) }
         if let hint = s.sourceHint { line += " [hint: " + escaped(hint) + "]" }
         return line
+    }
+
+    /// After the reason the handshake got no answer (`.unavailable`) from the dev LaunchDaemon: it may be
+    /// refusing this very program. The client requirement scripts/install.sh pins admits only the app and
+    /// CLI it installed, and XPC drops every connection of a rebuilt or replaced app (the app says so too:
+    /// `AppModel.unreachableText`). Nothing for a daemon that answered, whatever it said.
+    static func refusalHint(_ error: Error) -> String {
+        guard let e = error as? IPCError, e.code == .unavailable else { return "" }
+        return "; if com.whoread.daemon is running, it may be refusing this program: run scripts/install.sh again, which is "
+            + "needed when the app was rebuilt or replaced after installing"
     }
 
     /// Why a request failed, in one line: the daemon's or the transport's words, escaped.

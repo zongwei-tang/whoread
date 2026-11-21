@@ -22,7 +22,7 @@ final class BoundedStateTests: XCTestCase {
 
     func testUnapprovedEntriesBeyondTheLimitAreForgottenOldestFirstAndApprovalsStay() {
         let b = Baseline(learningStartedAt: t0, maxUnapproved: 50)
-        b.approve(responsibleKey: "app:/applications/zoom.us.app", categoryID: "ssh", at: at(-1000))
+        for kind in AccessKind.allCases { b.approve(responsibleKey: "app:/applications/zoom.us.app", categoryID: "ssh", access: kind, at: at(-1000)) }
         for i in 0..<200 { b.record(key(i), at: at(Double(i)), learning: false) }
         XCTAssertEqual(b.count, 202, "recording never sorts or evicts (that is maintenance's job)")
         _ = b.takeDirty()

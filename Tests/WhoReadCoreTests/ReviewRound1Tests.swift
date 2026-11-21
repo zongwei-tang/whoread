@@ -883,7 +883,7 @@ final class AnalyzerRound1Tests: XCTestCase {
     // analysis-14
     func testFailedBaselineSavesCanBeRetried() {
         let b = Baseline(learningStartedAt: t0)
-        b.approve(responsibleKey: terminalKey, categoryID: "ssh", at: at(1))
+        for kind in AccessKind.allCases { b.approve(responsibleKey: terminalKey, categoryID: "ssh", access: kind, at: at(1)) }
         let dirty = b.takeDirty()
         XCTAssertEqual(dirty.count, 2)
         XCTAssertTrue(b.takeDirty().isEmpty)

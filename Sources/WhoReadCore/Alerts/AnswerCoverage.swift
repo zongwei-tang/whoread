@@ -91,14 +91,30 @@ extension AlertFormatter {
     }
 
     /// What allowing covers: "Terminal (any program run in it) reading SSH keys, only when the chain has
-    /// no AI agent". `chainAgents`: the AI agents in the chain answered (ids); `agentName` names them.
+    /// no AI agent". `chainAgents`: the AI agents in the chain answered (ids, of the whole chain:
+    /// `Alert.scopeAgents`); `agentName` names them. `ancestryKnown` false: the chain answered does not
+    /// reach launchd, and the answer then covers chains whose starter is unknown too
+    /// (`Rule.coversUnknownAncestry`), where an AI agent would not be seen (cli-8).
     public func allowCoverage(_ r: ResponsibleEntity, categoryID: String, access: AccessSet, chainAgents: [String],
-                              agentName: (String) -> String = { $0 }) -> String {
+                              ancestryKnown: Bool = true, agentName: (String) -> String = { $0 }) -> String {
         let category = categoryText(categoryID)
         let agents = Array(Set(chainAgents)).sorted().map { DisplayText.name(agentName($0)) }
         if language == .zhHans {
+            guard ancestryKnown else {
+                let when = agents.isEmpty
+                    ? "调用链中没有看到 AI agent 时，包括不知道是谁启动的调用链（那里的 AI agent 看不到）"
+                    : "调用链中除 \(agents.joined(separator: "、")) 外没有看到其他 AI agent 时，包括不知道是谁启动的调用链（那里的其他 AI agent 看不到）"
+                return "\(answerSubject(r))\(verbZH(access)) \(category)，仅限\(when)"
+            }
             let when = agents.isEmpty ? "调用链中没有 AI agent" : "调用链中除 \(agents.joined(separator: "、")) 外没有其他 AI agent"
             return "\(answerSubject(r))\(verbZH(access)) \(category)，仅限\(when) 时"
+        }
+        guard ancestryKnown else {
+            let when = agents.isEmpty
+                ? "no AI agent is seen in the chain, including chains whose starter is unknown (an AI agent there would not be seen)"
+                : "no AI agent other than \(agents.joined(separator: ", ")) is seen in the chain, including chains whose starter is "
+                    + "unknown (another AI agent there would not be seen)"
+            return "\(answerSubject(r)) \(verbingEN(access)) \(category), only when \(when)"
         }
         let when = agents.isEmpty ? "the chain has no AI agent" : "the chain has no AI agent other than \(agents.joined(separator: ", "))"
         return "\(answerSubject(r)) \(verbingEN(access)) \(category), only when \(when)"

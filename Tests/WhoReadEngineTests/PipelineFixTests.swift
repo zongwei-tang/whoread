@@ -179,19 +179,20 @@ final class PipelineFixTests: XCTestCase {
         let errors = Counter()
         writer.onError = { _ in errors.bump() }
 
+        // Retries right after a failure use flushNow(): a read's flush() waits for the back-off (R5VWriterBackOffTests).
         // Insert fails, upsert succeeds: the alert is stored, the events wait, nothing is "dropped".
         store.failInsert = true
         writer.enqueue(events: out.events)
         writer.enqueue(alerts: out.alerts.map(\.alert))
-        writer.flush()
+        writer.flushNow()
         XCTAssertEqual(try store.events(EventQuery(includeBenign: true)).count, 0)
         XCTAssertEqual(try store.alerts(AlertQuery()).count, 1)
         XCTAssertEqual(writer.droppedCount, 0)
-        writer.flush()
+        writer.flushNow()
         XCTAssertEqual(errors.value, 1, "a persistent error is reported once per interval")
 
         store.failInsert = false
-        writer.flush()
+        writer.flushNow()
         XCTAssertEqual(try store.events(EventQuery(includeBenign: true)).map(\.id), out.events.map(\.id))
         XCTAssertEqual(writer.droppedCount, 0)
 
@@ -200,12 +201,12 @@ final class PipelineFixTests: XCTestCase {
         var stale = out.alerts[0].alert
         stale.count = 2
         writer.enqueue(alerts: [stale])
-        writer.flush()
+        writer.flushNow()
         var newer = stale
         newer.count = 3
         writer.enqueue(alerts: [newer])
         store.failUpsert = false
-        writer.flush()
+        writer.flushNow()
         XCTAssertEqual(try store.alert(id: newer.id)?.count, 3)
         XCTAssertEqual(writer.droppedCount, 0)
     }
@@ -224,14 +225,14 @@ final class PipelineFixTests: XCTestCase {
         store.failInsert = true
         writer.enqueue(events: events)
         XCTAssertEqual(writer.droppedCount, 1)
-        writer.flush()
+        writer.flushNow()
         XCTAssertEqual(writer.droppedCount, 1, "a failed flush puts its batch back without losing it")
         var later = e
         later.id = e.id + 10
         writer.enqueue(events: [later])
         XCTAssertEqual(writer.droppedCount, 2, "the oldest re-queued event goes first when over the cap")
         store.failInsert = false
-        writer.flush()
+        writer.flushNow()
         XCTAssertEqual(try store.events(EventQuery(includeBenign: true)).map(\.id).sorted(), [e.id + 2, e.id + 10])
     }
 

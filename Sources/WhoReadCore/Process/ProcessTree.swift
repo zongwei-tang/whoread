@@ -35,6 +35,20 @@ public struct ProcessNode: Sendable, Hashable {
     var everAgent = false
     /// pidversions this process instance was seen with (each exec gives a new one), latest last.
     var pidVersions: [UInt32] = []
+    /// `pidVersions` lost its oldest entries to its bound (`ProcessTree.maxPidVersions`): a pidversion not
+    /// in it may be one of those, so it no longer tells a missed exec from a late record (`isStale`).
+    var pidVersionsTrimmed = false
+    /// The AI agent identity the process had while it ran each image of `pidVersions` (the entry of the
+    /// last one is the current image's): a late event of an earlier image carries that one (`leaf`).
+    var versionAgents: [UInt32: VersionAgent] = [:]
+
+    struct VersionAgent: Sendable, Hashable {
+        var agentID: String?
+        var held: Bool
+        var heldTeamID: String?
+    }
+    /// When the liveness probe last checked this live node (`ProcessTree.reconcileLiveness`).
+    var checkedAt: Date?
 }
 
 /// What lies above a node, so that a chain query costs the same however deep the tree is: a process
@@ -68,7 +82,9 @@ struct Ancestry: Sendable, Hashable {
 ///
 /// Children link to parents by internal node ID, not pid, so chains survive reparenting to
 /// launchd and pid reuse. Exited processes stay as tombstones for `tombstoneTTL` (and while
-/// they still have children) so late file events and descendants still resolve their ancestry.
+/// they still have children) so late file events and descendants still resolve their ancestry. A
+/// process whose exit event was lost becomes one when its pid shows up again with a later start time,
+/// or when maintenance finds it gone (`reconcileLiveness`); the node cap evicts live leaves last.
 /// A parent is the process that forked the child (`originalPPID`); a process whose fork-time parent
 /// is unknown is left unlinked (ancestry unknown), never attached to launchd.
 ///
@@ -100,9 +116,19 @@ public final class ProcessTree: @unchecked Sendable {
     /// the rest (agents, the responsible app, the topmost process) and does not end at launchd.
     public var chainLimit: Int
     public var parentResolver: ParentResolver?
+    /// Whether a process instance (pid and start time) still runs: false when it has exited or its pid is
+    /// held by a process that started at another time, nil when it cannot tell.
+    public typealias LivenessProbe = @Sendable (_ pid: Int32, _ startTime: Date) -> Bool?
+    /// libproc in the daemon (`ProcessSnapshot.isRunning`), for exits the event source lost
+    /// (`reconcileLiveness`). nil (tests, replay): live nodes are only ended by events.
+    public var livenessProbe: LivenessProbe?
+    /// A live node neither seen nor checked for this long is checked.
+    public var livenessCheckAfter: TimeInterval = 300
+    /// Checks per reconcile (each maintenance pass, every 30 s in the daemon).
+    public var livenessChecksPerPass = 256
 
     /// Start times closer than this are considered equal (sources round differently).
-    static let startTimeTolerance: TimeInterval = 0.002
+    public static let startTimeTolerance: TimeInterval = 0.002
     /// Distinct agent ancestors (agent, team) a node records. Bounded by the agent catalog in practice.
     static let maxAgentMarks = 32
 
@@ -139,10 +165,10 @@ public final class ProcessTree: @unchecked Sendable {
     /// Builds the initial tree from a snapshot of running processes (libproc: no fork-time parent, so
     /// a process reparented to launchd stays unlinked until an event tells who started it).
     public func seed(_ records: [ProcessRecord], at time: Date) {
+        let records = records.map(normalized)
         lock.lock(); defer { lock.unlock() }
         var created: [UInt64] = []
         for r in records {
-            let r = normalized(r)
             if currentNodeID(for: r, at: time) != nil { continue }
             created.append(createNode(r, at: time, fromSnapshot: true))
         }
@@ -158,9 +184,11 @@ public final class ProcessTree: @unchecked Sendable {
     }
 
     public func fork(parent: ProcessRecord, child: ProcessRecord, at time: Date) {
-        lock.lock(); defer { lock.unlock() }
-        let parentID = observeLocked(normalized(parent), at: time, depth: 0)
+        // Bounded before the lock (the AUTH path waits on it), as everywhere below.
+        let parent = normalized(parent)
         let child = normalized(child)
+        lock.lock(); defer { lock.unlock() }
+        let parentID = observeLocked(parent, at: time, depth: 0)
         if let existing = currentNodeID(for: child, at: time), nodes[existing]?.exitedAt == nil || child.startTime != nil {
             // A file event from the child raced ahead of the fork event.
             update(existing, with: child, at: time, fromSnapshot: false)
@@ -177,10 +205,11 @@ public final class ProcessTree: @unchecked Sendable {
     }
 
     public func exec(old: ProcessRecord, new: ProcessRecord, at time: Date) {
-        lock.lock(); defer { lock.unlock() }
-        let id = observeLocked(normalized(old), at: time, depth: 0)
-        guard var node = nodes[id] else { return }
+        let old = normalized(old)
         var image = normalized(new)
+        lock.lock(); defer { lock.unlock() }
+        let id = observeLocked(old, at: time, depth: 0)
+        guard var node = nodes[id] else { return }
         // Fork-scoped facts survive exec.
         if image.startTime == nil { image.startTime = node.image.startTime }
         if image.originalPPID == nil { image.originalPPID = node.image.originalPPID }
@@ -198,8 +227,8 @@ public final class ProcessTree: @unchecked Sendable {
     }
 
     public func exit(_ process: ProcessRecord, at time: Date) {
-        lock.lock(); defer { lock.unlock() }
         let p = normalized(process)
+        lock.lock(); defer { lock.unlock() }
         guard let id = currentNodeID(for: p, at: time) else { return }
         nodes[id]?.exitedAt = time
         nodes[id]?.lastSeen = time
@@ -209,13 +238,16 @@ public final class ProcessTree: @unchecked Sendable {
     /// Ensures a node exists for an acting process and returns its ID.
     @discardableResult
     public func observe(_ process: ProcessRecord, at time: Date) -> UInt64 {
+        let p = normalized(process)
         lock.lock(); defer { lock.unlock() }
-        return observeLocked(normalized(process), at: time, depth: 0)
+        return observeLocked(p, at: time, depth: 0)
     }
 
-    /// Removes old tombstones. Returns how many nodes were dropped.
+    /// Removes old tombstones. Returns how many nodes were dropped. First, live nodes whose exit was lost
+    /// become tombstones (`reconcileLiveness`); last, the node cap.
     @discardableResult
     public func prune(now: Date) -> Int {
+        reconcileLiveness(now: now)
         lock.lock(); defer { lock.unlock() }
         var removed = 0
         func expired(_ n: ProcessNode) -> Bool {
@@ -256,7 +288,86 @@ public final class ProcessTree: @unchecked Sendable {
                 removed += 1
             }
         }
+        if nodes.count > maxNodes {
+            removed += evictLiveLeaves(nodes.count - maxNodes)
+        }
         return removed
+    }
+
+    /// Exits the event source lost (dropped under load, or while eslogger restarted; a process running as
+    /// the user can cause drops): without them a node stays live for good, and neither the TTL nor the node
+    /// cap would ever remove it. A live node neither seen nor checked for `livenessCheckAfter` is checked
+    /// with `livenessProbe` and becomes a tombstone if its process is gone. At most
+    /// `livenessChecksPerPass` nodes per call, least recently seen first; one that still runs (or that the
+    /// probe cannot tell about) is not checked again before `livenessCheckAfter` has passed. The probe
+    /// (syscalls) runs outside the lock; a node seen again in the meantime is left as it is. Returns how
+    /// many nodes became tombstones. Called by `prune`.
+    @discardableResult
+    public func reconcileLiveness(now: Date) -> Int {
+        lock.lock()
+        guard let probe = livenessProbe, livenessChecksPerPass > 0 else {
+            lock.unlock()
+            return 0
+        }
+        let due = now.addingTimeInterval(-livenessCheckAfter)
+        let limit = livenessChecksPerPass
+        var candidates: [(id: UInt64, pid: Int32, start: Date, known: Date)] = []
+        for n in nodes.values where n.exitedAt == nil && !n.image.isSystemRoot {
+            guard let start = n.image.startTime else { continue }
+            let known = ProcessTree.lastKnown(n)
+            if known < due { candidates.append((n.id, n.image.pid, start, known)) }
+        }
+        lock.unlock()
+        candidates.sort { $0.known < $1.known }
+        if candidates.count > limit { candidates.removeLast(candidates.count - limit) }
+        let answers = candidates.map { probe($0.pid, $0.start) }
+
+        lock.lock(); defer { lock.unlock() }
+        var retired = 0
+        for (c, running) in zip(candidates, answers) {
+            guard var n = nodes[c.id], n.exitedAt == nil, ProcessTree.lastKnown(n) == c.known else { continue }
+            switch running {
+            case false?:
+                n.exitedAt = now
+                retired += 1
+                if ProcessTree.hasAgents(n) { agentGeneration &+= 1 }
+            case true?:
+                if now > n.lastSeen { n.lastSeen = now }
+                n.checkedAt = now
+            case nil:
+                n.checkedAt = now
+            }
+            nodes[c.id] = n
+        }
+        return retired
+    }
+
+    /// When a live node was last seen, or checked by the liveness probe.
+    private static func lastKnown(_ n: ProcessNode) -> Date { max(n.lastSeen, n.checkedAt ?? n.lastSeen) }
+
+    /// The node cap's last resort, when no tombstone is left to evict (exits that were lost and that the
+    /// liveness check has not caught up with yet): the least recently seen live leaves, processes that
+    /// were never an AI agent first, then the processes that became leaves, in the same pass. Fail
+    /// closed: a process evicted while it still runs comes back from its next event or the parent
+    /// resolver with its ancestry looked up again (unknown where its parent is gone too), but without
+    /// an agent identity it held from an earlier image. Returns how many nodes it removed.
+    private func evictLiveLeaves(_ count: Int) -> Int {
+        func evictable(_ n: ProcessNode) -> Bool { n.exitedAt == nil && n.childCount <= 0 && !n.image.isSystemRoot }
+        var left = count
+        var layer = nodes.values.filter(evictable)
+        while left > 0 && !layer.isEmpty {
+            layer.sort { a, b in a.everAgent != b.everAgent ? !a.everAgent : a.lastSeen < b.lastSeen }
+            var next: [ProcessNode] = []
+            for v in layer {
+                if left == 0 { break }
+                guard let current = nodes[v.id], evictable(current) else { continue }
+                remove(v.id)
+                left -= 1
+                if let p = current.parentID, let parent = nodes[p], evictable(parent) { next.append(parent) }
+            }
+            layer = next
+        }
+        return count - left
     }
 
     // MARK: - Queries
@@ -265,9 +376,16 @@ public final class ProcessTree: @unchecked Sendable {
     /// most `chainLimit` links are walked; a longer chain continues with the nodes its ancestry
     /// recorded (agents, responsible app, topmost process), in chain order, and does not end at launchd.
     public func chain(for process: ProcessRecord, at time: Date) -> [ProcessNode] {
+        let p = normalized(process)
         lock.lock(); defer { lock.unlock() }
-        let id = observeLocked(normalized(process), at: time, depth: 0)
-        return chainLocked(from: id)
+        let id = observeLocked(p, at: time, depth: 0)
+        var chain = chainLocked(from: id)
+        if let leaf = chain.first, leaf.id == id, ProcessTree.isStale(p, in: leaf) {
+            // An event from an image the process had before its current one (see `update`): its leaf is
+            // the process as it was then, whatever it runs now.
+            chain[0] = ProcessTree.leaf(leaf, asItRan: p)
+        }
+        return chain
     }
 
     public func chain(nodeID: UInt64) -> [ProcessNode] {
@@ -395,10 +513,91 @@ public final class ProcessTree: @unchecked Sendable {
         }
     }
 
+    /// Every record enters the tree here (seed, fork, exec, exit, observe, chain queries, the parent
+    /// resolver), so this is where its argv is bounded (`boundedArgv`).
     private func normalized(_ r: ProcessRecord) -> ProcessRecord {
         var r = r
         r.executablePath = normalizePath(r.executablePath)
+        if let argv = r.argv { r.argv = ProcessTree.boundedArgv(argv, executableName: r.name) }
         return r
+    }
+
+    // MARK: - argv kept per node
+
+    /// Elements always kept, however long the command line: as many as anything shows
+    /// (`ArgvRedactor.redact` shows 8).
+    public static let minArgvElements = 8
+    /// Bytes of argv a node keeps in all; its first `minArgvElements` elements are kept even past it.
+    public static let maxArgvBytes = 16 * 1024
+    /// Bytes one element keeps at most: 1024 characters of up to 4 bytes (`ArgvRedactor.maxElementLength`),
+    /// fewer only where characters are made of several scalars.
+    static let maxArgvElementBytes = 4 * 1024
+    /// A last element this short is kept rather than replaced by a marker as long (so bounding twice
+    /// changes nothing).
+    static let maxMarkerBytes = 32
+
+    /// What a node keeps of an argv: argv can be ARG_MAX (1 MiB) long, every process of the user can have
+    /// one, and nodes stay (as tombstones too) for minutes in a daemon that runs as root. Display and
+    /// detection read little of it: the redactor the first 8 elements and the first 1024 characters of
+    /// each (`ArgvRedactor.bounded`), agent detection argv[0] and the script position, owners the script
+    /// position. So each element keeps its first 1024 characters, and an element cut here ends in "…",
+    /// so the redactor still sees there was more and shows it as before; the first 8 elements are always
+    /// kept, later ones while the total stays within `maxArgvBytes`; the elements past that are dropped
+    /// and replaced by one marker, "…(+N)", N being how many were dropped. A command line within these
+    /// bounds is kept as it is.
+    ///
+    /// The script an interpreter runs (`AgentMatchClause.scriptPosition` for `executableName`), and the
+    /// `-m` before a module, are kept past the budget: agent detection reads them, and long options before
+    /// them must not push them out (`node --require=… ×16 claude`). The marker then follows them and counts
+    /// every element dropped, before and after.
+    public static func boundedArgv(_ argv: [String], executableName: String? = nil) -> [String] {
+        var out: [String] = []
+        var bytes = 0
+        for (i, element) in argv.enumerated() {
+            let kept = boundedArgvElement(element)
+            let size = kept.utf8.count
+            if i >= minArgvElements && bytes + size > maxArgvBytes
+                && !(i == argv.count - 1 && size <= maxMarkerBytes) {
+                var dropped = argv.count - i
+                if let executableName, case .script(_, let at) = AgentMatchClause.scriptPosition(executableName: executableName, argv: argv),
+                   at >= i {
+                    let from = at > i && argv[at - 1] == "-m" ? at - 1 : at
+                    out += argv[from...at].map(boundedArgvElement)
+                    dropped -= at - from + 1
+                }
+                if dropped > 0 { out.append("…(+\(dropped))") }
+                return out
+            }
+            out.append(kept)
+            bytes += size
+        }
+        return out
+    }
+
+    /// A node's argv without the marker `boundedArgv` ended it with, and how many elements that marker
+    /// says were dropped (the display counts them, ArgvRedactor.redact).
+    public static func droppedElements(_ argv: [String]) -> (kept: ArraySlice<String>, dropped: Int) {
+        guard let last = argv.last, last.hasPrefix("…(+"), last.hasSuffix(")"),
+              let n = Int(last.dropFirst(3).dropLast()), n > 0 else { return (argv[...], 0) }
+        return (argv.dropLast(), n)
+    }
+
+    /// One element: whole when it is at most 1024 characters (and `maxArgvElementBytes` bytes), else its
+    /// first 1024 characters, or as many whole scalars as fit `maxArgvElementBytes`, and "…". Characters
+    /// are counted in the first `maxArgvElementBytes` bytes only: an element of a few long grapheme
+    /// clusters (a letter with a thousand accents) is not walked to its end, whatever its length.
+    static func boundedArgvElement(_ s: String) -> String {
+        let utf8 = s.utf8
+        guard utf8.count > ArgvRedactor.maxElementLength else { return s }
+        var cut = utf8.index(utf8.startIndex, offsetBy: maxArgvElementBytes, limitedBy: utf8.endIndex) ?? utf8.endIndex
+        while cut < utf8.endIndex && UTF8.isContinuation(utf8[cut]) { utf8.formIndex(before: &cut) }
+        let whole = cut == utf8.endIndex
+        let head = whole ? s : String(s.unicodeScalars[..<cut])
+        if let end = head.index(head.startIndex, offsetBy: ArgvRedactor.maxElementLength, limitedBy: head.endIndex),
+           end < head.endIndex {
+            return String(head[..<end]) + "…"
+        }
+        return whole ? s : head + "…"
     }
 
     private func chainLocked(from id: UInt64) -> [ProcessNode] {
@@ -510,7 +709,19 @@ public final class ProcessTree: @unchecked Sendable {
 
     private func update(_ id: UInt64, with p: ProcessRecord, at time: Date, fromSnapshot: Bool) {
         guard var node = nodes[id] else { return }
+        if ProcessTree.isStale(p, in: node) {
+            // An image this process had before its current one: the native source analyzes a file event
+            // after its process client has seen the process exec (two ES clients, no order between them).
+            // Not an exec we missed: adopting it would roll the process back to the image it left (and
+            // its parent with it, for everything it starts), so it is neither adopted nor noted.
+            if time > node.lastSeen { node.lastSeen = time }
+            nodes[id] = node
+            return
+        }
         let wasAgent = node.agentID != nil
+        // A pidversion a trimmed history has not seen, of the image it has: an exec of the same program that
+        // was missed, or a late record of a trimmed one. Not noted: noted, an older one would become the last.
+        let ambiguous = node.pidVersionsTrimmed && p.pidVersion.map { !node.pidVersions.contains($0) } == true
         let sameImage = node.image.executablePath == p.executablePath
             && (node.image.pidVersion == nil || p.pidVersion == nil || node.image.pidVersion == p.pidVersion)
         if sameImage {
@@ -538,7 +749,7 @@ public final class ProcessTree: @unchecked Sendable {
             adopt(image, into: &node)
             node.fromSnapshot = fromSnapshot
         }
-        ProcessTree.note(p.pidVersion, in: &node)
+        ProcessTree.note(ambiguous ? node.pidVersions.last : p.pidVersion, in: &node)
         node.lastSeen = time
         nodes[id] = node
         if sameImage && !wasAgent && node.agentID != nil && node.childCount > 0 {
@@ -579,17 +790,32 @@ public final class ProcessTree: @unchecked Sendable {
         let id = nextID
         nextID += 1
         let agentID = detector.detect(p)
-        nodes[id] = ProcessNode(
+        var node = ProcessNode(
             id: id, image: p, parentID: nil, agentID: agentID,
             exitedAt: nil, lastSeen: time, childCount: 0, fromSnapshot: fromSnapshot, ancestry: Ancestry(),
-            everAgent: agentID != nil, pidVersions: p.pidVersion.map { [$0] } ?? [])
+            everAgent: agentID != nil)
+        ProcessTree.note(p.pidVersion, in: &node)
+        nodes[id] = node
         guard indexed else { return id }
+        if let start = p.startTime { retireInstances(of: p.pid, startedBefore: start, at: time) }
         byPID[p.pid, default: []].append(id)
         if byPID[p.pid]!.count > 8 {
             // Keep only recent instances per pid in the index; older ones stay reachable via links.
             byPID[p.pid]!.removeFirst(byPID[p.pid]!.count - 8)
         }
         return id
+    }
+
+    /// A pid has one live instance at a time: one that started before `start` has exited, though no
+    /// exit event said so (dropped, or lost while eslogger restarted). It becomes a tombstone (what it
+    /// started still finds it). O(8): the instances `byPID` keeps.
+    private func retireInstances(of pid: Int32, startedBefore start: Date, at time: Date) {
+        for id in byPID[pid] ?? [] {
+            guard let n = nodes[id], n.exitedAt == nil, let s = n.image.startTime,
+                  start.timeIntervalSince(s) > ProcessTree.startTimeTolerance else { continue }
+            nodes[id]?.exitedAt = time
+            if ProcessTree.hasAgents(n) { agentGeneration &+= 1 }
+        }
     }
 
     /// The pid of the process that forked `p`; nil when unknown. ppid alone only says who adopted it:
@@ -607,12 +833,58 @@ public final class ProcessTree: @unchecked Sendable {
         return token
     }
 
-    /// Keeps the pidversions a process instance was seen with (bounded: a process execs a few times).
+    /// `p` is an image `node` had before its current one: its pidversion was seen, but not last.
+    /// Membership, not order: pidversions are identifiers, not a clock. (An eslogger record with a
+    /// pidversion the node has not seen is an exec that was missed, and is adopted.) Once the node's
+    /// history was trimmed (`pidVersionsTrimmed`), an unseen pidversion may be a trimmed one: with another
+    /// image it is not adopted as a missed exec either (only that event's leaf is the image it names).
+    /// Adopting a late record there would roll the process back, and for good: its own later records
+    /// would then look older than the image it was rolled back to (native-2).
+    static func isStale(_ p: ProcessRecord, in node: ProcessNode) -> Bool {
+        guard let version = p.pidVersion, let last = node.pidVersions.last, last != version else { return false }
+        if node.pidVersions.contains(version) { return true }
+        return node.pidVersionsTrimmed && p.executablePath != node.image.executablePath
+    }
+
+    /// The process as it was when it ran the earlier image `image` (`isStale`), for an event from then.
+    /// Fork-scoped facts are the node's; the AI agent identity is the one it had while it ran that image
+    /// (`versionAgents`). For an image of a trimmed history, an identity held from an earlier image
+    /// (`adopt`) was already there, and one the current image gave it came after `image`.
+    static func leaf(_ node: ProcessNode, asItRan image: ProcessRecord) -> ProcessNode {
+        var leaf = node
+        var image = image
+        if image.startTime == nil { image.startTime = node.image.startTime }
+        if image.originalPPID == nil { image.originalPPID = node.image.originalPPID }
+        leaf.image = image
+        leaf.fromSnapshot = false
+        if let then = image.pidVersion.flatMap({ node.versionAgents[$0] }) {
+            leaf.agentID = then.agentID
+            leaf.agentHeld = then.held
+            leaf.heldAgentTeamID = then.heldTeamID
+        } else if !leaf.agentHeld {
+            leaf.agentID = nil
+        }
+        return leaf
+    }
+
+    /// pidversions kept per process instance: a process execs a few times; one that execs itself in a
+    /// loop loses the oldest (and `pidVersionsTrimmed` says so).
+    static let maxPidVersions = 64
+
+    /// Keeps the pidversions a process instance was seen with, and the agent identity of the current one.
     private static func note(_ version: UInt32?, in node: inout ProcessNode) {
-        guard let version, node.pidVersions.last != version else { return }
-        node.pidVersions.removeAll { $0 == version }
-        node.pidVersions.append(version)
-        if node.pidVersions.count > 8 { node.pidVersions.removeFirst(node.pidVersions.count - 8) }
+        guard let version else { return }
+        if node.pidVersions.last != version {
+            node.pidVersions.removeAll { $0 == version }
+            node.pidVersions.append(version)
+            if node.pidVersions.count > maxPidVersions {
+                for old in node.pidVersions.prefix(node.pidVersions.count - maxPidVersions) { node.versionAgents[old] = nil }
+                node.pidVersions.removeFirst(node.pidVersions.count - maxPidVersions)
+                node.pidVersionsTrimmed = true
+            }
+        }
+        node.versionAgents[version] = ProcessNode.VersionAgent(agentID: node.agentID, held: node.agentHeld,
+                                                               heldTeamID: node.heldAgentTeamID)
     }
 
     private func findParentNode(

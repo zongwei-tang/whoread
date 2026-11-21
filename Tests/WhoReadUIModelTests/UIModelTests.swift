@@ -359,13 +359,19 @@ final class AppModelTests: XCTestCase {
         status.source = .eslogger
         // The dev daemon with eslogger is monitor-only: there is no extension to install
         // (InstallUIModelTests).
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .notAvailable)
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: true), .done)
-        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: true), .pending)
-        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: false), .pending, "not known yet")
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false, canInstallExtension: true), .notAvailable)
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: true, canInstallExtension: true), .done)
+        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: true, canInstallExtension: true), .pending)
+        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: false, canInstallExtension: true), .pending,
+                       "not known yet")
+        // A build that can never install the extension (no extension service, as scripts/install.sh's): not
+        // offered while the daemon is down either (SetupUIModelTests).
+        XCTAssertEqual(o.extensionStepState(status, connected: false, viaExtension: false, canInstallExtension: false), .notAvailable,
+                       "this build cannot install it")
         status.source = .native
-        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false), .done)
-        XCTAssertEqual(OnboardingModel(extensionState: .needsRestart).extensionStepState(nil, connected: false, viaExtension: false), .needsRestart)
+        XCTAssertEqual(o.extensionStepState(status, connected: true, viaExtension: false, canInstallExtension: true), .done)
+        XCTAssertEqual(OnboardingModel(extensionState: .needsRestart).extensionStepState(nil, connected: false, viaExtension: false,
+                                                                                         canInstallExtension: true), .needsRestart)
     }
 
     func testRuleDraftRoundTrip() {

@@ -170,6 +170,9 @@ public final class EsloggerParser: @unchecked Sendable {
             guard let t = J.file(body["target"]) else { return .malformed("readdir without target") }
             return file(.readdir, OperationSemantics.readdir(t))
         case "create":
+            // A NOTIFY_CREATE reports the object it created (existing_file); a new_path destination means
+            // an ES client denied the AUTH_CREATE (ESMessage.h), so nothing exists. As in the native backend.
+            if EsloggerParser.deniedCreate(body) { return .ignored("create denied by another ES client") }
             guard let dst = EsloggerParser.destination(body) else { return .malformed("create without destination") }
             // Recorded for what no open records (symlink, mkdir, mknod): a new regular file comes with
             // a creating open, which is already an event.
@@ -219,7 +222,8 @@ public final class EsloggerParser: @unchecked Sendable {
         }
     }
 
-    /// rename/create destination: `destination.existing_file` or `destination.new_path{dir, filename}`.
+    /// rename destination: `destination.existing_file` or `destination.new_path{dir, filename}` (a create
+    /// gets here with an existing file only, see `deniedCreate`).
     static func destination(_ body: [String: Any]) -> ReportedPath? {
         guard let dest = body["destination"] as? [String: Any] else { return nil }
         if let existing = J.file(dest["existing_file"]) { return existing }
@@ -228,6 +232,14 @@ public final class EsloggerParser: @unchecked Sendable {
             return J.newPath(dir: dir, name: name)
         }
         return nil
+    }
+
+    /// A create with a new-path destination: `destination_type` 1 (ES_DESTINATION_TYPE_NEW_PATH), or a
+    /// `new_path` and no `existing_file`.
+    static func deniedCreate(_ body: [String: Any]) -> Bool {
+        if J.int(body["destination_type"]) == 1 { return true }
+        let dest = body["destination"] as? [String: Any]
+        return dest?["new_path"] is [String: Any] && J.file(dest?["existing_file"]) == nil
     }
 
     /// A create whose `destination.existing_file.stat.st_mode` says regular file. Unknown → false.
