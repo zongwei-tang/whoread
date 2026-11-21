@@ -121,6 +121,42 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
             """)
         try db.prepare("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)")
             .run([.text(String(SQLiteEventStore.schemaVersion))])
+        // A repair, not needed to open the store: if it fails, it runs again at the next start.
+        try? rebuildOlderSearchText()
+    }
+
+    /// Set in meta once every row's `search` is as `searchText` writes it.
+    static let searchFormatKey = "search_format"
+
+    /// Rows an older build wrote hold the names in `search` as they were: those with a \u{1} past the two
+    /// separators get theirs again from their body, once (store-2). A body this build cannot read is left.
+    private func rebuildOlderSearchText() throws {
+        guard try valueLocked(SQLiteEventStore.searchFormatKey) == nil else { return }
+        try db.transaction {
+            var rebuilt: [(id: Int64, search: String)] = []
+            try db.prepare("SELECT id, search, body FROM events WHERE length(search) - length(replace(search, char(1), '')) > 2")
+                .query { r in
+                    guard let e = try? decoder.decode(AnalyzedEvent.self, from: r.blob(2)) else { return }
+                    let search = SQLiteEventStore.searchText(e)
+                    if search != r.text(1) { rebuilt.append((r.int(0), search)) }
+                }
+            let update = try db.prepare("UPDATE events SET search = ? WHERE id = ?")
+            for row in rebuilt { try update.run([.text(row.search), .int(row.id)]) }
+            try setValueLocked(Data("2".utf8), forKey: SQLiteEventStore.searchFormatKey)
+        }
+    }
+
+    /// What `text` and `appName` look in: the app's name, the program's name and the path, each `searchable`,
+    /// joined by \u{1}. None of them holds a \u{1} of its own, so the second one always ends the names, where
+    /// `appName` stops: a name with a \u{1} in it moved that end forward and cut the program's name off (store-2).
+    static func searchText(_ e: AnalyzedEvent) -> String {
+        [e.responsible.displayName, e.process.name, e.path].map(searchable).joined(separator: "\u{1}")
+    }
+
+    /// A field of `search`, or a needle looked for in it: lowercased, a \u{1} (the separator) made \u{2}. So
+    /// a needle with a \u{1} in it matches within one field, as in the other store, never across two.
+    static func searchable(_ s: String) -> String {
+        (s.utf8.contains(1) ? s.replacingOccurrences(of: "\u{1}", with: "\u{2}") : s).lowercased()
     }
 
     private func locked<T>(_ body: () throws -> T) throws -> T {
@@ -153,7 +189,7 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
                     """)
                 for e in events {
                     let body = try encoder.encode(e)
-                    let search = (e.responsible.displayName + "\u{1}" + e.process.name + "\u{1}" + e.path).lowercased()
+                    let search = SQLiteEventStore.searchText(e)
                     try ins.run([
                         .int(e.id), .double(e.time.timeIntervalSince1970), .text(e.categoryID), .int(Int64(e.severity.rank)),
                         .text(e.responsible.key), e.agentID.map { .text($0) } ?? .null, .int(e.isBenign ? 1 : 0),
@@ -192,12 +228,12 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         if let after = query.afterID { clauses.append("id > ?"); args.append(.int(after)) }
         if let text = query.text, !text.isEmpty {
             clauses.append("instr(search, ?) > 0")
-            args.append(.text(text.lowercased()))
+            args.append(.text(SQLiteEventStore.searchable(text)))
         }
         if let app = query.appName, !app.isEmpty {
-            // `search` is "display name \u{1} process name \u{1} path": only what comes before the second \u{1}.
+            // `search` is "display name \u{1} process name \u{1} path" (`searchText`): only what comes before the second \u{1}.
             clauses.append("instr(substr(search, 1, instr(search, char(1)) + instr(substr(search, instr(search, char(1)) + 1), char(1)) - 1), ?) > 0")
-            args.append(.text(app.lowercased()))
+            args.append(.text(SQLiteEventStore.searchable(app)))
         }
         let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
         let order = query.newestFirst ? "DESC" : "ASC"
@@ -250,30 +286,44 @@ public final class SQLiteEventStore: EventStore, @unchecked Sendable {
         }
     }
 
-    /// The newest alerts (by update), `since` and of `statuses` statuses when given (0: any).
+    /// The newest alerts (by update), `since` and of `statuses` distinct statuses when given (0: any).
+    /// Parameters: `since`, the statuses, the limit. One status is a walk of the alerts_status_updated
+    /// index in order, to the limit. Several are one such walk each, merged in order (a compound select):
+    /// `status IN (…)` read every alert of those statuses and sorted them under the store lock (an answer's
+    /// ask alerts: unread and read, up to 10,000). The arms share `since`, so their parameters are numbered.
     static func alertsSQL(since: Bool, statuses: Int) -> String {
-        let clauses = (since ? ["updated >= ?"] : [])
-            + (statuses > 0 ? ["status IN (" + Array(repeating: "?", count: statuses).joined(separator: ",") + ")"] : [])
-        return "SELECT body FROM alerts" + (clauses.isEmpty ? "" : " WHERE " + clauses.joined(separator: " AND "))
-            + " ORDER BY updated DESC, id DESC LIMIT ?"
+        guard statuses > 1 else {
+            let clauses = (since ? ["updated >= ?"] : []) + (statuses == 1 ? ["status IN (?)"] : [])
+            return "SELECT body FROM alerts" + (clauses.isEmpty ? "" : " WHERE " + clauses.joined(separator: " AND "))
+                + " ORDER BY updated DESC, id DESC LIMIT ?"
+        }
+        let first = since ? 2 : 1
+        return (0..<statuses).map { i in
+            "SELECT body, updated, id FROM alerts WHERE status = ?\(first + i)" + (since ? " AND updated >= ?1" : "")
+        }.joined(separator: " UNION ALL ") + " ORDER BY updated DESC, id DESC LIMIT ?\(first + statuses)"
     }
 
+    /// Read in one hold of the lock, decoded after it (up to 10,000 bodies: markRead, an answer's ask alerts).
     public func alerts(_ query: AlertQuery) throws -> [Alert] {
         var args: [Statement.Value] = []
         if let since = query.since { args.append(.double(since.timeIntervalSince1970)) }
-        if let statuses = query.statuses {
-            if statuses.isEmpty { return [] }
-            args += statuses.map { .text($0.rawValue) }
+        var statuses = 0
+        if let wanted = query.statuses {
+            if wanted.isEmpty { return [] }
+            // Each once: a status named twice would be read twice.
+            var seen = Set<AlertStatus>()
+            for s in wanted where seen.insert(s).inserted { args.append(.text(s.rawValue)) }
+            statuses = seen.count
         }
         args.append(.int(Int64(max(0, min(query.limit, 10_000)))))
-        let sql = SQLiteEventStore.alertsSQL(since: query.since != nil, statuses: query.statuses?.count ?? 0)
-        return try locked {
-            var out: [Alert] = []
-            try db.prepare(sql).query(args) { row in
-                if let a = try? decoder.decode(Alert.self, from: row.blob(0)) { out.append(a) }
-            }
-            return out
+        let sql = SQLiteEventStore.alertsSQL(since: query.since != nil, statuses: statuses)
+        let bodies = try locked { () -> [Data] in
+            var bodies: [Data] = []
+            try db.prepare(sql).query(args) { bodies.append($0.blob(0)) }
+            return bodies
         }
+        let decoder = Exporter.decoder()
+        return bodies.compactMap { try? decoder.decode(Alert.self, from: $0) }
     }
 
     public func alert(id: Int64) throws -> Alert? {

@@ -28,6 +28,49 @@ final class R5VStoreRepairTests: XCTestCase {
         XCTAssertTrue(count.contains("COVERING INDEX alerts_status_updated"), count)
     }
 
+    /// Several statuses (an answer's ask alerts: unread and read, up to 10,000): `status IN (…)` on
+    /// (status, updated) still took every alert of those statuses and sorted them, under the store lock.
+    /// Each status is read in order on the index and the reads are merged: no sort, nothing read past the limit.
+    func testSeveralStatusesAreMergedInOrderWithoutASort() throws {
+        let path = h.sqlitePath()
+        _ = try SQLiteEventStore(path: path)
+        for since in [false, true] {
+            for statuses in 2...3 {
+                let plan = try h.queryPlan(path, SQLiteEventStore.alertsSQL(since: since, statuses: statuses))
+                XCTAssertTrue(plan.contains("alerts_status_updated"), "since \(since), \(statuses) statuses: \(plan)")
+                XCTAssertFalse(plan.contains("TEMP B-TREE"), "since \(since), \(statuses) statuses: \(plan)")
+            }
+        }
+    }
+
+    /// The merged read returns what one sorted read does: newest update first and the larger id first among
+    /// equal times, across statuses, with `since` and the limit; a status named twice counts once.
+    func testSeveralStatusesReturnWhatTheMemoryStoreReturns() throws {
+        let sqlite = try SQLiteEventStore(path: h.sqlitePath())
+        let memory = InMemoryEventStore()
+        let cycle: [AlertStatus] = [.unread, .read, .resolved]
+        // Three alerts per update time, each of another status.
+        let alerts = (1...60).map { i -> Alert in
+            var a = h.alert(Int64(i), status: cycle[i % 3])
+            a.updatedAt = h.t0.addingTimeInterval(Double(i / 3) * 10)
+            return a
+        }
+        try sqlite.upsert(alerts)
+        try memory.upsert(alerts)
+        let sets: [[AlertStatus]] = [[.unread, .read], [.read, .unread], [.unread, .unread], [.unread, .read, .resolved],
+                                     [.resolved, .read, .resolved], [.read]]
+        for statuses in sets {
+            for limit in [0, 1, 5, 17, 100] {
+                for since in [nil, h.t0.addingTimeInterval(55)] {
+                    let q = AlertQuery(since: since, statuses: statuses, limit: limit)
+                    XCTAssertEqual(try sqlite.alerts(q).map(\.id), try memory.alerts(q).map(\.id), "\(q)")
+                }
+            }
+        }
+        // 58 (read) and 57 (unread) share their update time.
+        XCTAssertEqual(try sqlite.alerts(AlertQuery(statuses: [.unread, .read], limit: 4)).map(\.id), [60, 58, 57, 55])
+    }
+
     /// A database this round's earlier build made has the status-only index: opening it replaces it.
     func testTheStatusOnlyIndexIsReplaced() throws {
         let path = h.sqlitePath()
