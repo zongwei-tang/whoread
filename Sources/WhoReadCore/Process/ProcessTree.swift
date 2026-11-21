@@ -36,7 +36,8 @@ public struct ProcessNode: Sendable, Hashable {
     /// pidversions this process instance was seen with (each exec gives a new one), latest last.
     var pidVersions: [UInt32] = []
     /// `pidVersions` lost its oldest entries to its bound (`ProcessTree.maxPidVersions`): a pidversion not
-    /// in it may be one of those, so it no longer tells a missed exec from a late record (`isStale`).
+    /// in it may be one of those, so where records may arrive late (`ProcessTree.recordsMayArriveLate`) it
+    /// no longer tells a missed exec from a late record (`isStale`).
     var pidVersionsTrimmed = false
     /// The AI agent identity the process had while it ran each image of `pidVersions` (the entry of the
     /// last one is the current image's): a late event of an earlier image carries that one (`leaf`).
@@ -126,6 +127,12 @@ public final class ProcessTree: @unchecked Sendable {
     public var livenessCheckAfter: TimeInterval = 300
     /// Checks per reconcile (each maintenance pass, every 30 s in the daemon).
     public var livenessChecksPerPass = 256
+    /// Records of one process can reach the tree out of order: the native source analyzes a file event
+    /// after its process client may have seen the process exec again (two ES clients, no order between
+    /// them). eslogger (one client, each record handled as it is read) and replay cannot: there a pidversion
+    /// a node has not seen is an exec that was missed, also once its history was trimmed (`isStale`). Set
+    /// by the daemon for its source.
+    public var recordsMayArriveLate = false
 
     /// Start times closer than this are considered equal (sources round differently).
     public static let startTimeTolerance: TimeInterval = 0.002
@@ -380,7 +387,7 @@ public final class ProcessTree: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let id = observeLocked(p, at: time, depth: 0)
         var chain = chainLocked(from: id)
-        if let leaf = chain.first, leaf.id == id, ProcessTree.isStale(p, in: leaf) {
+        if let leaf = chain.first, leaf.id == id, ProcessTree.isStale(p, in: leaf, lateRecords: recordsMayArriveLate) {
             // An event from an image the process had before its current one (see `update`): its leaf is
             // the process as it was then, whatever it runs now.
             chain[0] = ProcessTree.leaf(leaf, asItRan: p)
@@ -548,8 +555,13 @@ public final class ProcessTree: @unchecked Sendable {
     ///
     /// The script an interpreter runs (`AgentMatchClause.scriptPosition` for `executableName`), and the
     /// `-m` before a module, are kept past the budget: agent detection reads them, and long options before
-    /// them must not push them out (`node --require=… ×16 claude`). The marker then follows them and counts
-    /// every element dropped, before and after.
+    /// them must not push them out (`node --require=… ×16 claude`). So is the element at the cut when the
+    /// last one kept is an option whose value it is (`node --require X …`): that option would otherwise
+    /// take the script for its value, and the marker would pose as the script. The marker then follows them
+    /// and counts every element dropped, before and after.
+    ///
+    /// Bounding twice changes nothing (libproc records are bounded where they are read, then by the tree):
+    /// the marker an argv already ends in counts the elements it stands for.
     public static func boundedArgv(_ argv: [String], executableName: String? = nil) -> [String] {
         var out: [String] = []
         var bytes = 0
@@ -558,12 +570,17 @@ public final class ProcessTree: @unchecked Sendable {
             let size = kept.utf8.count
             if i >= minArgvElements && bytes + size > maxArgvBytes
                 && !(i == argv.count - 1 && size <= maxMarkerBytes) {
-                var dropped = argv.count - i
+                let earlier = droppedElements(argv).dropped
+                var dropped = argv.count - i + max(0, earlier - 1)
                 if let executableName, case .script(_, let at) = AgentMatchClause.scriptPosition(executableName: executableName, argv: argv),
-                   at >= i {
+                   at >= i, !(earlier > 0 && at == argv.count - 1) {
                     let from = at > i && argv[at - 1] == "-m" ? at - 1 : at
-                    out += argv[from...at].map(boundedArgvElement)
-                    dropped -= at - from + 1
+                    var tail = argv[from...at].map(boundedArgvElement)
+                    if from > i && !reachesScript(out + tail, executableName) && reachesScript(out + [kept] + tail, executableName) {
+                        tail.insert(kept, at: 0)
+                    }
+                    out += tail
+                    dropped -= tail.count
                 }
                 if dropped > 0 { out.append("…(+\(dropped))") }
                 return out
@@ -572,6 +589,12 @@ public final class ProcessTree: @unchecked Sendable {
             bytes += size
         }
         return out
+    }
+
+    /// `argv`'s last element is the script it runs (`AgentMatchClause.scriptPosition`).
+    private static func reachesScript(_ argv: [String], _ executableName: String) -> Bool {
+        guard case .script(_, let at) = AgentMatchClause.scriptPosition(executableName: executableName, argv: argv) else { return false }
+        return at == argv.count - 1
     }
 
     /// A node's argv without the marker `boundedArgv` ended it with, and how many elements that marker
@@ -709,7 +732,7 @@ public final class ProcessTree: @unchecked Sendable {
 
     private func update(_ id: UInt64, with p: ProcessRecord, at time: Date, fromSnapshot: Bool) {
         guard var node = nodes[id] else { return }
-        if ProcessTree.isStale(p, in: node) {
+        if ProcessTree.isStale(p, in: node, lateRecords: recordsMayArriveLate) {
             // An image this process had before its current one: the native source analyzes a file event
             // after its process client has seen the process exec (two ES clients, no order between them).
             // Not an exec we missed: adopting it would roll the process back to the image it left (and
@@ -719,9 +742,11 @@ public final class ProcessTree: @unchecked Sendable {
             return
         }
         let wasAgent = node.agentID != nil
-        // A pidversion a trimmed history has not seen, of the image it has: an exec of the same program that
-        // was missed, or a late record of a trimmed one. Not noted: noted, an older one would become the last.
-        let ambiguous = node.pidVersionsTrimmed && p.pidVersion.map { !node.pidVersions.contains($0) } == true
+        // Where records may arrive late, a pidversion a trimmed history has not seen, of the image it has: an
+        // exec of the same program that was missed, or a late record of a trimmed one. Not noted: noted, an
+        // older one would become the last. (In order it is the latest: noted.)
+        let ambiguous = recordsMayArriveLate && node.pidVersionsTrimmed
+            && p.pidVersion.map { !node.pidVersions.contains($0) } == true
         let sameImage = node.image.executablePath == p.executablePath
             && (node.image.pidVersion == nil || p.pidVersion == nil || node.image.pidVersion == p.pidVersion)
         if sameImage {
@@ -834,16 +859,18 @@ public final class ProcessTree: @unchecked Sendable {
     }
 
     /// `p` is an image `node` had before its current one: its pidversion was seen, but not last.
-    /// Membership, not order: pidversions are identifiers, not a clock. (An eslogger record with a
-    /// pidversion the node has not seen is an exec that was missed, and is adopted.) Once the node's
-    /// history was trimmed (`pidVersionsTrimmed`), an unseen pidversion may be a trimmed one: with another
-    /// image it is not adopted as a missed exec either (only that event's leaf is the image it names).
-    /// Adopting a late record there would roll the process back, and for good: its own later records
-    /// would then look older than the image it was rolled back to (native-2).
-    static func isStale(_ p: ProcessRecord, in node: ProcessNode) -> Bool {
+    /// Membership, not order: pidversions are identifiers, not a clock. (A record with a pidversion the
+    /// node has not seen is an exec that was missed, and is adopted.) Where records may arrive late
+    /// (`lateRecords`, the native source), once the node's history was trimmed (`pidVersionsTrimmed`), an
+    /// unseen pidversion may be a trimmed one: with another image it is not adopted as a missed exec either
+    /// (only that event's leaf is the image it names). Adopting a late record there would roll the process
+    /// back, and for good: its own later records would then look older than the image it was rolled back
+    /// to (native-2). In order (eslogger) no record is late, and that rule would instead keep a missed exec
+    /// from ever being adopted: what the new program starts would hang below the old one.
+    static func isStale(_ p: ProcessRecord, in node: ProcessNode, lateRecords: Bool) -> Bool {
         guard let version = p.pidVersion, let last = node.pidVersions.last, last != version else { return false }
         if node.pidVersions.contains(version) { return true }
-        return node.pidVersionsTrimmed && p.executablePath != node.image.executablePath
+        return lateRecords && node.pidVersionsTrimmed && p.executablePath != node.image.executablePath
     }
 
     /// The process as it was when it ran the earlier image `image` (`isStale`), for an event from then.
