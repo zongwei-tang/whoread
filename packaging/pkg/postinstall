@@ -1,0 +1,26 @@
+#!/bin/bash
+# Runs as root from Installer, inside WhoRead.pkg's extracted scripts folder (scripts/release/make-pkg.sh):
+# installs the background service, the menu bar app and the `whoread` command the way
+# scripts/install.sh does, and the uninstaller. Then, in the Installer app only (not `installer` on the
+# command line), opens Full Disk Access in System Settings unless monitoring runs already, and the app.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+"$HERE/scripts/install-dev-daemon.sh" eslogger --bin "$HERE/bin" --app "$HERE/WhoRead.app"
+install -m 755 -o root -g wheel "$HERE/scripts/uninstall-dev-daemon.sh" /usr/local/libexec/whoread-uninstall
+
+[ -z "${COMMAND_LINE_INSTALL:-}" ] || exit 0
+user="$(stat -f %Su /dev/console 2>/dev/null || true)"
+case "$user" in ""|root|loginwindow) exit 0 ;; esac
+uid="$(id -u "$user")" || exit 0
+as_user() { launchctl asuser "$uid" sudo -u "$user" "$@" || true; }
+running=0
+for _ in $(seq 10); do
+  if /usr/local/bin/whoread status --json 2>/dev/null | grep -Eq '"sourceRunning" *: *true'; then running=1; break; fi
+  sleep 1
+done
+if [ "$running" = 0 ]; then
+  as_user /bin/sh -c 'printf %s /usr/local/libexec/whoreadd | pbcopy'
+  as_user /usr/bin/open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+fi
+as_user /usr/bin/open /Applications/WhoRead.app
+exit 0

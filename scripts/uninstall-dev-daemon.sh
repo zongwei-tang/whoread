@@ -26,7 +26,8 @@ if [ "$PURGE" = 1 ] && [ "$EXT_ACTIVE" = 1 ]; then
   exit 1
 fi
 launchctl bootout system /Library/LaunchDaemons/com.whoread.daemon.plist 2>/dev/null || true
-rm -f /Library/LaunchDaemons/com.whoread.daemon.plist /usr/local/libexec/whoreadd
+# whoread-uninstall: this script, as WhoRead.pkg installs it (bash has it open already).
+rm -f /Library/LaunchDaemons/com.whoread.daemon.plist /usr/local/libexec/whoreadd /usr/local/libexec/whoread-uninstall
 
 # The app install-dev-daemon.sh --app installed (its marker, or an ad-hoc signature, which no release
 # has), never while a system extension, which lives in a release app, is active.

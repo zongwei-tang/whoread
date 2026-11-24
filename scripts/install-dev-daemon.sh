@@ -329,9 +329,16 @@ else
   # eslogger needs no entitlement. Strip the restricted one an Xcode build carries: without a
   # provisioning profile AMFI would refuse to launch it on a normal Mac. The identifier and the
   # hardened runtime stay, and the same build gets the same signature again, so a reinstall of it
-  # keeps its Full Disk Access.
-  codesign --force --sign - --preserve-metadata=identifier,flags /usr/local/libexec/whoreadd 2>&1 \
-    | grep -v 'replacing existing signature' || true
+  # keeps its Full Disk Access. A team-signed build without entitlements (WhoRead.pkg's Developer ID
+  # build) keeps its signature: its identity, and so its Full Disk Access, then survives updates.
+  team="$(codesign -dv /usr/local/libexec/whoreadd 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  if [ -n "$team" ] && [ "$team" != "not set" ] \
+     && ! codesign -d --entitlements - --xml /usr/local/libexec/whoreadd 2>/dev/null | grep -q '<key>'; then
+    echo "whoreadd is signed by team $team without entitlements: signature kept"
+  else
+    codesign --force --sign - --preserve-metadata=identifier,flags /usr/local/libexec/whoreadd 2>&1 \
+      | grep -v 'replacing existing signature' || true
+  fi
   codesign --verify --strict /usr/local/libexec/whoreadd || { echo "could not sign /usr/local/libexec/whoreadd" >&2; exit 1; }
 fi
 

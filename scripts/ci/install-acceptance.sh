@@ -38,13 +38,35 @@ for d in /usr/local /usr/local/bin /usr/local/libexec; do
   fi
 done
 
-echo "== install (scripts/install.sh --no-wait --no-open)"
-if "$ROOT/scripts/install.sh" --no-wait --no-open > "$T/install.log" 2>&1; then
-  ok "scripts/install.sh"
+# WHOREAD_CI_PKG=PATH: install that WhoRead.pkg (scripts/release/make-pkg.sh) with installer(8) instead,
+# and remove it with the uninstaller it installs.
+PKG="${WHOREAD_CI_PKG:-}"
+if [ -n "$PKG" ]; then
+  echo "== install ($(basename "$PKG") with installer)"
+  if pkgutil --check-signature "$PKG" > "$T/pkgsig.txt" 2>&1; then
+    ok "the package is signed"; grep -E 'Status:|Developer ID|Notarization' "$T/pkgsig.txt" | indent
+  else
+    skip "the package is not signed (no signing secrets on this run)"
+  fi
+  # shellcheck disable=SC2024
+  if sudo installer -pkg "$PKG" -target / > "$T/install.log" 2>&1; then ok "installer -pkg"; else bad "installer -pkg failed"; fi
+  tail -25 "$T/install.log" | indent
+  [ -x /usr/local/libexec/whoread-uninstall ] && ok "the uninstaller is installed" || bad "no /usr/local/libexec/whoread-uninstall"
+  team="$(codesign -dv /usr/local/libexec/whoreadd 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  if grep -q 'Developer ID' "$T/pkgsig.txt" 2>/dev/null; then
+    [ -n "$team" ] && [ "$team" != "not set" ] && ok "whoreadd keeps its Developer ID signature (team $team)" \
+      || bad "whoreadd lost its Developer ID signature"
+  fi
+  for _ in $(seq 60); do "$WR" status >/dev/null 2>&1 && break; sleep 0.5; done
 else
-  bad "scripts/install.sh failed"
+  echo "== install (scripts/install.sh --no-wait --no-open)"
+  if "$ROOT/scripts/install.sh" --no-wait --no-open > "$T/install.log" 2>&1; then
+    ok "scripts/install.sh"
+  else
+    bad "scripts/install.sh failed"
+  fi
+  tail -25 "$T/install.log" | indent
 fi
-tail -25 "$T/install.log" | indent
 
 # The reports below go to this user's temporary folder: written by this shell, not by sudo, on purpose.
 # shellcheck disable=SC2024
@@ -128,11 +150,15 @@ elif wait "$pid"; then
 else
   bad "the app's --unregister-login-item failed"; indent < "$T/unregister.log"
 fi
-if "$ROOT/scripts/uninstall.sh" --purge > "$T/uninstall.log" 2>&1; then ok "scripts/uninstall.sh --purge"; else bad "uninstall failed"; fi
+if [ -n "$PKG" ]; then
+  rm -f "$VAULT/notes/install-check.txt"; rmdir "$VAULT/notes" "$VAULT" 2>/dev/null || true
+  # shellcheck disable=SC2024
+  if sudo /usr/local/libexec/whoread-uninstall --purge > "$T/uninstall.log" 2>&1; then ok "whoread-uninstall --purge"; else bad "uninstall failed"; fi
+elif "$ROOT/scripts/uninstall.sh" --purge > "$T/uninstall.log" 2>&1; then ok "scripts/uninstall.sh --purge"; else bad "uninstall failed"; fi
 indent < "$T/uninstall.log"
 if sudo launchctl print system/com.whoread.daemon > /dev/null 2>&1; then bad "the launchd job is still loaded"; else ok "launchd job removed"; fi
 for p in "$APP" "$WR" /usr/local/libexec/whoreadd "/Library/Application Support/WhoRead" \
-         /Library/LaunchDaemons/com.whoread.daemon.plist /Library/Logs/WhoRead; do
+         /Library/LaunchDaemons/com.whoread.daemon.plist /Library/Logs/WhoRead /usr/local/libexec/whoread-uninstall; do
   if [ -e "$p" ] || [ -L "$p" ]; then bad "left behind: $p"; else ok "removed: $p"; fi
 done
 if [ -e "$VAULT/notes/install-check.txt" ]; then bad "left behind: the live check's file in the test vault"; else ok "removed: the live check's file in the test vault"; fi

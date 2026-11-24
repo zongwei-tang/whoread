@@ -36,6 +36,10 @@ macOS 会在 app 打开桌面、文稿、下载文件夹之前询问你，但读
 
 ## 开始使用
 
+**安装包（推荐）：** 在 GitHub 的 Actions 页面打开最新一次成功的 CI 运行，下载附件 `WhoRead-pkg`，解压后双击 `WhoRead-<版本>-arm64.pkg`，按提示安装。装完后安装器会打开「系统设置」的「完全磁盘访问权限」，按最后一页的说明给 `/usr/local/libexec/whoreadd` 打开开关即可（路径已经复制好）。签名版以后更新时，权限会保留，不用重新打开。卸载：`sudo /usr/local/libexec/whoread-uninstall`（加 `--purge` 连记录一起删）。
+
+**从源码安装：**
+
 ```bash
 git clone https://github.com/zongwei-tang/whoread.git
 cd whoread
