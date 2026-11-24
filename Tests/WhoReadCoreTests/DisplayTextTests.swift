@@ -68,6 +68,80 @@ final class DisplayTextTests: XCTestCase {
         XCTAssertEqual(DisplayText.path("~/x/Terminal  SSH keys.app"), "~/x/Terminal  SSH keys.app")
     }
 
+    /// C1-vs16-spoof: a mark right after a space ended the run of spaces. The emoji presentation
+    /// selectors are not escaped and draw nothing there (CoreText even makes " " + U+FE0F an
+    /// emoji-wide blank), so "Terminal" + 20 × (" " + U+FE0F) + "SSH keys" (56 scalars, within the
+    /// cap) kept its 21 spaces: Terminal, 20 blank columns, SSH keys, a fake CLI column.
+    func testAMarkAfterASpaceCannotBreakARunOfSpaces() {
+        func isMark(_ u: Unicode.Scalar) -> Bool {
+            [.nonspacingMark, .spacingMark, .enclosingMark].contains(u.properties.generalCategory)
+        }
+        let vs16 = "Terminal" + String(repeating: " \u{FE0F}", count: 20) + "SSH keys"
+        XCTAssertEqual(vs16.unicodeScalars.count, 56, "nothing is cut by the cap")
+        XCTAssertEqual(DisplayText.name(vs16), "Terminal SSH keys")
+        // An ideographic space (shown as " ") with the text presentation selector.
+        XCTAssertEqual(DisplayText.name("Terminal" + String(repeating: "\u{3000}\u{FE0E}", count: 20) + "SSH keys"), "Terminal SSH keys")
+        // Several selectors after one space, and one right before the next word.
+        XCTAssertEqual(DisplayText.name("Terminal \u{FE0F}\u{FE0F}\u{FE0E} \u{FE0F}SSH keys"), "Terminal SSH keys")
+        // Any other mark: invisible stackers (Khmer coeng, Myanmar virama, Tai Tham sakot), an
+        // accent, a spacing mark, an enclosing mark. None of them is escaped.
+        for mark: Unicode.Scalar in ["\u{17D2}", "\u{1039}", "\u{1A60}", "\u{301}", "\u{903}", "\u{20DD}"] {
+            XCTAssertFalse(DisplayText.isHidden(mark), String(mark.value, radix: 16))
+            let padded = "Terminal" + String(repeating: " " + String(mark), count: 20) + "SSH keys"
+            XCTAssertEqual(DisplayText.name(padded), "Terminal SSH keys", String(mark.value, radix: 16))
+        }
+        // Kept: a selector or a mark on a character (an emoji, a keycap, an accent in a decomposed name).
+        for kept in ["I \u{2764}\u{FE0F} cats", "\u{2764}\u{FE0F} \u{2764}\u{FE0F}", "1\u{FE0F}\u{20E3} 2", "Cafe\u{301} Bar", "\u{231A}\u{FE0E} x"] {
+            XCTAssertEqual(DisplayText.name(kept), kept)
+        }
+        // A mark at the start of a name belongs to no letter either: the name is put after a space
+        // (" → " in a chain, a table's column gap, "Always allow %@").
+        XCTAssertEqual(DisplayText.name("\u{FE0F}\u{301}\u{FE0E}Terminal"), "Terminal")
+        // A hidden mark after a space or at the start is still escaped: it shows instead of going away.
+        XCTAssertEqual(DisplayText.name("a \u{FE00} b"), "a \\u{fe00} b")
+        XCTAssertEqual(DisplayText.name("\u{FE00}x"), "\\u{fe00}x")
+        // Paths are evidence: kept as they are.
+        XCTAssertEqual(DisplayText.path("~/x/a \u{FE0F} b"), "~/x/a \u{FE0F} b")
+        for s in [vs16, "a \u{FE00} b", " \u{FE0F}", "\u{3000}\u{FE0E}\u{3000}", " \u{301}\u{FE0F}x \u{FE00}\u{301}y", "\u{FE0F}\u{FE0F}x",
+                  "\u{FE00}\u{301}x"] {
+            let shown = DisplayText.name(s)
+            XCTAssertEqual(DisplayText.name(shown), shown)
+            // Put after a space, as the callers do.
+            let scalars = Array((" " + shown).unicodeScalars)
+            for (a, b) in zip(scalars, scalars.dropFirst()) where a.properties.generalCategory == .spaceSeparator {
+                XCTAssertFalse(isMark(b), "a raw mark after a space in \(shown.debugDescription)")
+            }
+        }
+    }
+
+    /// C1-vs16-spoof, round 6: an unassigned code point is no space, mark or default-ignorable
+    /// character, so it was kept as it was, and the system fonts draw some of them as blanks with a
+    /// width (U+181A falls back to a glyph one em wide with no outline). "Terminal" + 20 × U+181A +
+    /// "SSH keys" (36 scalars, within the cap) showed as Terminal, a long blank, SSH keys: a fake CLI
+    /// column. APFS refuses such a file name; a disk image formatted otherwise does not.
+    func testUnassignedCodePointsAreEscaped() {
+        // Blank in the system fonts (Mongolian, Yi, Hebrew presentation forms, Thai), then
+        // noncharacters, which stay unassigned for good.
+        for u: Unicode.Scalar in ["\u{181A}", "\u{181F}", "\u{1879}", "\u{18AB}", "\u{A48D}", "\u{FB0F}", "\u{E00}",
+                                  "\u{FFFE}", "\u{FFFF}", "\u{10FFFF}"] {
+            let hex = String(u.value, radix: 16)
+            XCTAssertEqual(u.properties.generalCategory, .unassigned, "\(hex) is assigned in these Unicode tables: test another one")
+            XCTAssertTrue(DisplayText.isHidden(u), hex)
+        }
+        let padded = "Terminal" + String(repeating: "\u{181A}", count: 20) + "SSH keys"
+        XCTAssertEqual(padded.unicodeScalars.count, 36, "nothing is cut by the cap")
+        XCTAssertEqual(DisplayText.name(padded), "Terminal" + String(repeating: "\\u{181a}", count: 6) + "…",
+                       "escaped, so the cap counts what is shown")
+        XCTAssertEqual(DisplayText.name(DisplayText.name(padded)), DisplayText.name(padded))
+        XCTAssertEqual(DisplayText.escaped("a\u{181A}b\u{FB0F}c\u{E00}d\u{FFFF}"), "a\\u{181a}b\\u{fb0f}c\\u{e00}d\\u{ffff}")
+        XCTAssertEqual(DisplayText.path("~/\u{A48D}\u{A48D}/id_ed25519"), "~/\\u{a48d}\\u{a48d}/id_ed25519")
+        // The assigned characters next to them stay: Mongolian digit nine and letter a, the last Yi
+        // syllable, Thai ko kai.
+        for kept in ["\u{1819}\u{1820}", "\u{A48C}", "\u{E01}"] {
+            XCTAssertEqual(DisplayText.name(kept), kept)
+        }
+    }
+
     func testLongPathsKeepTheirFileName() {
         let path = "~/" + String(repeating: "deep/", count: 60) + "id_ed25519"
         let shown = DisplayText.path(path)
