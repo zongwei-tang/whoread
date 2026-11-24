@@ -1,0 +1,14 @@
+<html><body style="font-family: -apple-system; font-size: 13px">
+<h3>One more step: Full Disk Access</h3>
+<p>macOS lets the background service see file accesses only with Full Disk Access. System Settings is
+open at Privacy &amp; Security &gt; Full Disk Access (if it is not, open it there):</p>
+<ol>
+<li>If <b>whoreadd</b> is in the list already and its switch is on, you are done.</li>
+<li>Otherwise click <b>+</b>, press <b>Command-Shift-G</b>, paste with <b>Command-V</b>
+(the path <code>/usr/local/libexec/whoreadd</code> is copied), press Return, click Open.</li>
+<li>Make sure the switch next to whoreadd is on. Monitoring starts within a minute.</li>
+</ol>
+<p>Programs that were open before (Terminal, editors, AI agents) show as "started by an unknown process"
+until you reopen them; in Terminal a new tab is enough.</p>
+<p>To remove WhoRead: <code>sudo /usr/local/libexec/whoread-uninstall</code> (add <code>--purge</code> to delete the history too).</p>
+</body></html>

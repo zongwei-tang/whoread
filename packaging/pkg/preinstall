@@ -1,0 +1,4 @@
+#!/bin/bash
+# Runs as root before WhoRead.pkg installs: the running menu bar app is about to be replaced.
+pkill -x WhoRead 2>/dev/null || true
+exit 0

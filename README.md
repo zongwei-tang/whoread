@@ -61,6 +61,15 @@ starts.
 
 ## Getting started
 
+**Installer package (recommended):** open the latest successful CI run on the repository's Actions
+page, download its `WhoRead-pkg` artifact, unzip it and double-click `WhoRead-<version>-arm64.pkg`.
+When it is done, Installer opens Full Disk Access in System Settings: switch it on for
+`/usr/local/libexec/whoreadd` as its last page says (the path is copied for you). A signed package keeps
+that permission across updates. To remove it: `sudo /usr/local/libexec/whoread-uninstall` (`--purge`
+also deletes the history).
+
+**From source:**
+
 ```bash
 git clone https://github.com/zongwei-tang/whoread.git
 cd whoread

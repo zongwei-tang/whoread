@@ -62,8 +62,94 @@ jobs:
         if: steps.ci.outcome != 'success'
         run: exit 1
 
+  # Builds WhoRead.pkg (scripts/release/make-pkg.sh), installs it with installer(8), checks it and
+  # removes it. With the repository secrets below it is signed with a Developer ID and notarized
+  # (docs/DISTRIBUTION.md, "WhoRead.pkg"); without them it is built ad hoc and tested the same way.
+  # The package is kept as the run's artifact "WhoRead-pkg".
+  package:
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use the newest installed Xcode
+        run: |
+          x="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$x" ]; then sudo xcode-select -s "$x"; fi
+      - name: Import the Developer ID certificates
+        env:
+          P12: ${{ secrets.WHOREAD_DEVID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.WHOREAD_DEVID_P12_PASSWORD }}
+          NOTARY_P8: ${{ secrets.WHOREAD_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.WHOREAD_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.WHOREAD_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          if [ -z "$P12" ]; then echo "no signing secrets: the package is built ad hoc"; exit 0; fi
+          KC="$RUNNER_TEMP/whoread-signing.keychain-db"
+          KCP="$(uuidgen)"
+          security create-keychain -p "$KCP" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCP" "$KC"
+          printf '%s' "$P12" | base64 -D > "$RUNNER_TEMP/devid.p12"
+          security import "$RUNNER_TEMP/devid.p12" -k "$KC" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/productsign -T /usr/bin/pkgbuild > /dev/null
+          rm -f "$RUNNER_TEMP/devid.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCP" "$KC" > /dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          app="$(security find-identity -v "$KC" | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)"
+          inst="$(security find-identity -v "$KC" | sed -n 's/.*"\(Developer ID Installer: .*\)"$/\1/p' | head -1)"
+          if [ -z "$app" ] || [ -z "$inst" ]; then
+            echo "the .p12 must hold both a Developer ID Application and a Developer ID Installer certificate with their keys"
+            echo "found: $(security find-identity -v "$KC" | grep -c '"') identities"
+            exit 1
+          fi
+          {
+            echo "WHOREAD_SIGN_APP=$app"
+            echo "WHOREAD_SIGN_PKG=$inst"
+            echo "WHOREAD_KEYCHAIN=$KC"
+          } >> "$GITHUB_ENV"
+          if [ -n "$NOTARY_P8" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER" ]; then
+            printf '%s\n' "$NOTARY_P8" > "$RUNNER_TEMP/notary.p8"
+            chmod 600 "$RUNNER_TEMP/notary.p8"
+            {
+              echo "WHOREAD_NOTARY_KEY=$RUNNER_TEMP/notary.p8"
+              echo "WHOREAD_NOTARY_KEY_ID=$NOTARY_KEY_ID"
+              echo "WHOREAD_NOTARY_ISSUER=$NOTARY_ISSUER"
+            } >> "$GITHUB_ENV"
+          else
+            echo "no notarization secrets: the package is signed but not notarized"
+          fi
+      - name: Build, install and check the package
+        id: pkg
+        run: scripts/ci/package-ci.sh "$RUNNER_TEMP/package.txt" "$RUNNER_TEMP/pkg"
+        continue-on-error: true
+      - name: Summary
+        if: always()
+        run: |
+          { echo '```'; head -300 "$RUNNER_TEMP/package.txt" 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cp "$RUNNER_TEMP/package.txt" "$RUNNER_TEMP/package-pkg.txt" 2>/dev/null || echo "no report" > "$RUNNER_TEMP/package-pkg.txt"
+          rm -f "$RUNNER_TEMP/notary.p8"
+          if [ -n "${WHOREAD_KEYCHAIN:-}" ]; then security delete-keychain "$WHOREAD_KEYCHAIN" || true; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-package-pkg
+          path: ${{ runner.temp }}/package-pkg.txt
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: steps.pkg.outcome == 'success'
+        with:
+          name: WhoRead-pkg
+          path: ${{ runner.temp }}/pkg/WhoRead-*.pkg
+          retention-days: 90
+      - name: Fail the job when a check failed
+        if: steps.pkg.outcome != 'success'
+        run: exit 1
+
   publish:
-    needs: test
+    needs: [test, package]
     if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-latest
     permissions:

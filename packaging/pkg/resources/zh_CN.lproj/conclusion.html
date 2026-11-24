@@ -1,0 +1,13 @@
+<html><body style="font-family: -apple-system; font-size: 13px">
+<h3>最后一步：完全磁盘访问权限</h3>
+<p>macOS 只有在后台服务获得「完全磁盘访问权限」后，才让它看到文件访问。「系统设置」已经打开到
+「隐私与安全性 &gt; 完全磁盘访问权限」（没有打开的话，请自己打开到这里）：</p>
+<ol>
+<li>如果列表里已经有 <b>whoreadd</b>，而且开关是打开的，那就已经好了。</li>
+<li>否则点 <b>+</b>，按 <b>Command-Shift-G</b>，用 <b>Command-V</b> 粘贴
+（路径 <code>/usr/local/libexec/whoreadd</code> 已经复制好了），按回车，再点「打开」。</li>
+<li>确认 whoreadd 旁边的开关是打开的。一分钟之内就会开始监控。</li>
+</ol>
+<p>安装前就开着的程序（终端、编辑器、AI agent）会显示为「不知道是谁启动的」，重新打开它们就好；终端只要新开一个标签页。</p>
+<p>卸载：<code>sudo /usr/local/libexec/whoread-uninstall</code>（加上 <code>--purge</code> 会把记录也删掉）。</p>
+</body></html>

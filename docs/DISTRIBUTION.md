@@ -4,6 +4,27 @@ WhoRead ships as a Developer ID–signed, notarized app that embeds an Endpoint 
 extension. Everything on this page needs **your** Apple Developer account. Apple quotes are in
 [`research/packaging-details.md`](research/packaging-details.md).
 
+## 0. WhoRead.pkg: monitor-only, without the Endpoint Security entitlement
+
+Until Apple grants the entitlement, the release is `WhoRead.pkg` (`scripts/release/make-pkg.sh`): the
+daemon with eslogger, the menu bar app and the CLI, installed the way `scripts/install.sh` installs them,
+plus the uninstaller `/usr/local/libexec/whoread-uninstall`. The `package` job of CI builds it on every
+push, installs it with `installer`, runs the install acceptance on it, removes it, and keeps it as the
+run's artifact `WhoRead-pkg`. Without secrets it is ad hoc (Gatekeeper refuses it once downloaded); with
+these repository secrets (Settings → Secrets and variables → Actions) it is Developer ID–signed and
+notarized:
+
+| Secret | What |
+| --- | --- |
+| `WHOREAD_DEVID_P12_BASE64` | `base64 -i devid.p12`: one .p12 holding the **Developer ID Application** and **Developer ID Installer** certificates with their private keys (Keychain Access → My Certificates → select both → Export) |
+| `WHOREAD_DEVID_P12_PASSWORD` | the password chosen at that export |
+| `WHOREAD_NOTARY_KEY_P8` | the text of an App Store Connect API key (.p8; Users and Access → Integrations → Team Keys, role Developer) |
+| `WHOREAD_NOTARY_KEY_ID` | that key's Key ID |
+| `WHOREAD_NOTARY_ISSUER` | the Issuer ID shown above the keys |
+
+Signed with a Developer ID, whoreadd keeps its designated requirement across versions, so its Full Disk
+Access survives updates (`install-dev-daemon.sh` keeps a team signature without entitlements).
+
 ## 1. Prerequisites
 
 - An Apple Developer Program membership. For an organization, the **Account Holder** has to
