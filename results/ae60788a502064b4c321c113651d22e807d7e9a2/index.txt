@@ -1,0 +1,5 @@
+commit: ae60788a502064b4c321c113651d22e807d7e9a2
+run: https://github.com/zongwei-tang/whoread/actions/runs/45352976042
+macos-15: OVERALL: PASS
+macos-latest: OVERALL: PASS
+xcode-27: OVERALL: PASS
