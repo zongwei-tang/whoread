@@ -3,4 +3,4 @@ run: https://github.com/zongwei-tang/whoread/actions/runs/45500789551
 macos-15: OVERALL: FAIL
 macos-latest: OVERALL: PASS
 package-pkg: OVERALL: PASS
-xcode-27: OVERALL: FAIL
+xcode-27: OVERALL: PASS
