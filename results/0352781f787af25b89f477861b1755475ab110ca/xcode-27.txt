@@ -1,0 +1,382 @@
+# WhoRead CI report
+commit: 0352781f787af25b89f477861b1755475ab110ca
+runner: macOS 27.0.1 (26A434), arm64
+xcode: Xcode 27.2 Build version 27B52 
+swift: swift-driver version: 1.168.6 Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9 clang-2100.4.1.1)
+
+## swift-build: PASS (113 s)
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:160:77: [1;33mwarning: [1;39mreference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures\SendableClosureCaptures]8;;\]
+    [0;36m|[0;0m                                                                             `- [1;33mwarning: [1;39mreference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures\SendableClosureCaptures]8;;\]
+/Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:160:129: [1;33mwarning: [1;39mreference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures\SendableClosureCaptures]8;;\]
+    [0;36m|[0;0m                                                                                                                                 `- [1;33mwarning: [1;39mreference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures\SendableClosureCaptures]8;;\]
+
+## swift-test: PASS (506 s)
+Test Suite 'All tests' started at 2026-11-24 08:52:48.238.
+	 Executed 15 tests, with 0 failures (0 unexpected) in 34.393 (34.398) seconds
+	 Executed 15 tests, with 0 failures (0 unexpected) in 28.188 (28.191) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+	 Executed 21 tests, with 0 failures (0 unexpected) in 39.165 (39.170) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.007 (0.007) seconds
+	 Executed 29 tests, with 0 failures (0 unexpected) in 50.793 (50.799) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 10.263 (10.264) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.687 (0.689) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 1.328 (1.328) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 38.561 (38.562) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 13.708 (13.709) seconds
+	 Executed 125 tests, with 0 failures (0 unexpected) in 217.097 (217.128) seconds
+Test Suite 'All tests' passed at 2026-11-24 08:56:25.370.
+	 Executed 125 tests, with 0 failures (0 unexpected) in 217.097 (217.132) seconds
+Test Suite 'All tests' started at 2026-11-24 08:56:25.957.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.142 (0.144) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 1.949 (1.951) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.081 (0.083) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.043 (0.044) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.213 (0.215) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.029 (0.030) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.197 (0.200) seconds
+	 Executed 49 tests, with 0 failures (0 unexpected) in 2.665 (2.678) seconds
+Test Suite 'All tests' passed at 2026-11-24 08:56:28.637.
+	 Executed 49 tests, with 0 failures (0 unexpected) in 2.665 (2.680) seconds
+Test Suite 'All tests' started at 2026-11-24 08:56:28.877.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 5.955 (5.957) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 3.208 (3.209) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.092 (0.093) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.065 (0.068) seconds
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.596 (0.599) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.630 (0.633) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 8.556 (8.560) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.509 (1.510) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.182 (0.183) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.036 (0.036) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.362 (0.363) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.008 (0.010) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.006 (0.007) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.483 (0.484) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 45.759 (45.764) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 8.244 (8.247) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 27.665 (27.670) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.881 (0.882) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.568 (0.582) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.053 (0.054) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 17.142 (17.144) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 1.565 (1.568) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.103 (0.103) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.046 (0.047) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 2.657 (2.659) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 11.057 (11.059) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.463 (0.465) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 1.056 (1.056) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 4.637 (4.638) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.039 (0.041) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.021 (0.023) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.043 (0.043) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.090 (0.091) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.005 (0.005) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 5.410 (5.412) seconds
+	 Executed 15 tests, with 0 failures (0 unexpected) in 6.609 (6.615) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 3.630 (3.631) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.007 (0.009) seconds
+	 Executed 18 tests, with 0 failures (0 unexpected) in 16.696 (16.704) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.481 (0.481) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.134 (0.135) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.267 (0.267) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.096 (0.097) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 1.052 (1.054) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.045 (0.045) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.295 (0.295) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.655 (0.656) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.083 (0.083) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.035 (0.035) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.059 (0.060) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.103 (0.104) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.037 (0.037) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.022 (0.022) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.597 (0.598) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 6.602 (6.605) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.372 (0.373) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.151 (0.151) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 10.035 (10.037) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.427 (0.429) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 3.051 (3.051) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.296 (0.297) seconds
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testDevUninstallKeepsTheReleaseCLILink] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testDevUninstallKeepsTheReleaseCLILink]' skipped (0.004 seconds).
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testDevUninstallPurgeRemovesNothingWhileTheExtensionIsActive] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testDevUninstallPurgeRemovesNothingWhileTheExtensionIsActive]' skipped (0.001 seconds).
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testUninstallProceedsWhenNoExtensionIsActive] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testUninstallProceedsWhenNoExtensionIsActive]' skipped (0.000 seconds).
+/Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testUninstallStopsWhenAnExtensionIsActiveAndTheAppIsMissing] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testUninstallStopsWhenAnExtensionIsActiveAndTheAppIsMissing]' skipped (0.000 seconds).
+	 Executed 11 tests, with 4 tests skipped and 0 failures (0 unexpected) in 5.231 (5.235) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.145 (0.145) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.144 (0.144) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.125 (0.125) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.869 (0.871) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.288 (0.289) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.184 (0.185) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.530 (0.531) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.093 (0.093) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.165 (0.165) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.371 (0.373) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.206 (0.206) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.098 (0.098) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 1.598 (1.599) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.867 (0.868) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 2.209 (2.210) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.309 (0.310) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.896 (0.899) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.103 (0.104) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.652 (0.652) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.610 (1.610) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.125 (0.127) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 13.858 (13.859) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.007 (0.009) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 6.771 (6.772) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.158 (0.159) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.541 (1.541) seconds
+	 Executed 502 tests, with 4 tests skipped and 0 failures (0 unexpected) in 246.865 (247.024) seconds
+Test Suite 'All tests' passed at 2026-11-24 09:00:35.904.
+	 Executed 502 tests, with 4 tests skipped and 0 failures (0 unexpected) in 246.865 (247.027) seconds
+Test Suite 'All tests' started at 2026-11-24 09:00:36.627.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.576 (0.578) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.048 (0.048) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.169 (0.170) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.098 (0.098) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.032 (0.032) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.811 (0.814) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.265 (0.267) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.066 (0.066) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.048 (0.048) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.005 (0.005) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.007 (0.007) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.103 (0.104) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.149 (0.149) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.100 (0.101) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.293 (0.295) seconds
+
+## e2e-dev-socket: PASS (11 s)
+== status
+== events --agents-only
+== alerts
+== apps
+== files
+== agents
+== export csv (first 3 lines)
+== rules
+== enforcement on (replay/eslogger cannot enforce)
+== kill switch
+== settings set language (zh means zh-Hans; an unknown value is refused, not 'system')
+== status: no learning period, enforcement never switched off automatically
+== asks (ask mode; eslogger cannot hold an access, so nothing is waiting)
+== settings set trust-apple on|off (round trip)
+== catalog add-path refuses a home or a folder above one (or the whole disk), however spelled
+== export pages past undecodable rows
+== no daemon vs. a refusal the daemon answered
+== daemon log
+
+## brew-tools: PASS (8 s)
+
+## xcodegen: PASS (0 s)
+Created project at /Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj
+
+## xcode-build: PASS (88 s)
+** BUILD SUCCEEDED **
+
+## shellcheck: PASS (6 s)
+
+## bash-syntax: PASS (1 s)
+
+## es-stub: PASS (7 s)
+stub check: 314 declarations type-checked, 75 raw values compared, 0 mismatches
+
+## vm-harness-selftest: PASS (294 s)
+123 passed, 0 failed (files: /private/var/folders/5n/5t77mfb93jd7q8v9s6f0dn0m0000gn/T/whoread-vm-selftest.v8FyaE)
+
+## app-bundle: PASS (160 s)
+/Users/runner/work/whoread/whoread/scripts/dev/xcconfig.sh: line 172: printf: write error: Broken pipe
+== 0 failure(s)
+
+## eslogger-events: PASS (0 s)
+access
+authentication
+authorization_judgement
+authorization_petition
+bootstrap_check_in
+bootstrap_look_up
+btm_launch_item_add
+btm_launch_item_remove
+chdir
+chroot
+clone
+close
+copyfile
+create
+cs_invalidated
+deleteextattr
+dup
+exchangedata
+exec
+exit
+fcntl
+file_provider_materialize
+file_provider_update
+fork
+fsgetpath
+gatekeeper_user_override
+get_task
+get_task_inspect
+get_task_name
+get_task_read
+getattrlist
+getextattr
+iokit_open
+kextload
+kextunload
+link
+listextattr
+login_login
+login_logout
+lookup
+lw_session_lock
+lw_session_login
+lw_session_logout
+lw_session_unlock
+mmap
+mount
+mprotect
+od_attribute_set
+od_attribute_value_add
+od_attribute_value_remove
+od_create_group
+od_create_user
+od_delete_group
+od_delete_user
+od_disable_user
+od_enable_user
+od_group_add
+od_group_remove
+od_group_set
+od_modify_password
+open
+openssh_login
+openssh_logout
+proc_check
+proc_suspend_resume
+profile_add
+profile_remove
+pty_close
+pty_grant
+readdir
+readlink
+remote_thread_create
+remount
+rename
+screensharing_attach
+screensharing_detach
+searchfs
+setacl
+setattrlist
+setegid
+seteuid
+setextattr
+setflags
+setgid
+setmode
+setowner
+setregid
+setreuid
+settime
+setuid
+signal
+stat
+su
+sudo
+tcc_modify
+trace
+truncate
+uipc_bind
+uipc_connect
+unlink
+unmount
+utimes
+write
+xp_malware_detected
+xp_malware_remediated
+xpc_connect
+
+## install-acceptance: PASS (11 s)
+      /usr/local/bin: owner uid 501, mode 775: giving it to root
+PASS  scripts/install.sh
+      Building WhoRead (a minute or two)...
+      Installing. macOS asks for your password: the background service runs as root.
+      Installed. Logs (root only): /Library/Logs/WhoRead/whoreadd.log
+      App: /Applications/WhoRead.app, CLI: /usr/local/bin/whoread (both pinned: the daemon recognises exactly these builds)
+      Now grant Full Disk Access to /usr/local/libexec/whoreadd, then: sudo launchctl kickstart -k system/com.whoread.daemon
+      Owner team IDs are read from codesign at every daemon start; to see them: sudo whoread catalog resolve-owners
+        daemon: reachable (WhoRead 0.1.0, protocol 4)
+        monitoring: running (source eslogger)
+        app recognised: yes
+      
+      Done. WhoRead records which programs open your sensitive files, and which app or AI agent started them.
+      The menu bar icon shows alerts; allow notifications when macOS asks. In Terminal: whoread status, sudo whoread events --since 1h
+      Programs that were already open when WhoRead started (Terminal, editors, AI agents) are marked "started by an unknown process" until they are reopened, since WhoRead did not see who started them; in Terminal a new tab is enough. This happens again whenever the WhoRead service restarts (an update, a reinstall).
+      Blocking needs a signed release, which is not available yet. To remove WhoRead: scripts/uninstall.sh
+PASS  launchd runs com.whoread.daemon
+PASS  /usr/local/bin/whoread links to the CLI in the app
+PASS  the app is owned by root and writable by no one else
+PASS  the user's CLI reaches the daemon
+      WhoRead 0.1.0 — Monitoring
+        source:       eslogger running
+        enforcement:  inactive (setting off) — disabledByUser, sourceCannotEnforce
+        kill switch:  file absent
+        questions:    none waiting
+        events:       0 stored (+0 days aggregated), 0 since start, last never
+        alerts:       0 unread of 0
+        coverage:     68 monitored prefixes, homes /Users/runner
+        eslogger:     74 lines read, 74 events parsed, 0 malformed, schema ["1": 74], kernel drops 0
+PASS  the user's CLI may not read the recorded history (needs sudo)
+PASS  sudo whoread events
+      daemon: reachable (WhoRead 0.1.0, protocol 4)
+      monitoring: running (source eslogger)
+      app recognised: yes
+PASS  app self-check: reachable and recognised as the WhoRead app
+PASS  a re-signed copy of the CLI is refused
+PASS  eslogger runs under the daemon
+      PASS  cat reads fake private key recorded in 0.31s, chain: bash(1026) → hosted-compute-agent(1038) → Runner.Listener(4483) → Runner.Worker(4487) → bash(4915) → bash(4916) → bash(69962) → sudo(70814) → bash(70815) → sudo(70853) → cat(70854) (the ancestry above bash(1026) is unknown: it was running before the daemon started)
+      PASS  python3 reads fake credentials recorded in 0.04s, chain: bash(1026) → hosted-compute-agent(1038) → Runner.Listener(4483) → Runner.Worker(4487) → bash(4915) → bash(4916) → bash(69962) → sudo(70814) → bash(70815) → sudo(70877) → Python(70878) (the ancestry above bash(1026) is unknown: it was running before the daemon started)
+      PASS  node reads fake private key recorded in 0.06s, chain: bash(1026) → hosted-compute-agent(1038) → Runner.Listener(4483) → Runner.Worker(4487) → bash(4915) → bash(4916) → bash(69962) → sudo(70814) → bash(70815) → sudo(70890) → node(70891) (the ancestry above bash(1026) is unknown: it was running before the daemon started)
+      PASS  cat reads .env in a project root named in NFD recorded in 0.08s, chain: bash(1026) → hosted-compute-agent(1038) → Runner.Listener(4483) → Runner.Worker(4487) → bash(4915) → bash(4916) → bash(69962) → sudo(70814) → bash(70815) → sudo(70919) → cat(70920) (the ancestry above bash(1026) is unknown: it was running before the daemon started)
+      PASS  python3 writes fake notes through mmap recorded in 0.04s, chain: bash(1026) → hosted-compute-agent(1038) → Runner.Listener(4483) → Runner.Worker(4487) → bash(4915) → bash(4916) → bash(69962) → sudo(70814) → bash(70815) → sudo(70940) → Python(70941) (the ancestry above bash(1026) is unknown: it was running before the daemon started)
+      PASS  Spotlight read recorded and folded (hidden without --all)
+      PASS  CLI query
+      exported 23 events to /tmp/whoread-m2.pXgapa/e.json
+      PASS  export JSON
+      exported 23 events to /tmp/whoread-m2.pXgapa/e.csv
+      PASS  export CSV
+      9 passed, 0 failed
+PASS  acceptance-m2: 9 passed
+PASS  the app's --unregister-login-item exits 0
+PASS  scripts/uninstall.sh --purge
+      removed daemon, app, data and logs
+      /Users/runner/WhoReadTestVault is left: it holds fake test files (not secrets). Remove it when you no longer need it: rm -r ~/WhoReadTestVault
+      WhoRead is removed. You can also remove whoreadd from System Settings > Privacy & Security > Full Disk Access (select it, click -).
+PASS  launchd job removed
+PASS  removed: /Applications/WhoRead.app
+PASS  removed: /usr/local/bin/whoread
+PASS  removed: /usr/local/libexec/whoreadd
+PASS  removed: /Library/Application Support/WhoRead
+PASS  removed: /Library/LaunchDaemons/com.whoread.daemon.plist
+PASS  removed: /Library/Logs/WhoRead
+PASS  removed: the live check's file in the test vault
+PASS  the acceptance scripts' fake files in the test vault are kept
+22 passed, 0 failed, 0 skipped
+
+OVERALL: PASS
