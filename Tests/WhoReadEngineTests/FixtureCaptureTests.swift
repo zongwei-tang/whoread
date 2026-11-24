@@ -277,7 +277,8 @@ final class CaptureFixtureScriptTests: XCTestCase {
     P='"ppid":'"$PPID"',"original_ppid":'"$PPID"
     echo '{"schema_version":1,"event":{"open":{"fflag":1,"file":{"path":"'"$V"'"}}},"process":{"audit_token":{"pid":4242},'"$P"',"executable":{"path":"/bin/cat"}}}'
     echo '{"schema_version":1,"event":{"exec":{"args":["cat","'"$V"'"],"env":["FAKE_SECRET=s3cr3t-env-token"],"target":{"audit_token":{"pid":4242},"executable":{"path":"/bin/cat"}}}},"process":{"audit_token":{"pid":4242},'"$P"',"executable":{"path":"/bin/bash"}}}'
-    echo '{"schema_version":1,"event":{"open":{"fflag":1,"file":{"path":"'"$V"'"}}},"process":{"audit_token":{"pid":4343},"ppid":1,"original_ppid":1,"team_id":"TEAMAV1234","executable":{"path":"/Applications/SecretAV.app/Contents/MacOS/scanner"}}}'
+    # A pid no real process has this early: a fresh runner once gave the capture script itself 4343.
+    echo '{"schema_version":1,"event":{"open":{"fflag":1,"file":{"path":"'"$V"'"}}},"process":{"audit_token":{"pid":99943},"ppid":1,"original_ppid":1,"team_id":"TEAMAV1234","executable":{"path":"/Applications/SecretAV.app/Contents/MacOS/scanner"}}}'
     printf '{\377\376}\n'
     for _ in $(seq 400); do sleep 0.05; done
     """#
