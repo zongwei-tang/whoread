@@ -555,7 +555,10 @@ echo "== acceptance-m2.sh against a fake daemon (JSON handling without Python)"
 # parent is launchd now), unmarked starts it there without the mark, cut starts it at 500 (whose
 # parent, 400, is not launchd).
 # It logs every call as "root ..." or, when it runs through the sudo stand-in, "user ...", and
-# refuses a history query from the test user as the daemon does.
+# refuses a history query from the test user as the daemon does. It also reports cat's read of .env in
+# every project root added with settings set project-root-add (FAKE_NFD=missing: none), noting what the
+# folder that holds the root lists then, byte for byte; and python3's close of notes/mmap.txt after
+# writing through a mapping (FAKE_MMAP=open: only its read-write open; missing: nothing).
 # Stand-ins in $T/m2root let the script run "as root" here: id -u says 0, dscl gives the test user
 # the fake home, sudo -n -u USER -- runs the command as this user (marked as the test user's),
 # launchctl asuser runs it in place, and ps -o ppid= -p gives the script the made-up ancestry.
@@ -605,9 +608,35 @@ ev() {
   printf '{"path":"%s/WhoReadTestVault/%s","chain":[%s,{"name":"bash","pid":%s},{"name":"%s","pid":999}]%s%s}' \
     "$HOME" "$2" "$top" "$me" "$1" "$known" "${3:-}"
 }
-probes() { echo "$(ev cat ssh/id_ed25519),$(ev Python aws/credentials),$(ev perl5.34 aws/credentials),$(ev node ssh/id_ed25519)"; }
+mmap_ev() {
+  case "${FAKE_MMAP:-}" in
+    missing) ;;
+    open) printf ',%s' "$(ev Python notes/mmap.txt ',"operation":"open","access":"read+write"')" ;;
+    *) printf ',%s' "$(ev Python notes/mmap.txt ',"operation":"close","access":"write","note":"mapped-writable"')" ;;
+  esac
+}
+# The path as the daemon records it: canonical, so in NFC like the root as added.
+root_evs() {
+  [ "${FAKE_NFD:-}" = missing ] && return 0
+  while IFS= read -r r; do
+    [ -n "$r" ] && printf ',{"path":"%s/.env","chain":[%s,{"name":"bash","pid":%s},{"name":"cat","pid":999}]%s}' "$r" "$top" "$me" "$known"
+  done < "$FAKE_ROOTS"
+}
+probes() { echo "$(ev cat ssh/id_ed25519),$(ev Python aws/credentials),$(ev perl5.34 aws/credentials),$(ev node ssh/id_ed25519)$(mmap_ev)$(root_evs)"; }
 case "$1" in
   status) echo "  source:       native running" ;;
+  settings)
+    [ "$2" = set ] || exit 1
+    case "$3" in
+      project-root-add)
+        echo "$4" >> "$FAKE_ROOTS"
+        /bin/ls -1 "$(dirname "$4")" | grep '^WhoReadProbe-' >> "$FAKE_DISK" ;;
+      project-root-remove)
+        grep -vxF -- "$4" "$FAKE_ROOTS" > "$FAKE_ROOTS.new"
+        mv "$FAKE_ROOTS.new" "$FAKE_ROOTS" ;;
+      *) exit 1 ;;
+    esac
+    echo '{}' ;;
   events)
     case " $* " in
       *" --category "*) echo '[]' ;;
@@ -626,9 +655,10 @@ ME=$(id -un)
 # neither SUDO_USER nor WHOREAD_TEST_USER unless given.
 m2() {
   local root="$1"; shift
-  : > "$T/m2.calls"; : > "$T/m2.sudo"
+  : > "$T/m2.calls"; : > "$T/m2.sudo"; : > "$T/m2.roots"; : > "$T/m2.disk"
   env -u SUDO_USER -u WHOREAD_TEST_USER HOME="$T/m2home" PATH="${root:+$root:}$T/m2bin:$PATH" WHOREAD="$T/m2bin/whoread" \
-    FAKE_PID_FILE="$T/m2.pid" FAKE_HOME="$T/m2home" FAKE_LOG="$T/m2.calls" FAKE_SUDO_LOG="$T/m2.sudo" "$@" \
+    FAKE_PID_FILE="$T/m2.pid" FAKE_HOME="$T/m2home" FAKE_LOG="$T/m2.calls" FAKE_SUDO_LOG="$T/m2.sudo" \
+    FAKE_ROOTS="$T/m2.roots" FAKE_DISK="$T/m2.disk" "$@" \
     bash -c 'echo $$ > "$FAKE_PID_FILE"; exec bash "$0"' "$ROOT/scripts/acceptance-m2.sh"
 }
 # m2_root_queries : every history query ran, as root, and none as the test user.
@@ -676,6 +706,48 @@ out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_REFUSE=1); rc=$?
   && ! grep -q 'not recorded' <<< "$out" && [ ! -s "$T/m2.sudo" ] \
   && ok "acceptance-m2 stops with the daemon's refusal instead of reporting accesses as not recorded" \
   || bad "acceptance-m2 (history refused): rc $rc: $out"
+
+echo "== acceptance-m2.sh: the NFD and mmap probes"
+# They need python3 (the Command Line Tools), here as in the script. The probe root's name: データ in
+# NFC as added, and テ U+3099 ー タ (NFD) as created on disk.
+NFC_NAME="WhoReadProbe-$(printf '\343\203\207\343\203\274\343\202\277')"
+NFD_NAME="WhoReadProbe-$(printf '\343\203\206\343\202\231\343\203\274\343\202\277')"
+probe_left() { /bin/ls -1 "$T/m2home" | grep '^WhoReadProbe-'; }
+if xcode-select -p >/dev/null 2>&1 && [ -x /usr/bin/python3 ]; then
+  out=$(m2 "$T/m2root" "SUDO_USER=$ME"); rc=$?
+  [ $rc -eq 0 ] && grep -q ' 0 failed' <<< "$out" \
+    && grep -q '^PASS  cat reads .env in a project root named in NFD recorded in' <<< "$out" \
+    && grep -q '^PASS  python3 writes fake notes through mmap recorded in' <<< "$out" \
+    && ok "acceptance-m2 passes the NFD and mmap probes against a matching fake" || bad "acceptance-m2 (NFD, mmap): rc $rc: $out"
+  grep -qxF "root settings set project-root-add $T/m2home/$NFC_NAME" "$T/m2.calls" \
+    && grep -qxF "root settings set project-root-remove $T/m2home/$NFC_NAME" "$T/m2.calls" \
+    && ok "  the NFD probe adds its project root in NFC as root, and removes it again" || bad "NFD probe settings: $(cat "$T/m2.calls")"
+  grep -qxF "$NFD_NAME" "$T/m2.disk" && ok "  the probe folder is named in NFD on disk" || bad "NFD probe folder on disk: $(od -c "$T/m2.disk" | head -4)"
+  [ -z "$(probe_left)" ] && ok "  the probe folder is removed" || bad "NFD probe folder left: $(probe_left)"
+  grep -q "^sudo -n -u $ME -- /usr/bin/python3 " "$T/m2.sudo" && ! grep -q '^user ' "$T/m2.calls" \
+    && ok "  python3 runs as the test user, the daemon is asked as root" || bad "NFD and mmap runs: $(cat "$T/m2.sudo") $(cat "$T/m2.calls")"
+  out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_NFD=missing); rc=$?
+  [ $rc -ne 0 ] && grep -q '^FAIL  cat reads .env in a project root named in NFD not recorded within 2 s' <<< "$out" \
+    && grep -qxF "root settings set project-root-remove $T/m2home/$NFC_NAME" "$T/m2.calls" && [ -z "$(probe_left)" ] \
+    && ok "acceptance-m2 reports an NFD read not recorded, and still removes the root and the folder" \
+    || bad "acceptance-m2 (NFD read missing): rc $rc: $out"
+  out=$(m2 "$T/m2root" "SUDO_USER=$ME" FAKE_MMAP=open); rc=$?
+  [ $rc -ne 0 ] && grep -q '^FAIL  python3 writes fake notes through mmap not recorded within 2 s' <<< "$out" \
+    && ok "acceptance-m2 does not take the read-write open for the write through the mapping" \
+    || bad "acceptance-m2 (mmap, open only): rc $rc: $out"
+else
+  echo "SKIP  the NFD and mmap probes against the fake (no python3 on this Mac)"
+fi
+# Without python3 both are skipped, and no setting is changed.
+mkdir -p "$T/m2nopy"
+cp "$T/m2root/"* "$T/m2nopy/"
+printf '#!/bin/sh\nexit 2\n' > "$T/m2nopy/xcode-select"
+chmod +x "$T/m2nopy/xcode-select"
+out=$(m2 "$T/m2nopy" "SUDO_USER=$ME"); rc=$?
+[ $rc -eq 0 ] && grep -q ' 0 failed' <<< "$out" && grep -q '^SKIP  NFD project root' <<< "$out" && grep -q '^SKIP  mmap write' <<< "$out" \
+  && ! grep -q 'settings' "$T/m2.calls" && [ -z "$(probe_left)" ] \
+  && ok "acceptance-m2 without python3 skips the NFD and mmap probes and changes no setting" \
+  || bad "acceptance-m2 (no python3): rc $rc: $out"
 
 echo
 echo "$PASS passed, $FAIL failed (files: $T)"

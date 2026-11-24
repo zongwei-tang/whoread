@@ -33,6 +33,8 @@ public final class EsloggerParser: @unchecked Sendable {
     private let lock = NSLock()
     private var _stats = Stats()
     private var lastGlobalSeq: UInt64?
+    /// Processes that opened a file for writing, for the closes that report a writable mapping.
+    private var writableOpens = EsloggerWritableOpens()
 
     public init() {}
 
@@ -113,10 +115,11 @@ public final class EsloggerParser: @unchecked Sendable {
         let globalSeq = J.uint64(root["global_seq_num"])
         let seq = globalSeq ?? J.uint64(root["seq_num"])
         if let g = globalSeq { noteSequence(g) }
+        func since(_ version: Int) -> Bool { messageVersion.map { $0 >= version } ?? true }
 
-        func file(_ op: FileOperation, _ targets: [FileTarget]) -> Result {
+        func file(_ op: FileOperation, _ targets: [FileTarget], note: String? = nil) -> Result {
             guard !targets.isEmpty else { return .ignored("\(kind) without sensitive-capable targets") }
-            return .event(.file(FileActivity(time: time, sequence: seq, operation: op, process: process, targets: targets)))
+            return .event(.file(FileActivity(time: time, sequence: seq, operation: op, process: process, targets: targets, note: note)))
         }
 
         switch kind {
@@ -125,12 +128,30 @@ public final class EsloggerParser: @unchecked Sendable {
             let fflag = UInt32(truncatingIfNeeded: J.int(body["fflag"]) ?? 0)
             // A directory open (stat or O_DIRECTORY) only lists it: reported as readdir.
             let (op, targets) = OperationSemantics.open(f, fflag: fflag)
+            // A descriptor opened with FWRITE, the only kind a shared writable mapping can be made from (an
+            // O_TRUNC open without it writes, but cannot map): a later close reporting a writable mapping
+            // may be this process's.
+            if op == .open && fflag & OperationSemantics.fwrite != 0 {
+                lock.lock()
+                writableOpens.note(EsloggerWritableOpens.owner(process), path: f.path)
+                lock.unlock()
+            }
             return file(op, targets)
         case "close":
             guard let f = J.file(body["target"]) else { return .malformed("close without target") }
-            let modified = J.bool(body["modified"]) ?? false
-            if !modified { return .ignored("close without modification") }
-            return file(.close, OperationSemantics.close(f, modified: true))
+            // `modified`: written through write calls on this descriptor. A file changed only through a
+            // writable mapping reports modified false and was_mapped_writable true (message version >= 6,
+            // ESMessage.h), but the flag covers the file's whole life: as in the native source, it is
+            // charged only to a process that opened this file for writing itself, and marked as a
+            // possible modification (EventNote.mappedWritable).
+            if J.bool(body["modified"]) ?? false { return file(.close, OperationSemantics.close(f, modified: true)) }
+            if since(6) && J.bool(body["was_mapped_writable"]) == true {
+                lock.lock()
+                let writer = writableOpens.contains(EsloggerWritableOpens.owner(process), path: f.path)
+                lock.unlock()
+                if writer { return file(.close, OperationSemantics.close(f, modified: true), note: EventNote.mappedWritable) }
+            }
+            return .ignored("close without modification")
         case "rename":
             guard let src = J.file(body["source"]) else { return .malformed("rename without source") }
             guard let dst = EsloggerParser.destination(body) else { return .malformed("rename without destination") }
@@ -283,6 +304,54 @@ public final class EsloggerParser: @unchecked Sendable {
             argv: nil,
             startTime: J.string(o["start_time"]).flatMap(RFC3339.parse),
             euid: J.int(token?["euid"]).map { UInt32(truncatingIfNeeded: $0) })
+    }
+}
+
+/// Which processes opened a file for writing, so that a close reporting the file as mapped writable
+/// (`was_mapped_writable`) is charged only to one of them, as in the native source (NativeWritableOpens):
+/// the flag only says that something mapped the file writable while it was alive, and a shared
+/// writable mapping needs a descriptor opened with FWRITE. A process is its pid with its start (fork)
+/// time: a descriptor survives exec, and a reused pid starts later. Bounded: past `capacity` the oldest
+/// entries go (their mapped closes are then not reported).
+struct EsloggerWritableOpens {
+    static let capacity = 4096
+
+    /// A process: pid and start time (nil when eslogger does not report it: only the pid tells them apart).
+    struct Owner: Hashable {
+        let pid: Int32
+        let start: Date?
+    }
+
+    private struct Entry: Hashable {
+        let owner: Owner
+        let path: String
+    }
+
+    private var entries = Set<Entry>()
+    /// Insertion order, oldest first from `head`.
+    private var order: [Entry] = []
+    private var head = 0
+
+    var count: Int { entries.count }
+
+    static func owner(_ p: ProcessRecord) -> Owner { Owner(pid: p.pid, start: p.startTime) }
+
+    mutating func note(_ owner: Owner, path: String) {
+        let e = Entry(owner: owner, path: path)
+        guard entries.insert(e).inserted else { return }
+        order.append(e)
+        while entries.count > EsloggerWritableOpens.capacity, head < order.count {
+            entries.remove(order[head])
+            head += 1
+        }
+        if head > EsloggerWritableOpens.capacity {
+            order.removeFirst(head)
+            head = 0
+        }
+    }
+
+    func contains(_ owner: Owner, path: String) -> Bool {
+        entries.contains(Entry(owner: owner, path: path))
     }
 }
 

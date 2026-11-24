@@ -12,9 +12,11 @@
 #   - dev LaunchDaemon installed and Full Disk Access granted (in the VM: scripts/vm/provision.sh)
 #   - scripts/create-test-vault.sh has been run (in the VM provision.sh does it for the test user)
 #   - jq (part of macOS 15 and later; on 14: brew install jq)
-# Only the test vault is read. Each probe runs in its own process group (set -m), separate from the
-# daemon's, so eslogger does not suppress it. No Python needed: the VM has no Command Line Tools, so
-# perl stands in for the python3 probe.
+# Only the test vault is read, and the NFD probe's own folder in the test user's home (created and
+# removed by the probe, and its project root added and removed again). Each probe runs in its own
+# process group (set -m), separate from the daemon's, so eslogger does not suppress it. No Python
+# needed: the VM has no Command Line Tools, so perl stands in for the python3 probe, and the NFD and
+# mmap probes, which need python3, are skipped.
 set -uo pipefail
 set -m
 WR="${WHOREAD:-whoread}"
@@ -38,6 +40,8 @@ as_user() { sudo -n -u "$TEST_USER" -- "$@"; }
 # session, and the runner's jobs start outside every session.
 as_session_user() { launchctl asuser "$(id -u "$TEST_USER")" sudo -n -u "$TEST_USER" -- "$@"; }
 now() { jq -n 'now'; }
+# Without the Command Line Tools /usr/bin/python3 is only a stub that asks to install them.
+has_python3() { xcode-select -p >/dev/null 2>&1 && [ -x /usr/bin/python3 ]; }
 node_bin="$(command -v node || true)"
 
 "$WR" status >/dev/null || { echo "daemon not reachable (is it installed and running?)"; exit 1; }
@@ -62,8 +66,13 @@ ancestry() {
 }
 REAL=$(ancestry)
 
-probe() { # name, expected leaf name, file in the vault it reads, command...
+probe() { # [--op OPERATION] name, expected leaf name, file in the vault it reads (or its absolute path), command...
+  # --op: only an event of that operation counts (a close is only ever recorded as a write).
+  local op=""
+  if [ "$1" = --op ]; then op="$2"; shift 2; fi
   local name="$1" leaf="$2" file="$3"; shift 3
+  # A recorded path is canonical (NFC, no /System/Volumes/Data): an absolute one is given that way.
+  case "$file" in /*) ;; *) file="/WhoReadTestVault/$file" ;; esac
   local start; start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   as_user "$@" >/dev/null 2>&1
   # Latency is counted from the end of the command: an interpreter that takes a second to start
@@ -77,7 +86,7 @@ probe() { # name, expected leaf name, file in the vault it reads, command...
   # written (by cat, among others) just before.
   local found="" result=""
   for _ in $(seq 40); do
-    result=$("$WR" events --since "$start" --json 2>/dev/null | jq -r --arg leaf "$leaf" --arg file "/WhoReadTestVault/$file" \
+    result=$("$WR" events --since "$start" --json 2>/dev/null | jq -r --arg leaf "$leaf" --arg file "$file" --arg op "$op" \
         --argjson me "$$" --argjson real "$REAL" '
       def verdict:
         (.chain | map(.pid)) as $c
@@ -95,7 +104,8 @@ probe() { # name, expected leaf name, file in the vault it reads, command...
           end;
       [ .[] | select(((.chain // []) | length) > 0
                      and ((.chain[-1].name // "") | ascii_downcase | startswith($leaf))
-                     and ((.path // "") | endswith($file)))
+                     and ((.path // "") | endswith($file))
+                     and ($op == "" or .operation == $op))
             | { text: ([.chain[] | "\(.name)(\(.pid))"] | join(" → ")), why: verdict } ] as $m
       | ($m | map(select(.why == "ok" or .why == "unknown")) | first) as $ok
       | (($m | map(select(.why | startswith("this script") | not)) | first) // $m[0]) as $near
@@ -136,6 +146,68 @@ if [ -n "$node_bin" ]; then
 else
   # sudo sets its own PATH, without Homebrew's folder.
   echo "SKIP  node not found on PATH (by hand, to include it: sudo env PATH=\"\$PATH\" $0)"
+fi
+
+# NFD: a project root with a non-ASCII name, added in NFC and created on disk in NFD (as Finder may),
+# and a .env read in it. Outside the vault: the vault's own prefix would let every line in it through
+# the eslogger prefilter, so here only the root's spellings can. データ has no case and one voiced
+# kana, so the prefilter matches it by its exact spellings, NFC and NFD (Café would go by its ASCII
+# fragment instead, for its é). python3 makes the NFD name and checks that the disk keeps it.
+NFD_ROOT=""; NFD_DIR=""; NFD_ADDED=""
+nfd_cleanup() {
+  if [ -n "$NFD_ADDED" ]; then
+    "$WR" settings set project-root-remove "$NFD_ROOT" >/dev/null || bad "NFD: could not remove the project root $NFD_ROOT"
+    NFD_ADDED=""
+  fi
+  case "$NFD_DIR" in "$USER_HOME"/WhoReadProbe-*) as_user /bin/rm -rf -- "$NFD_DIR" ;; esac
+  NFD_DIR=""
+}
+trap nfd_cleanup EXIT
+if has_python3; then
+  # The two spellings come back marked: the python3 stub can print to stderr too.
+  out=$(as_user /usr/bin/python3 -c '
+import os, shutil, sys, unicodedata
+nfc = os.path.join(sys.argv[1], "WhoReadProbe-" + "".join(map(chr, (0x30C7, 0x30FC, 0x30BF))))
+nfd = unicodedata.normalize("NFD", nfc)
+shutil.rmtree(nfd, ignore_errors=True)
+os.mkdir(nfd)
+if os.path.basename(nfd) not in os.listdir(sys.argv[1]):
+    shutil.rmtree(nfd)
+    sys.exit("the file system did not keep the NFD name")
+with open(os.path.join(nfd, ".env"), "w") as f:
+    f.write("WHOREAD_PROBE=not-a-secret\n")
+print("nfc=" + nfc)
+print("nfd=" + nfd)' "$USER_HOME" 2>&1)
+  NFD_ROOT=$(sed -n 's/^nfc=//p' <<< "$out")
+  NFD_DIR=$(sed -n 's/^nfd=//p' <<< "$out")
+  if [ -z "$NFD_ROOT" ] || [ -z "$NFD_DIR" ]; then
+    bad "NFD: could not create the probe folder in $USER_HOME: $out"
+  elif ! err=$("$WR" settings set project-root-add "$NFD_ROOT" 2>&1 >/dev/null); then
+    bad "NFD: could not add the project root $NFD_ROOT: $err"
+  else
+    NFD_ADDED=1
+    probe "cat reads .env in a project root named in NFD" cat "$NFD_ROOT/.env" /bin/cat "$NFD_DIR/.env"
+  fi
+  nfd_cleanup
+else
+  echo "SKIP  NFD project root (no Command Line Tools: python3 makes the NFD name)"
+fi
+
+# mmap: python3 changes a vault file only through a shared writable mapping, with no write call, so its
+# close reports modified false and was_mapped_writable true. That close must be recorded (a close is
+# recorded only as a write); the read-write open before it does not count.
+if has_python3; then
+  as_user /bin/sh -c 'echo "mmap $(date)" > "$1"' sh "$VAULT/notes/mmap.txt"
+  probe --op close "python3 writes fake notes through mmap" python notes/mmap.txt /usr/bin/python3 -c '
+import mmap, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+m = mmap.mmap(fd, 0)
+m[0:4] = b"MMAP"
+m.flush()
+m.close()
+os.close(fd)' "$VAULT/notes/mmap.txt"
+else
+  echo "SKIP  mmap write (no Command Line Tools: python3 makes the mapping)"
 fi
 
 # Spotlight: modify a vault file and wait for mdworker to index it (folded by default).

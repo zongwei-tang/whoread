@@ -601,6 +601,8 @@ public final class DaemonCore: @unchecked Sendable {
         linkSink.core = self
 
         source = try (makeSource ?? DaemonCore.defaultSource)(self)
+        // Its file events are analyzed apart from its process events (ProcessTree.recordsMayArriveLate).
+        tree.recordsMayArriveLate = source.kind == .native
         enforcement.setSourceCanEnforce(source.canEnforce)
         enforcement.onChange { [weak self] active in
             guard let self else { return }
