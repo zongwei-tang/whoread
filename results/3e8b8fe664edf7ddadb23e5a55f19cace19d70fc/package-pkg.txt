@@ -1,0 +1,65 @@
+# WhoRead package report
+commit: 3e8b8fe664edf7ddadb23e5a55f19cace19d70fc
+runner: macOS 26.7.2 (25G332), arm64
+signing: Developer ID
+notarization: yes
+
+## make-pkg: FAIL (exit 1, 9174 s)
+== build
+== WhoReadCore
+== WhoReadStore
+== WhoReadIPC
+== WhoReadEngine
+== WhoReadUIModel
+== whoreadd
+== whoread
+== WhoRead.app executable
+== system extension executable
+== WhoRead.app bundle
+== sign (Developer ID Application: Zongwei Tang (6Z8YG7MN5Z))
+== package
+== notarize
+notarization: no status (submission ?)
+--- last 40 lines
+/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.sch09y/scripts/bin/whoreadd: replacing existing signature
+/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.sch09y/scripts/bin/whoread: replacing existing signature
+/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.sch09y/scripts/WhoRead.app/Contents/Helpers/whoread: replacing existing signature
+/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.sch09y/scripts/WhoRead.app: replacing existing signature
+== package
+pkgbuild: Adding top-level preinstall script
+pkgbuild: Adding top-level postinstall script
+pkgbuild: Wrote package to /var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.sch09y/whoread-component.pkg
+productbuild: Using timestamp authority for signature
+productbuild: Signing product with identity "Developer ID Installer: Zongwei Tang (6Z8YG7MN5Z)" from keychain /Users/runner/work/_temp/whoread-signing.keychain-db
+productbuild: Adding certificate "Developer ID Certification Authority"
+productbuild: Adding certificate "Apple Root CA"
+productbuild: Wrote product to /Users/runner/work/_temp/pkg/WhoRead-0.1.0-arm64.pkg
+productbuild: Supported OS versions: [Min: 14.0, Before: None]
+Package "WhoRead-0.1.0-arm64.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Signed with a trusted timestamp on: 2026-11-25 09:06:18 +0000
+   Certificate Chain:
+    1. Developer ID Installer: Zongwei Tang (6Z8YG7MN5Z)
+       Expires: 2027-12-25 08:13:17 +0000
+       SHA256 Fingerprint:
+           B0 64 B9 71 5D BB FA 40 35 29 CA 94 95 B0 AF 8B 49 AB C2 4C DD 1D 
+           EC 69 85 4D 6A 3D 96 DC A0 D1
+       ------------------------------------------------------------------------
+    2. Developer ID Certification Authority
+       Expires: 2031-09-17 00:00:00 +0000
+       SHA256 Fingerprint:
+           F1 6C D3 C5 4C 7F 83 CE A4 BF 1A 3E 6A 08 19 C8 AA A8 E4 A1 52 8F 
+           D1 44 71 5F 35 06 43 D2 DF 3A
+       ------------------------------------------------------------------------
+    3. Apple Root CA
+       Expires: 2035-02-09 21:40:36 +0000
+       SHA256 Fingerprint:
+           B0 B1 73 0E CB C7 FF 45 05 14 2C 49 F1 29 5E 6E DA 6B CA ED 7E 2C 
+           68 C5 BE 91 B5 A1 10 01 F0 24
+
+== notarize
+{"message":"Timeout of 9000 second(s) was reached before processing completed.","id":"095f40ae-64cb-4f96-b112-d5f3f9cb79e1"}
+
+notarization: no status (submission ?)
+
+OVERALL: FAIL
