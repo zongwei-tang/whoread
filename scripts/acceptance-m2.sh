@@ -40,6 +40,8 @@ as_user() { sudo -n -u "$TEST_USER" -- "$@"; }
 # session, and the runner's jobs start outside every session.
 as_session_user() { launchctl asuser "$(id -u "$TEST_USER")" sudo -n -u "$TEST_USER" -- "$@"; }
 now() { jq -n 'now'; }
+# The product bound is 2 s; scripts/ci/install-acceptance.sh raises it on loaded hosted CI runners.
+LIMIT="${WHOREAD_LATENCY_LIMIT:-2}"
 # Without the Command Line Tools /usr/bin/python3 is only a stub that asks to install them.
 has_python3() { xcode-select -p >/dev/null 2>&1 && [ -x /usr/bin/python3 ]; }
 node_bin="$(command -v node || true)"
@@ -85,7 +87,7 @@ probe() { # [--op OPERATION] name, expected leaf name, file in the vault it read
   # launchd. Only events on the probed file count: --since has whole seconds, and the vault was
   # written (by cat, among others) just before.
   local found="" result=""
-  for _ in $(seq 40); do
+  while :; do
     result=$("$WR" events --since "$start" --json 2>/dev/null | jq -r --arg leaf "$leaf" --arg file "$file" --arg op "$op" \
         --argjson me "$$" --argjson real "$REAL" '
       def verdict:
@@ -113,6 +115,7 @@ probe() { # [--op OPERATION] name, expected leaf name, file in the vault it read
         elif $near then "wrong \($near.text): \($near.why)"
         else "" end')
     case "$result" in ok\ *|unknown\ *) found="$result"; break ;; esac
+    [ "$(jq -n "($(now) - $t0) > $LIMIT")" = true ] && break
     sleep 0.05
   done
   local dt; dt=$(jq -n "($(now) - $t0) * 100 | round / 100")
@@ -120,14 +123,14 @@ probe() { # [--op OPERATION] name, expected leaf name, file in the vault it read
   case "$found" in
     unknown\ *) chain="$chain (the ancestry above ${chain%% *} is unknown: it was running before the daemon started)" ;;
   esac
-  if [ -n "$found" ] && [ "$(jq -n "$dt <= 2.0")" = true ]; then
+  if [ -n "$found" ] && [ "$(jq -n "$dt <= $LIMIT")" = true ]; then
     ok "$name recorded in ${dt}s, chain: $chain"
   elif [ -n "$found" ]; then
-    bad "$name recorded but took ${dt}s (> 2 s): $chain"
+    bad "$name recorded but took ${dt}s (> ${LIMIT} s): $chain"
   elif [ -n "$result" ]; then
     bad "$name recorded with a wrong parent chain: ${result#wrong }"
   else
-    bad "$name not recorded within 2 s"
+    bad "$name not recorded within ${LIMIT} s"
   fi
 }
 

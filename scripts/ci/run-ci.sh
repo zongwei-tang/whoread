@@ -47,6 +47,24 @@ stage() {
   } >> "$REPORT"
 }
 
+# bounded SECONDS COMMAND...: runs COMMAND in its own process group and kills the whole group after
+# SECONDS (exit 124), so one hung check cannot use up the job's time.
+bounded() {
+  perl -e '$t = shift; $p = fork; if (!$p) { setpgrp; exec @ARGV or exit 127 }
+             $SIG{ALRM} = sub { kill -9, -$p; print STDERR "timed out after $t s\n"; exit 124 };
+             alarm $t; waitpid $p, 0; exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$@"
+}
+# The VM harness self-test takes about a minute; on a loaded runner it once hung. It runs at most twice,
+# each time for at most 5 minutes.
+vm_selftest() {
+  local i
+  for i in 1 2; do
+    bounded 300 bash scripts/vm/selftest.sh && return 0
+    echo "== attempt $i failed"
+  done
+  return 1
+}
+
 ERR='error:|warning:|Executed [0-9]+ tests|failed \(|FAILED|BUILD (SUCCEEDED|FAILED)|\*\* .* \*\*'
 
 stage swift-build "$ERR" swift build --build-tests
@@ -61,7 +79,7 @@ stage xcode-build "$ERR" scripts/build.sh Debug
 stage shellcheck "SC[0-9]+|error" bash -c 'find scripts -name "*.sh" -print0 | xargs -0 shellcheck -S warning'
 stage bash-syntax "syntax|error" bash -c 'for f in $(find scripts -name "*.sh"); do bash -n "$f" || exit 1; done'
 stage es-stub "mismatch|MISMATCH|error|skipped|stub check" bash scripts/dev/es-typecheck/check-stub.sh
-stage vm-harness-selftest "^FAIL|passed," bash scripts/vm/selftest.sh
+stage vm-harness-selftest "^FAIL|passed,|^== attempt|timed out" vm_selftest
 stage app-bundle "^FAIL|failure|error" scripts/dev/sc-app-test.sh
 # Monitor-only facts the runner can show without Full Disk Access (listing events needs no root).
 stage eslogger-events "." eslogger --list-events
