@@ -101,10 +101,20 @@ if [ -n "$PKG_ID" ] && [ -n "${WHOREAD_NOTARY_KEY:-}" ]; then
   echo "== notarize"
   NOTARY_AUTH=(--key "$WHOREAD_NOTARY_KEY" --key-id "${WHOREAD_NOTARY_KEY_ID:?}" --issuer "${WHOREAD_NOTARY_ISSUER:?}")
   echo "earlier submissions of this team (newest first):"
-  xcrun notarytool history "${NOTARY_AUTH[@]}" 2>&1 | grep -E 'createdDate|id:|status:' | head -15 | sed 's/^ */  /' || true
+  xcrun notarytool history "${NOTARY_AUTH[@]}" > "$WORK/history.txt" 2>&1 || true
+  grep -E 'createdDate|id:|status:' "$WORK/history.txt" | head -15 | sed 's/^ */  /' || true
+  # What Apple objected to the last time it rejected one (team-wide, so possibly an older build).
+  rejected="$(grep -E '^ *(id|status):' "$WORK/history.txt" | sed 's/^ *//' | paste - - \
+    | awk '$4 == "Rejected" { print $2; exit }' || true)"
+  if [ -n "$rejected" ]; then
+    echo "log of the newest rejected submission $rejected:"
+    xcrun notarytool log "$rejected" "${NOTARY_AUTH[@]}" 2>&1 | grep -E '"(message|path|architecture|severity)"' \
+      | head -30 | sed 's/^ */  /' || true
+  fi
   xcrun notarytool submit "$PKG" --key "$WHOREAD_NOTARY_KEY" --key-id "${WHOREAD_NOTARY_KEY_ID:?}" \
     --issuer "${WHOREAD_NOTARY_ISSUER:?}" --wait --timeout "${WHOREAD_NOTARY_TIMEOUT:-30m}" \
-    --output-format json > "$WORK/notary.json" || true   # a timeout exits non-zero; the status below decides
+    --output-format json > "$WORK/notary.json" 2>&1 || true   # a timeout exits non-zero and prints its JSON
+                                                              # on stderr; the status below decides
   cat "$WORK/notary.json"; echo
   status="$(sed -n 's/.*"status" *: *"\([^"]*\)".*/\1/p' "$WORK/notary.json" | head -1)"
   id="$(sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' "$WORK/notary.json" | head -1)"
