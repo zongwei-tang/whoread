@@ -14,13 +14,9 @@ run's artifact `WhoRead-pkg`. Without secrets it is ad hoc (Gatekeeper refuses i
 these repository secrets (Settings → Secrets and variables → Actions) it is Developer ID–signed and
 notarized:
 
-| Secret | What |
-| --- | --- |
-| `WHOREAD_DEVID_P12_BASE64` | `base64 -i devid.p12`: one .p12 holding the **Developer ID Application** and **Developer ID Installer** certificates with their private keys (Keychain Access → My Certificates → select both → Export) |
-| `WHOREAD_DEVID_P12_PASSWORD` | the password chosen at that export |
-| `WHOREAD_NOTARY_KEY_P8` | the text of an App Store Connect API key (.p8; Users and Access → Integrations → Team Keys, role Developer) |
-| `WHOREAD_NOTARY_KEY_ID` | that key's Key ID |
-| `WHOREAD_NOTARY_ISSUER` | the Issuer ID shown above the keys |
+`WHOREAD_DEVID_APP_P12_BASE64` and `WHOREAD_DEVID_INSTALLER_P12_BASE64` (one .p12 per certificate,
+with its key), `WHOREAD_DEVID_P12_PASSWORD`, `WHOREAD_NOTARY_KEY_P8`, `WHOREAD_NOTARY_KEY_ID`,
+`WHOREAD_NOTARY_ISSUER`.
 
 Signed with a Developer ID, whoreadd keeps its designated requirement across versions, so its Full Disk
 Access survives updates (`install-dev-daemon.sh` keeps a team signature without entitlements).

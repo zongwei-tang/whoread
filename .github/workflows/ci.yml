@@ -78,23 +78,27 @@ jobs:
           if [ -n "$x" ]; then sudo xcode-select -s "$x"; fi
       - name: Import the Developer ID certificates
         env:
-          P12: ${{ secrets.WHOREAD_DEVID_P12_BASE64 }}
+          P12_APP: ${{ secrets.WHOREAD_DEVID_APP_P12_BASE64 }}
+          P12_INSTALLER: ${{ secrets.WHOREAD_DEVID_INSTALLER_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.WHOREAD_DEVID_P12_PASSWORD }}
           NOTARY_P8: ${{ secrets.WHOREAD_NOTARY_KEY_P8 }}
           NOTARY_KEY_ID: ${{ secrets.WHOREAD_NOTARY_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.WHOREAD_NOTARY_ISSUER }}
         run: |
           set -euo pipefail
-          if [ -z "$P12" ]; then echo "no signing secrets: the package is built ad hoc"; exit 0; fi
+          # Repository secrets, one .p12 per certificate (docs/DISTRIBUTION.md).
+          if [ -z "$P12_APP" ] || [ -z "$P12_INSTALLER" ]; then echo "no signing secrets: the package is built ad hoc"; exit 0; fi
           KC="$RUNNER_TEMP/whoread-signing.keychain-db"
           KCP="$(uuidgen)"
           security create-keychain -p "$KCP" "$KC"
           security set-keychain-settings -lut 21600 "$KC"
           security unlock-keychain -p "$KCP" "$KC"
-          printf '%s' "$P12" | base64 -D > "$RUNNER_TEMP/devid.p12"
-          security import "$RUNNER_TEMP/devid.p12" -k "$KC" -P "$P12_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/productsign -T /usr/bin/pkgbuild > /dev/null
-          rm -f "$RUNNER_TEMP/devid.p12"
+          for p in "$P12_APP" "$P12_INSTALLER"; do
+            printf '%s' "$p" | base64 -D > "$RUNNER_TEMP/devid.p12"
+            security import "$RUNNER_TEMP/devid.p12" -k "$KC" -P "$P12_PASSWORD" \
+              -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/productsign -T /usr/bin/pkgbuild > /dev/null
+            rm -f "$RUNNER_TEMP/devid.p12"
+          done
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCP" "$KC" > /dev/null
           # shellcheck disable=SC2046
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
