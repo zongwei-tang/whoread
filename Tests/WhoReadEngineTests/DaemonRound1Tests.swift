@@ -652,8 +652,17 @@ final class EnforcementRound1Tests: XCTestCase {
     // analysis-11 (daemon side): only the daemon itself is ignored; nothing accumulates.
     func testOnlyTheDaemonPIDIsIgnored() throws {
         let dir = TempDir()
-        let (core, _) = try r1Core(dir)
+        let (core, _) = try r1Core(dir) { $0.source = .eslogger }
         XCTAssertEqual(core.analyzer.ignoredPIDs, [getpid()])
+    }
+
+    // A replayed capture comes from another process (often another machine): a pid in it that equals the
+    // replaying process's own is someone else, so replay ignores nothing. On a fresh CI runner the CLI's
+    // pid fell among a capture's synthetic pids and replay dropped that event (299 alerts of 300).
+    func testReplayIgnoresNoPID() throws {
+        let dir = TempDir()
+        let (core, _) = try r1Core(dir) { $0.source = .replay }
+        XCTAssertEqual(core.analyzer.ignoredPIDs, [])
     }
 }
 

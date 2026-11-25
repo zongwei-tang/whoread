@@ -54,12 +54,12 @@ bounded() {
              $SIG{ALRM} = sub { kill -9, -$p; print STDERR "timed out after $t s\n"; exit 124 };
              alarm $t; waitpid $p, 0; exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$@"
 }
-# The VM harness self-test takes about a minute; on a loaded runner it once hung. It runs at most twice,
-# each time for at most 5 minutes.
+# The VM harness self-test takes one to five minutes on a hosted runner and once hung. It runs at most twice,
+# each time for at most 15 minutes.
 vm_selftest() {
   local i
   for i in 1 2; do
-    bounded 300 bash scripts/vm/selftest.sh && return 0
+    bounded 900 bash scripts/vm/selftest.sh && return 0
     echo "== attempt $i failed"
   done
   return 1

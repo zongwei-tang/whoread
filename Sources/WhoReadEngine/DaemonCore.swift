@@ -543,8 +543,10 @@ public final class DaemonCore: @unchecked Sendable {
                             benign: BenignClassifier(catalog: data.benign), rules: rules, baseline: baseline,
                             coalescer: coalescer, nextEventID: ((try? store.maxEventID()) ?? 0) + 1)
         analyzer.readdirEnabled = settings.readdirEnabled
-        // eslogger suppresses its own events; the daemon is the only process ignored here.
-        analyzer.ignoredPIDs = [getpid()]
+        // eslogger suppresses its own events; the daemon is the only process ignored here. A replayed
+        // capture was recorded by another process, often on another machine: a pid in it that equals
+        // this process's own is a different process, so nothing is ignored.
+        analyzer.ignoredPIDs = config.source == .replay ? [] : [getpid()]
 
         // The previous instance died while AUTH events were subscribed: the kernel killed it for a missed
         // deadline (kill mode), its watchdog exited it with the file handler stuck (fail-closed mode, see
