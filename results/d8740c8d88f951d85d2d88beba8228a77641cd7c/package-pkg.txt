@@ -1,0 +1,81 @@
+# WhoRead package report
+commit: d8740c8d88f951d85d2d88beba8228a77641cd7c
+runner: macOS 26.7.2 (25G332), arm64
+signing: Developer ID
+notarization: yes
+
+## make-pkg: FAIL (exit 1, 1373 s)
+== build
+== WhoReadCore
+== WhoReadStore
+== WhoReadIPC
+== WhoReadEngine
+== WhoReadUIModel
+== whoreadd
+== whoread
+== WhoRead.app executable
+== system extension executable
+== WhoRead.app bundle
+== sign (Developer ID Application: Zongwei Tang (6Z8YG7MN5Z))
+== package
+== notarize
+earlier submissions of this team (newest first):
+  createdDate: 2026-11-25T09:06:20.365Z
+  id: 095f40ae-64cb-4f96-b112-d5f3f9cb79e1
+  status: In Progress
+  createdDate: 2026-11-25T08:29:46.971Z
+  id: 3e6c0e12-5e2e-4940-8f2f-8f6103d778d3
+  status: In Progress
+  createdDate: 2026-11-24T22:27:11.528Z
+  id: 288add2f-d85c-47a9-b823-f20b7032c389
+  status: Rejected
+  createdDate: 2026-11-24T19:38:48.957Z
+  id: 2361dff6-b8f3-4058-9b25-253d5be7a90d
+  status: Rejected
+  createdDate: 2026-11-24T08:45:45.489Z
+  id: dca11cdc-01c5-47d9-968e-6667a7baac4d
+  status: Rejected
+notarization: no status (submission ?)
+--- last 40 lines
+   Signed with a trusted timestamp on: 2026-11-25 11:58:17 +0000
+   Certificate Chain:
+    1. Developer ID Installer: Zongwei Tang (6Z8YG7MN5Z)
+       Expires: 2027-12-25 08:13:17 +0000
+       SHA256 Fingerprint:
+           B0 64 B9 71 5D BB FA 40 35 29 CA 94 95 B0 AF 8B 49 AB C2 4C DD 1D 
+           EC 69 85 4D 6A 3D 96 DC A0 D1
+       ------------------------------------------------------------------------
+    2. Developer ID Certification Authority
+       Expires: 2031-09-17 00:00:00 +0000
+       SHA256 Fingerprint:
+           F1 6C D3 C5 4C 7F 83 CE A4 BF 1A 3E 6A 08 19 C8 AA A8 E4 A1 52 8F 
+           D1 44 71 5F 35 06 43 D2 DF 3A
+       ------------------------------------------------------------------------
+    3. Apple Root CA
+       Expires: 2035-02-09 21:40:36 +0000
+       SHA256 Fingerprint:
+           B0 B1 73 0E CB C7 FF 45 05 14 2C 49 F1 29 5E 6E DA 6B CA ED 7E 2C 
+           68 C5 BE 91 B5 A1 10 01 F0 24
+
+== notarize
+earlier submissions of this team (newest first):
+  createdDate: 2026-11-25T09:06:20.365Z
+  id: 095f40ae-64cb-4f96-b112-d5f3f9cb79e1
+  status: In Progress
+  createdDate: 2026-11-25T08:29:46.971Z
+  id: 3e6c0e12-5e2e-4940-8f2f-8f6103d778d3
+  status: In Progress
+  createdDate: 2026-11-24T22:27:11.528Z
+  id: 288add2f-d85c-47a9-b823-f20b7032c389
+  status: Rejected
+  createdDate: 2026-11-24T19:38:48.957Z
+  id: 2361dff6-b8f3-4058-9b25-253d5be7a90d
+  status: Rejected
+  createdDate: 2026-11-24T08:45:45.489Z
+  id: dca11cdc-01c5-47d9-968e-6667a7baac4d
+  status: Rejected
+{"message":"Timeout of 1200 second(s) was reached before processing completed.","id":"ac39f96d-4ac5-4439-8cef-263e63212a4b"}
+
+notarization: no status (submission ?)
+
+OVERALL: FAIL
