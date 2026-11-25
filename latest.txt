@@ -1,5 +1,5 @@
-commit: a20df62e1ae86c1f83938a233d22d2ed485c21bf
-run: https://github.com/zongwei-tang/whoread/actions/runs/45519270537
+commit: a1432af04f678ff6c18d938317ba2dfb9ebe7688
+run: https://github.com/zongwei-tang/whoread/actions/runs/45520885054
 macos-15: OVERALL: PASS
 macos-latest: OVERALL: PASS
 package-pkg: OVERALL: PASS
