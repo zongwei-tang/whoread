@@ -1,0 +1,81 @@
+# WhoRead package report
+commit: a20df62e1ae86c1f83938a233d22d2ed485c21bf
+runner: macOS 26.7.2 (25G332), arm64
+signing: none (ad hoc)
+notarization: no
+
+## make-pkg: PASS (147 s)
+== build
+== WhoReadCore
+== WhoReadStore
+== WhoReadIPC
+== WhoReadEngine
+== WhoReadUIModel
+== whoreadd
+== whoread
+== WhoRead.app executable
+== system extension executable
+== WhoRead.app bundle
+== sign (ad hoc)
+== package
+Package: /Users/runner/work/_temp/pkg/WhoRead-0.1.0-arm64.pkg
+
+## pkg-acceptance: PASS (7 s)
+      /usr/local/bin: owner uid 501, mode 775: giving it to root
+SKIP  the package is not signed (no signing secrets on this run)
+PASS  installer -pkg
+      installer: Package name is WhoRead 0.1.0
+      installer: Installing at base path /
+      installer: The install was successful.
+PASS  the uninstaller is installed
+PASS  launchd runs com.whoread.daemon
+PASS  /usr/local/bin/whoread links to the CLI in the app
+PASS  the app is owned by root and writable by no one else
+PASS  the user's CLI reaches the daemon
+      WhoRead 0.1.0 — Monitoring
+        source:       eslogger running
+        enforcement:  inactive (setting off) — disabledByUser, sourceCannotEnforce
+        kill switch:  file absent
+        questions:    none waiting
+        events:       0 stored (+0 days aggregated), 0 since start, last never
+        alerts:       0 unread of 0
+        coverage:     68 monitored prefixes, homes /Users/runner
+        eslogger:     57 lines read, 57 events parsed, 0 malformed, schema ["1": 57], kernel drops 0
+PASS  the user's CLI may not read the recorded history (needs sudo)
+PASS  sudo whoread events
+      daemon: reachable (WhoRead 0.1.0, protocol 4)
+      monitoring: running (source eslogger)
+      app recognised: yes
+PASS  app self-check: reachable and recognised as the WhoRead app
+PASS  a re-signed copy of the CLI is refused
+PASS  eslogger runs under the daemon
+      PASS  cat reads fake private key recorded in 0.18s, chain: bash(962) → hosted-compute-agent(973) → Runner.Listener(1158) → Runner.Worker(1163) → bash(1395) → bash(1396) → bash(3736) → sudo(3957) → bash(3958) → sudo(3996) → cat(3997) (the ancestry above bash(962) is unknown: it was running before the daemon started)
+      PASS  python3 reads fake credentials recorded in 0.05s, chain: bash(962) → hosted-compute-agent(973) → Runner.Listener(1158) → Runner.Worker(1163) → bash(1395) → bash(1396) → bash(3736) → sudo(3957) → bash(3958) → sudo(4016) → Python(4017) (the ancestry above bash(962) is unknown: it was running before the daemon started)
+      PASS  node reads fake private key recorded in 0.02s, chain: bash(962) → hosted-compute-agent(973) → Runner.Listener(1158) → Runner.Worker(1163) → bash(1395) → bash(1396) → bash(3736) → sudo(3957) → bash(3958) → sudo(4035) → node(4036) (the ancestry above bash(962) is unknown: it was running before the daemon started)
+      PASS  cat reads .env in a project root named in NFD recorded in 0.02s, chain: bash(962) → hosted-compute-agent(973) → Runner.Listener(1158) → Runner.Worker(1163) → bash(1395) → bash(1396) → bash(3736) → sudo(3957) → bash(3958) → sudo(4059) → cat(4060) (the ancestry above bash(962) is unknown: it was running before the daemon started)
+      PASS  python3 writes fake notes through mmap recorded in 0.03s, chain: bash(962) → hosted-compute-agent(973) → Runner.Listener(1158) → Runner.Worker(1163) → bash(1395) → bash(1396) → bash(3736) → sudo(3957) → bash(3958) → sudo(4080) → Python(4081) (the ancestry above bash(962) is unknown: it was running before the daemon started)
+      PASS  Spotlight read recorded and folded (hidden without --all)
+      PASS  CLI query
+      exported 23 events to /tmp/whoread-m2.saX9Re/e.json
+      PASS  export JSON
+      exported 23 events to /tmp/whoread-m2.saX9Re/e.csv
+      PASS  export CSV
+      
+      9 passed, 0 failed
+PASS  acceptance-m2: 9 passed
+PASS  the app's --unregister-login-item exits 0
+PASS  whoread-uninstall --purge
+      removed daemon, app, data and logs
+PASS  launchd job removed
+PASS  removed: /Applications/WhoRead.app
+PASS  removed: /usr/local/bin/whoread
+PASS  removed: /usr/local/libexec/whoreadd
+PASS  removed: /Library/Application Support/WhoRead
+PASS  removed: /Library/LaunchDaemons/com.whoread.daemon.plist
+PASS  removed: /Library/Logs/WhoRead
+PASS  removed: /usr/local/libexec/whoread-uninstall
+PASS  removed: the live check's file in the test vault
+PASS  the acceptance scripts' fake files in the test vault are kept
+24 passed, 0 failed, 1 skipped
+
+OVERALL: PASS
