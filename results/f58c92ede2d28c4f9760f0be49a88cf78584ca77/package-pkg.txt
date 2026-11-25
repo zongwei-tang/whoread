@@ -1,10 +1,10 @@
 # WhoRead package report
 commit: f58c92ede2d28c4f9760f0be49a88cf78584ca77
 runner: macOS 26.7.2 (25G332), arm64
-signing: none (ad hoc)
-notarization: no
+signing: Developer ID
+notarization: yes
 
-## make-pkg: PASS (142 s)
+## make-pkg: FAIL (exit 124, 2024 s)
 == build
 == WhoReadCore
 == WhoReadStore
@@ -16,66 +16,49 @@ notarization: no
 == WhoRead.app executable
 == system extension executable
 == WhoRead.app bundle
-== sign (ad hoc)
+== sign (Developer ID Application: Zongwei Tang (6Z8YG7MN5Z))
 == package
-Package: /Users/runner/work/_temp/pkg/WhoRead-0.1.0-arm64.pkg
+== notarize
+--- last 40 lines
+   whoreadd signed: /Users/runner/work/whoread/whoread/.build-sc/release/whoreadd
+== sign (Developer ID Application: Zongwei Tang (6Z8YG7MN5Z))
+/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.C3aE7a/scripts/bin/whoreadd: replacing existing signature
+/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.C3aE7a/scripts/bin/whoread: replacing existing signature
+/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.C3aE7a/scripts/WhoRead.app/Contents/Helpers/whoread: replacing existing signature
+/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.C3aE7a/scripts/WhoRead.app: replacing existing signature
+== package
+pkgbuild: Adding top-level preinstall script
+pkgbuild: Adding top-level postinstall script
+pkgbuild: Wrote package to /var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T//whoread-pkg.C3aE7a/whoread-component.pkg
+productbuild: Using timestamp authority for signature
+productbuild: Signing product with identity "Developer ID Installer: Zongwei Tang (6Z8YG7MN5Z)" from keychain /Users/runner/work/_temp/whoread-signing.keychain-db
+productbuild: Adding certificate "Developer ID Certification Authority"
+productbuild: Adding certificate "Apple Root CA"
+productbuild: Wrote product to /Users/runner/work/_temp/pkg/WhoRead-0.1.0-arm64.pkg
+productbuild: Supported OS versions: [Min: 14.0, Before: None]
+Package "WhoRead-0.1.0-arm64.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Signed with a trusted timestamp on: 2026-11-25 08:29:44 +0000
+   Certificate Chain:
+    1. Developer ID Installer: Zongwei Tang (6Z8YG7MN5Z)
+       Expires: 2027-12-25 08:13:17 +0000
+       SHA256 Fingerprint:
+           B0 64 B9 71 5D BB FA 40 35 29 CA 94 95 B0 AF 8B 49 AB C2 4C DD 1D 
+           EC 69 85 4D 6A 3D 96 DC A0 D1
+       ------------------------------------------------------------------------
+    2. Developer ID Certification Authority
+       Expires: 2031-09-17 00:00:00 +0000
+       SHA256 Fingerprint:
+           F1 6C D3 C5 4C 7F 83 CE A4 BF 1A 3E 6A 08 19 C8 AA A8 E4 A1 52 8F 
+           D1 44 71 5F 35 06 43 D2 DF 3A
+       ------------------------------------------------------------------------
+    3. Apple Root CA
+       Expires: 2035-02-09 21:40:36 +0000
+       SHA256 Fingerprint:
+           B0 B1 73 0E CB C7 FF 45 05 14 2C 49 F1 29 5E 6E DA 6B CA ED 7E 2C 
+           68 C5 BE 91 B5 A1 10 01 F0 24
 
-## pkg-acceptance: PASS (8 s)
-      /usr/local/bin: owner uid 501, mode 775: giving it to root
-SKIP  the package is not signed (no signing secrets on this run)
-PASS  installer -pkg
-      installer: Package name is WhoRead 0.1.0
-      installer: Installing at base path /
-      installer: The install was successful.
-PASS  the uninstaller is installed
-PASS  launchd runs com.whoread.daemon
-PASS  /usr/local/bin/whoread links to the CLI in the app
-PASS  the app is owned by root and writable by no one else
-PASS  the user's CLI reaches the daemon
-      WhoRead 0.1.0 — Monitoring
-        source:       eslogger running
-        enforcement:  inactive (setting off) — disabledByUser, sourceCannotEnforce
-        kill switch:  file absent
-        questions:    none waiting
-        events:       0 stored (+0 days aggregated), 0 since start, last never
-        alerts:       0 unread of 0
-        coverage:     68 monitored prefixes, homes /Users/runner
-        eslogger:     3 lines read, 3 events parsed, 0 malformed, schema ["1": 3], kernel drops 0
-PASS  the user's CLI may not read the recorded history (needs sudo)
-PASS  sudo whoread events
-      daemon: reachable (WhoRead 0.1.0, protocol 4)
-      monitoring: running (source eslogger)
-      app recognised: yes
-PASS  app self-check: reachable and recognised as the WhoRead app
-PASS  a re-signed copy of the CLI is refused
-PASS  eslogger runs under the daemon
-      PASS  cat reads fake private key recorded in 0.04s, chain: bash(949) → hosted-compute-agent(960) → Runner.Listener(3781) → Runner.Worker(3787) → bash(3949) → bash(3950) → bash(7183) → sudo(7407) → bash(7408) → sudo(7449) → cat(7450) (the ancestry above bash(949) is unknown: it was running before the daemon started)
-      PASS  python3 reads fake credentials recorded in 0.04s, chain: bash(949) → hosted-compute-agent(960) → Runner.Listener(3781) → Runner.Worker(3787) → bash(3949) → bash(3950) → bash(7183) → sudo(7407) → bash(7408) → sudo(7462) → Python(7463) (the ancestry above bash(949) is unknown: it was running before the daemon started)
-      PASS  node reads fake private key recorded in 0.03s, chain: bash(949) → hosted-compute-agent(960) → Runner.Listener(3781) → Runner.Worker(3787) → bash(3949) → bash(3950) → bash(7183) → sudo(7407) → bash(7408) → sudo(7485) → node(7486) (the ancestry above bash(949) is unknown: it was running before the daemon started)
-      PASS  cat reads .env in a project root named in NFD recorded in 0.04s, chain: bash(949) → hosted-compute-agent(960) → Runner.Listener(3781) → Runner.Worker(3787) → bash(3949) → bash(3950) → bash(7183) → sudo(7407) → bash(7408) → sudo(7507) → cat(7508) (the ancestry above bash(949) is unknown: it was running before the daemon started)
-      PASS  python3 writes fake notes through mmap recorded in 0.05s, chain: bash(949) → hosted-compute-agent(960) → Runner.Listener(3781) → Runner.Worker(3787) → bash(3949) → bash(3950) → bash(7183) → sudo(7407) → bash(7408) → sudo(7529) → Python(7530) (the ancestry above bash(949) is unknown: it was running before the daemon started)
-      PASS  Spotlight read recorded and folded (hidden without --all)
-      PASS  CLI query
-      exported 23 events to /tmp/whoread-m2.kJ4RK8/e.json
-      PASS  export JSON
-      exported 23 events to /tmp/whoread-m2.kJ4RK8/e.csv
-      PASS  export CSV
-      
-      9 passed, 0 failed
-PASS  acceptance-m2: 9 passed
-PASS  the app's --unregister-login-item exits 0
-PASS  whoread-uninstall --purge
-      removed daemon, app, data and logs
-PASS  launchd job removed
-PASS  removed: /Applications/WhoRead.app
-PASS  removed: /usr/local/bin/whoread
-PASS  removed: /usr/local/libexec/whoreadd
-PASS  removed: /Library/Application Support/WhoRead
-PASS  removed: /Library/LaunchDaemons/com.whoread.daemon.plist
-PASS  removed: /Library/Logs/WhoRead
-PASS  removed: /usr/local/libexec/whoread-uninstall
-PASS  removed: the live check's file in the test vault
-PASS  the acceptance scripts' fake files in the test vault are kept
-24 passed, 0 failed, 1 skipped
+== notarize
+{"id":"3e6c0e12-5e2e-4940-8f2f-8f6103d778d3","message":"Timeout of 1800 second(s) was reached before processing completed."}
 
-OVERALL: PASS
+OVERALL: FAIL

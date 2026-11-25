@@ -4,165 +4,165 @@ runner: macOS 27.0.1 (26A434), arm64
 xcode: Xcode 27.2 Build version 27B52 
 swift: swift-driver version: 1.168.6 Apple Swift version 6.4.2 (swiftlang-6.4.2.1.9 clang-2100.4.1.1)
 
-## swift-build: PASS (101 s)
+## swift-build: PASS (98 s)
 /Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:160:77: [1;33mwarning: [1;39mreference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures\SendableClosureCaptures]8;;\]
     [0;36m|[0;0m                                                                             `- [1;33mwarning: [1;39mreference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures\SendableClosureCaptures]8;;\]
 /Users/runner/work/whoread/whoread/Tests/WhoReadCoreTests/IdentityTests.swift:160:129: [1;33mwarning: [1;39mreference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures\SendableClosureCaptures]8;;\]
     [0;36m|[0;0m                                                                                                                                 `- [1;33mwarning: [1;39mreference to captured var 'claude' in concurrently-executing code; this is an error in the Swift 6 language mode[0;0m [#]8;;https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures\SendableClosureCaptures]8;;\]
 
-## swift-test: PASS (515 s)
-Test Suite 'All tests' started at 2026-11-25 02:25:22.098.
-	 Executed 15 tests, with 0 failures (0 unexpected) in 37.076 (37.081) seconds
-	 Executed 15 tests, with 0 failures (0 unexpected) in 27.478 (27.482) seconds
+## swift-test: PASS (522 s)
+Test Suite 'All tests' started at 2026-11-25 08:28:03.093.
+	 Executed 15 tests, with 0 failures (0 unexpected) in 32.174 (32.177) seconds
+	 Executed 15 tests, with 0 failures (0 unexpected) in 29.116 (29.119) seconds
 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
-	 Executed 21 tests, with 0 failures (0 unexpected) in 39.506 (39.510) seconds
+	 Executed 21 tests, with 0 failures (0 unexpected) in 38.705 (38.709) seconds
 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
-	 Executed 29 tests, with 0 failures (0 unexpected) in 56.031 (56.037) seconds
-	 Executed 6 tests, with 0 failures (0 unexpected) in 10.885 (10.887) seconds
-	 Executed 8 tests, with 0 failures (0 unexpected) in 0.626 (0.628) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 1.418 (1.419) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.003 (0.005) seconds
-	 Executed 9 tests, with 0 failures (0 unexpected) in 39.786 (39.793) seconds
-	 Executed 7 tests, with 0 failures (0 unexpected) in 11.704 (11.706) seconds
+	 Executed 29 tests, with 0 failures (0 unexpected) in 52.831 (52.839) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 11.051 (11.054) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.853 (0.856) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 1.270 (1.272) seconds
 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
-	 Executed 125 tests, with 0 failures (0 unexpected) in 224.523 (224.564) seconds
-Test Suite 'All tests' passed at 2026-11-25 02:29:06.666.
-	 Executed 125 tests, with 0 failures (0 unexpected) in 224.523 (224.569) seconds
-Test Suite 'All tests' started at 2026-11-25 02:29:07.146.
-	 Executed 5 tests, with 0 failures (0 unexpected) in 0.101 (0.102) seconds
-	 Executed 6 tests, with 0 failures (0 unexpected) in 1.193 (1.194) seconds
-	 Executed 6 tests, with 0 failures (0 unexpected) in 0.039 (0.040) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.022 (0.023) seconds
-	 Executed 7 tests, with 0 failures (0 unexpected) in 0.147 (0.148) seconds
-	 Executed 8 tests, with 0 failures (0 unexpected) in 0.012 (0.013) seconds
-	 Executed 13 tests, with 0 failures (0 unexpected) in 0.104 (0.106) seconds
-	 Executed 49 tests, with 0 failures (0 unexpected) in 1.625 (1.634) seconds
-Test Suite 'All tests' passed at 2026-11-25 02:29:08.782.
-	 Executed 49 tests, with 0 failures (0 unexpected) in 1.625 (1.636) seconds
-Test Suite 'All tests' started at 2026-11-25 02:29:08.965.
-	 Executed 3 tests, with 0 failures (0 unexpected) in 6.241 (6.243) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 2.488 (2.488) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.069 (0.070) seconds
-	 Executed 7 tests, with 0 failures (0 unexpected) in 0.036 (0.037) seconds
-	 Executed 12 tests, with 0 failures (0 unexpected) in 0.396 (0.398) seconds
-	 Executed 10 tests, with 0 failures (0 unexpected) in 0.816 (0.818) seconds
-	 Executed 11 tests, with 0 failures (0 unexpected) in 6.899 (6.902) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 1.748 (1.748) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.138 (0.139) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.040 (0.040) seconds
-	 Executed 5 tests, with 0 failures (0 unexpected) in 0.354 (0.355) seconds
-	 Executed 7 tests, with 0 failures (0 unexpected) in 0.004 (0.004) seconds
-	 Executed 5 tests, with 0 failures (0 unexpected) in 0.005 (0.005) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.410 (0.410) seconds
-	 Executed 14 tests, with 0 failures (0 unexpected) in 46.924 (46.930) seconds
-	 Executed 10 tests, with 0 failures (0 unexpected) in 8.812 (8.817) seconds
-	 Executed 8 tests, with 0 failures (0 unexpected) in 27.704 (27.708) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 1.249 (1.250) seconds
-	 Executed 7 tests, with 0 failures (0 unexpected) in 0.353 (0.355) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.045 (0.046) seconds
-	 Executed 6 tests, with 0 failures (0 unexpected) in 15.094 (15.096) seconds
-	 Executed 13 tests, with 0 failures (0 unexpected) in 1.805 (1.808) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.069 (0.070) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.035 (0.036) seconds
-	 Executed 6 tests, with 0 failures (0 unexpected) in 2.376 (2.378) seconds
-	 Executed 6 tests, with 0 failures (0 unexpected) in 10.013 (10.014) seconds
-	 Executed 10 tests, with 0 failures (0 unexpected) in 0.412 (0.413) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 1.175 (1.175) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 5.253 (5.254) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.037 (0.037) seconds
-	 Executed 10 tests, with 0 failures (0 unexpected) in 0.022 (0.025) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.036 (0.036) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.110 (0.110) seconds
-	 Executed 6 tests, with 0 failures (0 unexpected) in 0.005 (0.005) seconds
-	 Executed 5 tests, with 0 failures (0 unexpected) in 5.241 (5.243) seconds
-	 Executed 15 tests, with 0 failures (0 unexpected) in 6.157 (6.163) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 2.974 (2.976) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.005 (0.006) seconds
-	 Executed 18 tests, with 0 failures (0 unexpected) in 15.878 (15.885) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.503 (0.504) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.139 (0.140) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 38.345 (38.348) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 12.683 (12.685) seconds
+	 Executed 125 tests, with 0 failures (0 unexpected) in 217.038 (217.072) seconds
+Test Suite 'All tests' passed at 2026-11-25 08:31:40.169.
+	 Executed 125 tests, with 0 failures (0 unexpected) in 217.038 (217.076) seconds
+Test Suite 'All tests' started at 2026-11-25 08:31:40.779.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.135 (0.137) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 2.031 (2.033) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.116 (0.117) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.054 (0.055) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.286 (0.287) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.028 (0.030) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.182 (0.185) seconds
+	 Executed 49 tests, with 0 failures (0 unexpected) in 2.844 (2.858) seconds
+Test Suite 'All tests' passed at 2026-11-25 08:31:43.639.
+	 Executed 49 tests, with 0 failures (0 unexpected) in 2.844 (2.860) seconds
+Test Suite 'All tests' started at 2026-11-25 08:31:43.914.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 7.076 (7.077) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 3.083 (3.084) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.134 (0.134) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.069 (0.070) seconds
+	 Executed 12 tests, with 0 failures (0 unexpected) in 0.643 (0.646) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.849 (0.851) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 7.867 (7.871) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.631 (1.631) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.155 (0.156) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.041 (0.041) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.352 (0.353) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.009 (0.010) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.539 (0.539) seconds
+	 Executed 14 tests, with 0 failures (0 unexpected) in 45.741 (45.748) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 7.953 (7.956) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 28.611 (28.615) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.949 (0.949) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.492 (0.494) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.071 (0.072) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 16.946 (16.948) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 2.059 (2.063) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.099 (0.100) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.056 (0.057) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 3.027 (3.029) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 12.389 (12.391) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.675 (0.678) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 1.003 (1.003) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 5.066 (5.067) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.053 (0.054) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.019 (0.021) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.062 (0.062) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.152 (0.153) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.006 (0.007) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 5.193 (5.196) seconds
+	 Executed 15 tests, with 0 failures (0 unexpected) in 7.553 (7.558) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 3.105 (3.107) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.004 (0.004) seconds
+	 Executed 18 tests, with 0 failures (0 unexpected) in 15.723 (15.730) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.428 (0.429) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.134 (0.135) seconds
 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.393 (0.394) seconds
-	 Executed 6 tests, with 0 failures (0 unexpected) in 0.011 (0.013) seconds
-	 Executed 7 tests, with 0 failures (0 unexpected) in 0.063 (0.064) seconds
-	 Executed 9 tests, with 0 failures (0 unexpected) in 1.204 (1.206) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.045 (0.045) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.346 (0.347) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.007 (0.009) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.094 (0.095) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 1.176 (1.178) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.047 (0.048) seconds
 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.002 (0.002) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.313 (0.314) seconds
-	 Executed 7 tests, with 0 failures (0 unexpected) in 0.691 (0.693) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.234 (0.235) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.808 (0.810) seconds
 	 Executed 7 tests, with 0 failures (0 unexpected) in 0.004 (0.006) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.089 (0.089) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.044 (0.045) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.057 (0.058) seconds
-	 Executed 5 tests, with 0 failures (0 unexpected) in 0.080 (0.081) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.042 (0.042) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.018 (0.018) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.592 (0.593) seconds
-	 Executed 10 tests, with 0 failures (0 unexpected) in 6.518 (6.522) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.099 (0.100) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.044 (0.044) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.058 (0.059) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.086 (0.087) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.040 (0.041) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.021 (0.022) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.580 (0.581) seconds
+	 Executed 10 tests, with 0 failures (0 unexpected) in 6.621 (6.626) seconds
 	 Executed 3 tests, with 0 failures (0 unexpected) in 0.358 (0.359) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.143 (0.144) seconds
-	 Executed 9 tests, with 0 failures (0 unexpected) in 9.421 (9.422) seconds
-	 Executed 9 tests, with 0 failures (0 unexpected) in 0.333 (0.335) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 4.108 (4.109) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.299 (0.299) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.171 (0.172) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 10.734 (10.736) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.597 (0.600) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 3.536 (3.537) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.317 (0.317) seconds
 /Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testDevUninstallKeepsTheReleaseCLILink] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
-Test Case '-[WhoReadEngineTests.R2ScriptsTests testDevUninstallKeepsTheReleaseCLILink]' skipped (0.003 seconds).
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testDevUninstallKeepsTheReleaseCLILink]' skipped (0.002 seconds).
 /Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testDevUninstallPurgeRemovesNothingWhileTheExtensionIsActive] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
 Test Case '-[WhoReadEngineTests.R2ScriptsTests testDevUninstallPurgeRemovesNothingWhileTheExtensionIsActive]' skipped (0.001 seconds).
 /Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testUninstallProceedsWhenNoExtensionIsActive] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
 Test Case '-[WhoReadEngineTests.R2ScriptsTests testUninstallProceedsWhenNoExtensionIsActive]' skipped (0.001 seconds).
 /Users/runner/work/whoread/whoread/Tests/WhoReadEngineTests/R2ScriptsTests.swift:196: -[WhoReadEngineTests.R2ScriptsTests testUninstallStopsWhenAnExtensionIsActiveAndTheAppIsMissing] : Test skipped - runs the uninstall scripts against stubs; only where none of their paths exist
-Test Case '-[WhoReadEngineTests.R2ScriptsTests testUninstallStopsWhenAnExtensionIsActiveAndTheAppIsMissing]' skipped (0.001 seconds).
-	 Executed 11 tests, with 4 tests skipped and 0 failures (0 unexpected) in 5.690 (5.693) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.136 (0.136) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.146 (0.146) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.127 (0.128) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.726 (0.727) seconds
-	 Executed 5 tests, with 0 failures (0 unexpected) in 0.344 (0.346) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.190 (0.191) seconds
-	 Executed 5 tests, with 0 failures (0 unexpected) in 0.479 (0.480) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.077 (0.078) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.121 (0.122) seconds
-	 Executed 6 tests, with 0 failures (0 unexpected) in 0.387 (0.388) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.189 (0.189) seconds
+Test Case '-[WhoReadEngineTests.R2ScriptsTests testUninstallStopsWhenAnExtensionIsActiveAndTheAppIsMissing]' skipped (0.000 seconds).
+	 Executed 11 tests, with 4 tests skipped and 0 failures (0 unexpected) in 4.849 (4.852) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.175 (0.176) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.210 (0.211) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.163 (0.164) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.735 (0.736) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.391 (0.393) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.239 (0.240) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.601 (0.602) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.094 (0.095) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.160 (0.161) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.480 (0.481) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.200 (0.201) seconds
 	 Executed 2 tests, with 0 failures (0 unexpected) in 0.001 (0.002) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.106 (0.106) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 2.058 (2.059) seconds
-	 Executed 8 tests, with 0 failures (0 unexpected) in 0.811 (0.813) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 2.018 (2.019) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.318 (0.319) seconds
-	 Executed 11 tests, with 0 failures (0 unexpected) in 0.898 (0.900) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.109 (0.110) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.636 (0.636) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 1.483 (1.484) seconds
-	 Executed 9 tests, with 0 failures (0 unexpected) in 0.228 (0.231) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 14.051 (14.052) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.007 (0.009) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 6.936 (6.937) seconds
-	 Executed 5 tests, with 0 failures (0 unexpected) in 0.174 (0.176) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 1.925 (1.926) seconds
-	 Executed 503 tests, with 4 tests skipped and 0 failures (0 unexpected) in 244.475 (244.618) seconds
-Test Suite 'All tests' passed at 2026-11-25 02:33:13.586.
-	 Executed 503 tests, with 4 tests skipped and 0 failures (0 unexpected) in 244.475 (244.621) seconds
-Test Suite 'All tests' started at 2026-11-25 02:33:14.341.
-	 Executed 8 tests, with 0 failures (0 unexpected) in 0.528 (0.530) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.048 (0.049) seconds
-	 Executed 7 tests, with 0 failures (0 unexpected) in 0.147 (0.149) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.106 (0.106) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.027 (0.027) seconds
-	 Executed 13 tests, with 0 failures (0 unexpected) in 0.826 (0.828) seconds
-	 Executed 11 tests, with 0 failures (0 unexpected) in 0.275 (0.277) seconds
-	 Executed 3 tests, with 0 failures (0 unexpected) in 0.074 (0.074) seconds
-	 Executed 2 tests, with 0 failures (0 unexpected) in 0.050 (0.051) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.005 (0.006) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.119 (0.120) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 1.410 (1.411) seconds
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.911 (0.913) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 2.068 (2.069) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.343 (0.344) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 1.046 (1.049) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.125 (0.126) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.631 (0.631) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.683 (1.683) seconds
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.241 (0.244) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 14.151 (14.152) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.004 (0.005) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 8.198 (8.199) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.212 (0.214) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 1.980 (1.981) seconds
+	 Executed 503 tests, with 4 tests skipped and 0 failures (0 unexpected) in 254.613 (254.769) seconds
+Test Suite 'All tests' passed at 2026-11-25 08:35:58.685.
+	 Executed 503 tests, with 4 tests skipped and 0 failures (0 unexpected) in 254.613 (254.771) seconds
+Test Suite 'All tests' started at 2026-11-25 08:35:59.544.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.835 (0.837) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.056 (0.056) seconds
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.195 (0.196) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.128 (0.129) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.039 (0.039) seconds
+	 Executed 13 tests, with 0 failures (0 unexpected) in 1.285 (1.288) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.383 (0.386) seconds
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.108 (0.109) seconds
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.067 (0.067) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.007 (0.008) seconds
 	 Executed 5 tests, with 0 failures (0 unexpected) in 0.012 (0.013) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.110 (0.111) seconds
-	 Executed 5 tests, with 0 failures (0 unexpected) in 0.174 (0.175) seconds
-	 Executed 4 tests, with 0 failures (0 unexpected) in 0.116 (0.117) seconds
-	 Executed 11 tests, with 0 failures (0 unexpected) in 0.304 (0.306) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.126 (0.127) seconds
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.170 (0.171) seconds
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.121 (0.122) seconds
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.343 (0.346) seconds
 
-## e2e-dev-socket: PASS (16 s)
+## e2e-dev-socket: PASS (15 s)
 == status
 == events --agents-only
 == alerts
@@ -187,20 +187,20 @@ Test Suite 'All tests' started at 2026-11-25 02:33:14.341.
 ## xcodegen: PASS (0 s)
 Created project at /Users/runner/work/whoread/whoread/Xcode/WhoRead.xcodeproj
 
-## xcode-build: PASS (92 s)
+## xcode-build: PASS (100 s)
 ** BUILD SUCCEEDED **
 
-## shellcheck: PASS (4 s)
+## shellcheck: PASS (6 s)
 
 ## bash-syntax: PASS (0 s)
 
-## es-stub: PASS (3 s)
+## es-stub: PASS (7 s)
 stub check: 314 declarations type-checked, 75 raw values compared, 0 mismatches
 
-## vm-harness-selftest: PASS (222 s)
-123 passed, 0 failed (files: /private/var/folders/5n/5t77mfb93jd7q8v9s6f0dn0m0000gn/T/whoread-vm-selftest.NrcK5f)
+## vm-harness-selftest: PASS (225 s)
+123 passed, 0 failed (files: /private/var/folders/5n/5t77mfb93jd7q8v9s6f0dn0m0000gn/T/whoread-vm-selftest.RdFYFn)
 
-## app-bundle: PASS (112 s)
+## app-bundle: PASS (148 s)
 /Users/runner/work/whoread/whoread/scripts/dev/xcconfig.sh: line 172: printf: write error: Broken pipe
 == 0 failure(s)
 
@@ -312,7 +312,7 @@ xp_malware_detected
 xp_malware_remediated
 xpc_connect
 
-## install-acceptance: PASS (6 s)
+## install-acceptance: PASS (14 s)
       /usr/local/bin: owner uid 501, mode 775: giving it to root
 PASS  scripts/install.sh
       Building WhoRead (a minute or two)...
@@ -341,7 +341,7 @@ PASS  the user's CLI reaches the daemon
         events:       0 stored (+0 days aggregated), 0 since start, last never
         alerts:       0 unread of 0
         coverage:     68 monitored prefixes, homes /Users/runner
-        eslogger:     68 lines read, 68 events parsed, 0 malformed, schema ["1": 68], kernel drops 0
+        eslogger:     73 lines read, 73 events parsed, 0 malformed, schema ["1": 73], kernel drops 0
 PASS  the user's CLI may not read the recorded history (needs sudo)
 PASS  sudo whoread events
       daemon: reachable (WhoRead 0.1.0, protocol 4)
@@ -350,16 +350,16 @@ PASS  sudo whoread events
 PASS  app self-check: reachable and recognised as the WhoRead app
 PASS  a re-signed copy of the CLI is refused
 PASS  eslogger runs under the daemon
-      PASS  cat reads fake private key recorded in 0.15s, chain: bash(1029) → hosted-compute-agent(1042) → Runner.Listener(2711) → Runner.Worker(2848) → bash(3075) → bash(3076) → bash(57178) → sudo(57697) → bash(57698) → sudo(57736) → cat(57737) (the ancestry above bash(1029) is unknown: it was running before the daemon started)
-      PASS  python3 reads fake credentials recorded in 0.16s, chain: bash(1029) → hosted-compute-agent(1042) → Runner.Listener(2711) → Runner.Worker(2848) → bash(3075) → bash(3076) → bash(57178) → sudo(57697) → bash(57698) → sudo(57756) → Python(57757) (the ancestry above bash(1029) is unknown: it was running before the daemon started)
-      PASS  node reads fake private key recorded in 0.02s, chain: bash(1029) → hosted-compute-agent(1042) → Runner.Listener(2711) → Runner.Worker(2848) → bash(3075) → bash(3076) → bash(57178) → sudo(57697) → bash(57698) → sudo(57780) → node(57781) (the ancestry above bash(1029) is unknown: it was running before the daemon started)
-      PASS  cat reads .env in a project root named in NFD recorded in 0.02s, chain: bash(1029) → hosted-compute-agent(1042) → Runner.Listener(2711) → Runner.Worker(2848) → bash(3075) → bash(3076) → bash(57178) → sudo(57697) → bash(57698) → sudo(57802) → cat(57803) (the ancestry above bash(1029) is unknown: it was running before the daemon started)
-      PASS  python3 writes fake notes through mmap recorded in 0.06s, chain: bash(1029) → hosted-compute-agent(1042) → Runner.Listener(2711) → Runner.Worker(2848) → bash(3075) → bash(3076) → bash(57178) → sudo(57697) → bash(57698) → sudo(57822) → Python(57823) (the ancestry above bash(1029) is unknown: it was running before the daemon started)
+      PASS  cat reads fake private key recorded in 0.07s, chain: bash(999) → hosted-compute-agent(1011) → Runner.Listener(4511) → Runner.Worker(4516) → bash(4941) → bash(4942) → bash(62470) → sudo(62999) → bash(63000) → sudo(63040) → cat(63042) (the ancestry above bash(999) is unknown: it was running before the daemon started)
+      PASS  python3 reads fake credentials recorded in 0.07s, chain: bash(999) → hosted-compute-agent(1011) → Runner.Listener(4511) → Runner.Worker(4516) → bash(4941) → bash(4942) → bash(62470) → sudo(62999) → bash(63000) → sudo(63054) → Python(63057) (the ancestry above bash(999) is unknown: it was running before the daemon started)
+      PASS  node reads fake private key recorded in 0.05s, chain: bash(999) → hosted-compute-agent(1011) → Runner.Listener(4511) → Runner.Worker(4516) → bash(4941) → bash(4942) → bash(62470) → sudo(62999) → bash(63000) → sudo(63075) → node(63080) (the ancestry above bash(999) is unknown: it was running before the daemon started)
+      PASS  cat reads .env in a project root named in NFD recorded in 0.49s, chain: bash(999) → hosted-compute-agent(1011) → Runner.Listener(4511) → Runner.Worker(4516) → bash(4941) → bash(4942) → bash(62470) → sudo(62999) → bash(63000) → sudo(63219) → cat(63223) (the ancestry above bash(999) is unknown: it was running before the daemon started)
+      PASS  python3 writes fake notes through mmap recorded in 0.52s, chain: bash(999) → hosted-compute-agent(1011) → Runner.Listener(4511) → Runner.Worker(4516) → bash(4941) → bash(4942) → bash(62470) → sudo(62999) → bash(63000) → sudo(63322) → Python(63326) (the ancestry above bash(999) is unknown: it was running before the daemon started)
       PASS  Spotlight read recorded and folded (hidden without --all)
       PASS  CLI query
-      exported 23 events to /tmp/whoread-m2.bdrXGT/e.json
+      exported 23 events to /tmp/whoread-m2.gpNhlH/e.json
       PASS  export JSON
-      exported 23 events to /tmp/whoread-m2.bdrXGT/e.csv
+      exported 23 events to /tmp/whoread-m2.gpNhlH/e.csv
       PASS  export CSV
       9 passed, 0 failed
 PASS  acceptance-m2: 9 passed
