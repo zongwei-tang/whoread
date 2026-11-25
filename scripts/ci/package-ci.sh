@@ -36,7 +36,7 @@ stage() {  # NAME FILTER COMMAND...
   return $rc
 }
 
-if stage make-pkg "^== |^Package:|error|Accepted|Invalid|rejected|accepted|source=|^notarization:|\"status\"" "$ROOT/scripts/release/make-pkg.sh" "$OUT"; then
+if stage make-pkg "^== |^Package:|error|Accepted|Invalid|rejected|accepted|source=|^notarization:|\"status\"|^earlier submissions|^  (createdDate|id|status):" "$ROOT/scripts/release/make-pkg.sh" "$OUT"; then
   PKG="$(find "$OUT" -maxdepth 1 -name 'WhoRead-*.pkg' | head -1)"
   WHOREAD_CI_PKG="$PKG" stage pkg-acceptance "^(PASS|FAIL|SKIP|INCOMPLETE)|passed,|^      " \
     bash "$ROOT/scripts/ci/install-acceptance.sh"

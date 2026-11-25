@@ -18,6 +18,12 @@ notarized:
 with its key), `WHOREAD_DEVID_P12_PASSWORD`, `WHOREAD_NOTARY_KEY_P8`, `WHOREAD_NOTARY_KEY_ID`,
 `WHOREAD_NOTARY_ISSUER`.
 
+Apple can keep a team's first notarizations "In Progress" for hours. CI waits 20 minutes; if Apple has not
+finished by then, the run keeps the signed package with `notarization-pending.txt` (the submission id) in the
+artifact and says so in the package report. Once Apple accepts that submission the same file is notarized
+(Gatekeeper finds the ticket online; `xcrun stapler staple WhoRead-*.pkg` attaches it for offline use), and
+each run lists the team's earlier submissions with their status.
+
 Signed with a Developer ID, whoreadd keeps its designated requirement across versions, so its Full Disk
 Access survives updates (`install-dev-daemon.sh` keeps a team signature without entitlements).
 

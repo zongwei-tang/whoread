@@ -12,8 +12,12 @@
 #   WHOREAD_KEYCHAIN   the keychain that holds them (optional)
 # and, to notarize and staple the signed package:
 #   WHOREAD_NOTARY_KEY (path to the App Store Connect API key .p8), WHOREAD_NOTARY_KEY_ID, WHOREAD_NOTARY_ISSUER
-#   WHOREAD_NOTARY_TIMEOUT  how long to wait for Apple (notarytool's --timeout, default 30m). A team's first
-#                           submissions can sit "In Progress" for an hour or more; CI waits longer.
+#   WHOREAD_NOTARY_TIMEOUT  how long to wait for Apple (notarytool's --timeout, default 30m).
+#   WHOREAD_NOTARY_PENDING_OK=1  when Apple has not finished in that time, keep the signed package, write the
+#                           submission id to OUT_DIR/notarization-pending.txt and succeed without stapling. A team's
+#                           first submissions can stay "In Progress" for many hours. Once Apple accepts the
+#                           submission, that very file is notarized: Gatekeeper finds the ticket online, and
+#                           `xcrun stapler staple` can still attach it for offline use.
 #
 # The package carries no payload: everything travels in its scripts folder, and postinstall runs
 # scripts/install-dev-daemon.sh on it, so a package install and scripts/install.sh install the same way
@@ -95,18 +99,28 @@ fi
 
 if [ -n "$PKG_ID" ] && [ -n "${WHOREAD_NOTARY_KEY:-}" ]; then
   echo "== notarize"
+  NOTARY_AUTH=(--key "$WHOREAD_NOTARY_KEY" --key-id "${WHOREAD_NOTARY_KEY_ID:?}" --issuer "${WHOREAD_NOTARY_ISSUER:?}")
+  echo "earlier submissions of this team (newest first):"
+  xcrun notarytool history "${NOTARY_AUTH[@]}" 2>&1 | grep -E 'createdDate|id:|status:' | head -15 | sed 's/^ */  /' || true
   xcrun notarytool submit "$PKG" --key "$WHOREAD_NOTARY_KEY" --key-id "${WHOREAD_NOTARY_KEY_ID:?}" \
     --issuer "${WHOREAD_NOTARY_ISSUER:?}" --wait --timeout "${WHOREAD_NOTARY_TIMEOUT:-30m}" \
     --output-format json > "$WORK/notary.json" || true   # a timeout exits non-zero; the status below decides
   cat "$WORK/notary.json"; echo
-  status="$(plutil -extract status raw -o - "$WORK/notary.json" 2>/dev/null || true)"
-  id="$(plutil -extract id raw -o - "$WORK/notary.json" 2>/dev/null || true)"
+  status="$(sed -n 's/.*"status" *: *"\([^"]*\)".*/\1/p' "$WORK/notary.json" | head -1)"
+  id="$(sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' "$WORK/notary.json" | head -1)"
+  if [ -z "$status" ] && [ -n "$id" ] && [ "${WHOREAD_NOTARY_PENDING_OK:-}" = 1 ]; then
+    echo "notarization: pending, Apple is still processing submission $id (signed package kept, not stapled)"
+    printf '%s\n' "$id" > "$OUT/notarization-pending.txt"
+    echo "Package: $PKG"
+    exit 0
+  fi
   if [ "$status" != Accepted ]; then
     echo "notarization: ${status:-no status} (submission ${id:-?})" >&2
     [ -z "$id" ] || xcrun notarytool log "$id" --key "$WHOREAD_NOTARY_KEY" --key-id "$WHOREAD_NOTARY_KEY_ID" \
       --issuer "$WHOREAD_NOTARY_ISSUER" >&2 || true
     exit 1
   fi
+  echo "notarization: accepted (submission $id)"
   xcrun stapler staple "$PKG"
   xcrun stapler validate "$PKG"
   spctl --assess --type install --verbose=2 "$PKG"
