@@ -12,6 +12,8 @@
 #   WHOREAD_KEYCHAIN   the keychain that holds them (optional)
 # and, to notarize and staple the signed package:
 #   WHOREAD_NOTARY_KEY (path to the App Store Connect API key .p8), WHOREAD_NOTARY_KEY_ID, WHOREAD_NOTARY_ISSUER
+#   WHOREAD_NOTARY_TIMEOUT  how long to wait for Apple (notarytool's --timeout, default 30m). A team's first
+#                           submissions can sit "In Progress" for an hour or more; CI waits longer.
 #
 # The package carries no payload: everything travels in its scripts folder, and postinstall runs
 # scripts/install-dev-daemon.sh on it, so a package install and scripts/install.sh install the same way
@@ -94,11 +96,13 @@ fi
 if [ -n "$PKG_ID" ] && [ -n "${WHOREAD_NOTARY_KEY:-}" ]; then
   echo "== notarize"
   xcrun notarytool submit "$PKG" --key "$WHOREAD_NOTARY_KEY" --key-id "${WHOREAD_NOTARY_KEY_ID:?}" \
-    --issuer "${WHOREAD_NOTARY_ISSUER:?}" --wait --timeout 30m --output-format json > "$WORK/notary.json"
+    --issuer "${WHOREAD_NOTARY_ISSUER:?}" --wait --timeout "${WHOREAD_NOTARY_TIMEOUT:-30m}" \
+    --output-format json > "$WORK/notary.json" || true   # a timeout exits non-zero; the status below decides
+  cat "$WORK/notary.json"; echo
   status="$(plutil -extract status raw -o - "$WORK/notary.json" 2>/dev/null || true)"
+  id="$(plutil -extract id raw -o - "$WORK/notary.json" 2>/dev/null || true)"
   if [ "$status" != Accepted ]; then
-    echo "notarization: ${status:-no status}" >&2
-    id="$(plutil -extract id raw -o - "$WORK/notary.json" 2>/dev/null || true)"
+    echo "notarization: ${status:-no status} (submission ${id:-?})" >&2
     [ -z "$id" ] || xcrun notarytool log "$id" --key "$WHOREAD_NOTARY_KEY" --key-id "$WHOREAD_NOTARY_KEY_ID" \
       --issuer "$WHOREAD_NOTARY_ISSUER" >&2 || true
     exit 1

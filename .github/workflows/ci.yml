@@ -69,7 +69,8 @@ jobs:
   package:
     if: ${{ !github.event.repository.private }}
     runs-on: macos-latest
-    timeout-minutes: 75
+    # Apple can keep a team's first notarizations "In Progress" for an hour or more (WHOREAD_NOTARY_TIMEOUT).
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@v4
       - name: Use the newest installed Xcode
@@ -121,6 +122,7 @@ jobs:
               echo "WHOREAD_NOTARY_KEY=$RUNNER_TEMP/notary.p8"
               echo "WHOREAD_NOTARY_KEY_ID=$NOTARY_KEY_ID"
               echo "WHOREAD_NOTARY_ISSUER=$NOTARY_ISSUER"
+              echo "WHOREAD_NOTARY_TIMEOUT=150m"
             } >> "$GITHUB_ENV"
           else
             echo "no notarization secrets: the package is signed but not notarized"
